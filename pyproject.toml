@@ -1,0 +1,91 @@
+[project]
+name = "invest"
+version = "0.1.0"
+description = "AI-based automated trading system with RL + LLM hybrid architecture"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "young" }]
+
+dependencies = [
+    # Core Trading
+    "ccxt>=4.0.0",
+    "alpaca-py>=0.20.0",
+
+    # AI/ML
+    "stable-baselines3>=2.3.0",
+    "gymnasium>=1.0.0",
+    "torch>=2.2.0",
+    "langchain>=0.2.0",
+    "langgraph>=0.2.0",
+    "langchain-openai>=0.1.0",
+
+    # Data & Analysis
+    "pandas>=2.2.0",
+    "numpy>=2.0.0",
+    "ta>=0.11.0",  # Technical analysis library (pure Python alternative to TA-Lib)
+    "scikit-learn>=1.4.0",
+
+    # Database
+    "sqlalchemy>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+    "alembic>=1.13.0",
+    "supabase>=2.0.0",
+
+    # Monitoring & Dashboard
+    "streamlit>=1.30.0",
+    "plotly>=5.18.0",
+
+    # Utilities
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "httpx>=0.26.0",
+    "aiohttp>=3.9.0",
+    "websockets>=12.0",
+    "rich>=13.7.0",
+    "loguru>=0.7.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.2.0",
+    "mypy>=1.8.0",
+    "pre-commit>=3.6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "config",
+    "core",
+    "ai",
+    "data",
+    "journal",
+    "dashboard",
+    "backtest",
+    "scripts",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
