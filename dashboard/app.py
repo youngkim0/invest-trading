@@ -61,75 +61,121 @@ st.markdown("""
 
 @st.cache_data(ttl=60)
 def fetch_market_data(symbol: str = "BTCUSDT", interval: str = "1h", limit: int = 100):
-    """Fetch real market data from Binance."""
+    """Fetch real market data from multiple sources."""
     import requests
+
+    # Map symbol to CoinGecko ID
+    coingecko_map = {
+        "BTCUSDT": "bitcoin",
+        "ETHUSDT": "ethereum",
+        "BNBUSDT": "binancecoin",
+        "SOLUSDT": "solana",
+        "XRPUSDT": "ripple",
+        "ADAUSDT": "cardano",
+    }
+
+    # Try Binance APIs first
+    urls = [
+        "https://api.binance.us/api/v3/klines",
+        "https://api.binance.com/api/v3/klines",
+    ]
+
+    for url in urls:
+        try:
+            params = {"symbol": symbol, "interval": interval, "limit": limit}
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                df = pd.DataFrame(data, columns=[
+                    "timestamp", "open", "high", "low", "close", "volume",
+                    "close_time", "quote_volume", "trades", "taker_buy_base",
+                    "taker_buy_quote", "ignore"
+                ])
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                for col in ["open", "high", "low", "close", "volume"]:
+                    df[col] = df[col].astype(float)
+                df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+                df.set_index("timestamp", inplace=True)
+                return df
+        except:
+            continue
+
+    # Fallback to CoinGecko for OHLC data
     try:
-        # Try Binance US first, then international
-        urls = [
-            "https://api.binance.us/api/v3/klines",
-            "https://api.binance.com/api/v3/klines",
-        ]
+        coin_id = coingecko_map.get(symbol, "bitcoin")
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc?vs_currency=usd&days=7"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close"])
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df["volume"] = 0.0  # CoinGecko OHLC doesn't include volume
+            df.set_index("timestamp", inplace=True)
+            return df
+    except:
+        pass
 
-        data = None
-        for url in urls:
-            try:
-                params = {"symbol": symbol, "interval": interval, "limit": limit}
-                response = requests.get(url, params=params, timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    break
-            except:
-                continue
-
-        if not data:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(data, columns=[
-            "timestamp", "open", "high", "low", "close", "volume",
-            "close_time", "quote_volume", "trades", "taker_buy_base",
-            "taker_buy_quote", "ignore"
-        ])
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = df[col].astype(float)
-        df = df[["timestamp", "open", "high", "low", "close", "volume"]]
-        df.set_index("timestamp", inplace=True)
-        return df
-    except Exception as e:
-        st.error(f"Market data error: {str(e)}")
-        return pd.DataFrame()
+    return pd.DataFrame()
 
 
 @st.cache_data(ttl=30)
 def fetch_ticker(symbol: str = "BTCUSDT"):
-    """Fetch real ticker data from Binance."""
+    """Fetch real ticker data from multiple sources."""
     import requests
-    try:
-        urls = [
-            "https://api.binance.us/api/v3/ticker/24hr",
-            "https://api.binance.com/api/v3/ticker/24hr",
-        ]
 
-        for url in urls:
-            try:
-                params = {"symbol": symbol}
-                response = requests.get(url, params=params, timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    return {
-                        "symbol": symbol,
-                        "price": float(data["lastPrice"]),
-                        "change_24h": float(data["priceChangePercent"]),
-                        "high_24h": float(data["highPrice"]),
-                        "low_24h": float(data["lowPrice"]),
-                        "volume_24h": float(data["volume"]),
-                        "quote_volume_24h": float(data["quoteVolume"]),
-                    }
-            except:
-                continue
-        return {}
-    except Exception as e:
-        return {}
+    coingecko_map = {
+        "BTCUSDT": "bitcoin",
+        "ETHUSDT": "ethereum",
+        "BNBUSDT": "binancecoin",
+        "SOLUSDT": "solana",
+        "XRPUSDT": "ripple",
+        "ADAUSDT": "cardano",
+    }
+
+    # Try Binance APIs first
+    urls = [
+        "https://api.binance.us/api/v3/ticker/24hr",
+        "https://api.binance.com/api/v3/ticker/24hr",
+    ]
+
+    for url in urls:
+        try:
+            params = {"symbol": symbol}
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "symbol": symbol,
+                    "price": float(data["lastPrice"]),
+                    "change_24h": float(data["priceChangePercent"]),
+                    "high_24h": float(data["highPrice"]),
+                    "low_24h": float(data["lowPrice"]),
+                    "volume_24h": float(data["volume"]),
+                    "quote_volume_24h": float(data["quoteVolume"]),
+                }
+        except:
+            continue
+
+    # Fallback to CoinGecko
+    try:
+        coin_id = coingecko_map.get(symbol, "bitcoin")
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true&include_high_24hr=true&include_low_24hr=true"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json().get(coin_id, {})
+            return {
+                "symbol": symbol,
+                "price": float(data.get("usd", 0)),
+                "change_24h": float(data.get("usd_24h_change", 0)),
+                "high_24h": float(data.get("usd_24h_high", 0) or data.get("usd", 0)),
+                "low_24h": float(data.get("usd_24h_low", 0) or data.get("usd", 0)),
+                "volume_24h": float(data.get("usd_24h_vol", 0)),
+                "quote_volume_24h": float(data.get("usd_24h_vol", 0)),
+            }
+    except:
+        pass
+
+    return {}
 
 
 @st.cache_data(ttl=30)
