@@ -90,18 +90,33 @@ def fetch_multiple_tickers(symbols: list):
         return []
 
 
+def get_supabase():
+    """Get Supabase client - works on both local and Streamlit Cloud."""
+    from supabase import create_client
+
+    # Try Streamlit secrets first, then environment variables
+    if hasattr(st, 'secrets') and 'SUPABASE_URL' in st.secrets:
+        url = st.secrets['SUPABASE_URL']
+        key = st.secrets['SUPABASE_ANON_KEY']
+    else:
+        url = os.environ.get('SUPABASE_URL', '')
+        key = os.environ.get('SUPABASE_ANON_KEY', '')
+
+    if not url or not key:
+        return None
+
+    return create_client(url, key)
+
+
 @st.cache_data(ttl=60)
 def fetch_trades_from_supabase(limit: int = 100):
     """Fetch trade logs from Supabase."""
     try:
-        from data.storage.supabase_client import TradeLogRepository
-        import asyncio
-
-        async def _fetch():
-            repo = TradeLogRepository()
-            return await repo.get_trades(limit=limit)
-
-        return asyncio.run(_fetch())
+        client = get_supabase()
+        if not client:
+            return []
+        result = client.table('trade_logs').select('*').order('entry_time', desc=True).limit(limit).execute()
+        return result.data or []
     except Exception as e:
         st.warning(f"Could not fetch trades: {e}")
         return []
@@ -111,14 +126,11 @@ def fetch_trades_from_supabase(limit: int = 100):
 def fetch_performance_from_supabase(limit: int = 100):
     """Fetch performance snapshots from Supabase."""
     try:
-        from data.storage.supabase_client import PerformanceRepository
-        import asyncio
-
-        async def _fetch():
-            repo = PerformanceRepository()
-            return await repo.get_snapshots(limit=limit)
-
-        return asyncio.run(_fetch())
+        client = get_supabase()
+        if not client:
+            return []
+        result = client.table('performance_snapshots').select('*').order('timestamp', desc=True).limit(limit).execute()
+        return result.data or []
     except Exception as e:
         st.warning(f"Could not fetch performance: {e}")
         return []
@@ -128,14 +140,11 @@ def fetch_performance_from_supabase(limit: int = 100):
 def fetch_signals_from_supabase(limit: int = 50):
     """Fetch trading signals from Supabase."""
     try:
-        from data.storage.supabase_client import SignalRepository
-        import asyncio
-
-        async def _fetch():
-            repo = SignalRepository()
-            return await repo.get_signals(limit=limit)
-
-        return asyncio.run(_fetch())
+        client = get_supabase()
+        if not client:
+            return []
+        result = client.table('signals').select('*').order('timestamp', desc=True).limit(limit).execute()
+        return result.data or []
     except Exception as e:
         st.warning(f"Could not fetch signals: {e}")
         return []
