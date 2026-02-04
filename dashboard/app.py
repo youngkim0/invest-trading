@@ -62,20 +62,48 @@ st.markdown("""
 @st.cache_data(ttl=60)
 def fetch_market_data(symbol: str = "BTCUSDT", interval: str = "1h", limit: int = 100):
     """Fetch real market data from Binance."""
+    import requests
     try:
-        from data.collectors.market_data import get_market_data_sync
-        return get_market_data_sync(symbol, interval, limit)
+        url = "https://api.binance.com/api/v3/klines"
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        df = pd.DataFrame(data, columns=[
+            "timestamp", "open", "high", "low", "close", "volume",
+            "close_time", "quote_volume", "trades", "taker_buy_base",
+            "taker_buy_quote", "ignore"
+        ])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = df[col].astype(float)
+        df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+        df.set_index("timestamp", inplace=True)
+        return df
     except Exception as e:
-        st.warning(f"Could not fetch market data: {e}")
         return pd.DataFrame()
 
 
 @st.cache_data(ttl=30)
 def fetch_ticker(symbol: str = "BTCUSDT"):
     """Fetch real ticker data from Binance."""
+    import requests
     try:
-        from data.collectors.market_data import get_ticker_sync
-        return get_ticker_sync(symbol)
+        url = f"https://api.binance.com/api/v3/ticker/24hr"
+        params = {"symbol": symbol}
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return {
+            "symbol": symbol,
+            "price": float(data["lastPrice"]),
+            "change_24h": float(data["priceChangePercent"]),
+            "high_24h": float(data["highPrice"]),
+            "low_24h": float(data["lowPrice"]),
+            "volume_24h": float(data["volume"]),
+            "quote_volume_24h": float(data["quoteVolume"]),
+        }
     except Exception as e:
         return {}
 
@@ -83,11 +111,16 @@ def fetch_ticker(symbol: str = "BTCUSDT"):
 @st.cache_data(ttl=30)
 def fetch_multiple_tickers(symbols: list):
     """Fetch multiple tickers."""
-    try:
-        from data.collectors.market_data import get_multiple_tickers_sync
-        return get_multiple_tickers_sync(symbols)
-    except Exception as e:
-        return []
+    import requests
+    results = []
+    for symbol in symbols:
+        try:
+            ticker = fetch_ticker.__wrapped__(symbol)  # bypass cache for individual calls
+            if ticker:
+                results.append(ticker)
+        except:
+            pass
+    return results
 
 
 def get_supabase():
