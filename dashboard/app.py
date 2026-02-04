@@ -64,11 +64,25 @@ def fetch_market_data(symbol: str = "BTCUSDT", interval: str = "1h", limit: int 
     """Fetch real market data from Binance."""
     import requests
     try:
-        url = "https://api.binance.com/api/v3/klines"
-        params = {"symbol": symbol, "interval": interval, "limit": limit}
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        # Try Binance US first, then international
+        urls = [
+            "https://api.binance.us/api/v3/klines",
+            "https://api.binance.com/api/v3/klines",
+        ]
+
+        data = None
+        for url in urls:
+            try:
+                params = {"symbol": symbol, "interval": interval, "limit": limit}
+                response = requests.get(url, params=params, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    break
+            except:
+                continue
+
+        if not data:
+            return pd.DataFrame()
 
         df = pd.DataFrame(data, columns=[
             "timestamp", "open", "high", "low", "close", "volume",
@@ -82,6 +96,7 @@ def fetch_market_data(symbol: str = "BTCUSDT", interval: str = "1h", limit: int 
         df.set_index("timestamp", inplace=True)
         return df
     except Exception as e:
+        st.error(f"Market data error: {str(e)}")
         return pd.DataFrame()
 
 
@@ -90,20 +105,29 @@ def fetch_ticker(symbol: str = "BTCUSDT"):
     """Fetch real ticker data from Binance."""
     import requests
     try:
-        url = f"https://api.binance.com/api/v3/ticker/24hr"
-        params = {"symbol": symbol}
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        return {
-            "symbol": symbol,
-            "price": float(data["lastPrice"]),
-            "change_24h": float(data["priceChangePercent"]),
-            "high_24h": float(data["highPrice"]),
-            "low_24h": float(data["lowPrice"]),
-            "volume_24h": float(data["volume"]),
-            "quote_volume_24h": float(data["quoteVolume"]),
-        }
+        urls = [
+            "https://api.binance.us/api/v3/ticker/24hr",
+            "https://api.binance.com/api/v3/ticker/24hr",
+        ]
+
+        for url in urls:
+            try:
+                params = {"symbol": symbol}
+                response = requests.get(url, params=params, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    return {
+                        "symbol": symbol,
+                        "price": float(data["lastPrice"]),
+                        "change_24h": float(data["priceChangePercent"]),
+                        "high_24h": float(data["highPrice"]),
+                        "low_24h": float(data["lowPrice"]),
+                        "volume_24h": float(data["volume"]),
+                        "quote_volume_24h": float(data["quoteVolume"]),
+                    }
+            except:
+                continue
+        return {}
     except Exception as e:
         return {}
 
@@ -115,7 +139,7 @@ def fetch_multiple_tickers(symbols: list):
     results = []
     for symbol in symbols:
         try:
-            ticker = fetch_ticker.__wrapped__(symbol)  # bypass cache for individual calls
+            ticker = fetch_ticker(symbol)
             if ticker:
                 results.append(ticker)
         except:
