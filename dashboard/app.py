@@ -277,9 +277,13 @@ def get_trading_data_from_supabase():
         trades_df = pd.DataFrame(trades_raw)
         trades_df["entry_date"] = pd.to_datetime(trades_df["entry_time"])
         trades_df["exit_date"] = pd.to_datetime(trades_df["exit_time"])
-        trades_df["pnl"] = trades_df["net_pnl"].astype(float) if "net_pnl" in trades_df.columns else 0
-        trades_df["return_pct"] = trades_df["return_pct"].astype(float) / 100 if "return_pct" in trades_df.columns else 0
+        trades_df["exit_price"] = pd.to_numeric(trades_df.get("exit_price"), errors="coerce")
+        trades_df["entry_price"] = pd.to_numeric(trades_df.get("entry_price"), errors="coerce")
+        trades_df["pnl"] = pd.to_numeric(trades_df.get("net_pnl"), errors="coerce").fillna(0)
+        trades_df["return_pct"] = pd.to_numeric(trades_df.get("return_pct"), errors="coerce").fillna(0) / 100
         trades_df["strategy"] = trades_df.get("strategy_name", "hybrid_v1")
+        # Mark open vs closed positions
+        trades_df["status"] = trades_df["exit_time"].apply(lambda x: "OPEN" if pd.isna(x) else "CLOSED")
     else:
         # Fallback to sample data
         return get_sample_trading_data()
@@ -844,12 +848,14 @@ def show_trades(trades_df: pd.DataFrame):
     st.markdown(f"**Showing {len(filtered_df)} trades**")
 
     # Display
-    display_df = filtered_df[["symbol", "side", "strategy", "entry_date", "exit_date", "entry_price", "exit_price", "pnl", "return_pct"]].copy()
+    display_cols = ["symbol", "side", "strategy", "entry_date", "status", "entry_price", "exit_price", "pnl", "return_pct"]
+    available_cols = [c for c in display_cols if c in filtered_df.columns]
+    display_df = filtered_df[available_cols].copy()
     display_df = display_df.sort_values("entry_date", ascending=False)
-    display_df["entry_price"] = display_df["entry_price"].apply(lambda x: f"${x:,.2f}")
-    display_df["exit_price"] = display_df["exit_price"].apply(lambda x: f"${x:,.2f}")
-    display_df["pnl"] = display_df["pnl"].apply(lambda x: f"${x:,.2f}")
-    display_df["return_pct"] = display_df["return_pct"].apply(lambda x: f"{x:.2%}")
+    display_df["entry_price"] = display_df["entry_price"].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else "-")
+    display_df["exit_price"] = display_df["exit_price"].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else "-")
+    display_df["pnl"] = display_df["pnl"].apply(lambda x: f"${x:,.2f}" if x != 0 else "-")
+    display_df["return_pct"] = display_df["return_pct"].apply(lambda x: f"{x:.2%}" if x != 0 else "-")
 
     st.dataframe(display_df, use_container_width=True, height=500)
 
