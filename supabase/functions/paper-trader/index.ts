@@ -13,7 +13,7 @@ const CONFIG = {
   maxPositionPct: 0.2,
   stopLossPct: 0.02,
   takeProfitPct: 0.04,
-  minConfidence: 0.65,
+  minConfidence: 0.5,
   rsiOversold: 30,
   rsiOverbought: 70,
 };
@@ -196,12 +196,13 @@ function generateSignal(candles: Candle[]): Signal {
   let signal: string;
   let confidence: number;
 
-  if (totalScore >= 2) {
-    signal = totalScore >= 3.5 ? "strong_buy" : "buy";
-    confidence = Math.min(0.9, 0.6 + (totalScore / maxScore) * 0.3);
-  } else if (totalScore <= -2) {
-    signal = totalScore <= -3.5 ? "strong_sell" : "sell";
-    confidence = Math.min(0.9, 0.6 + (Math.abs(totalScore) / maxScore) * 0.3);
+  // More aggressive thresholds for paper trading
+  if (totalScore >= 0.5) {
+    signal = totalScore >= 2 ? "strong_buy" : "buy";
+    confidence = Math.min(0.9, 0.55 + (totalScore / maxScore) * 0.35);
+  } else if (totalScore <= -0.5) {
+    signal = totalScore <= -2 ? "strong_sell" : "sell";
+    confidence = Math.min(0.9, 0.55 + (Math.abs(totalScore) / maxScore) * 0.35);
   } else {
     signal = "hold";
     confidence = 0.5;
