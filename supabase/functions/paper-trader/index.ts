@@ -5,7 +5,16 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT"];
-const BINANCE_API = "https://api.binance.com/api/v3";
+const BINANCE_APIS = [
+  "https://api.binance.us/api/v3",
+  "https://api.binance.com/api/v3",
+];
+
+// CoinGecko mapping for fallback
+const COINGECKO_MAP: Record<string, string> = {
+  "BTCUSDT": "bitcoin",
+  "ETHUSDT": "ethereum",
+};
 
 // Trading configuration
 const CONFIG = {
@@ -43,32 +52,89 @@ interface Position {
   position_id: string;
 }
 
-// Fetch OHLCV data from Binance
+// Fetch OHLCV data with fallback sources
 async function fetchKlines(symbol: string, interval = "1h", limit = 100): Promise<Candle[]> {
-  const url = `${BINANCE_API}/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-  const response = await fetch(url);
-  const data = await response.json();
+  // Try Binance APIs first
+  for (const baseUrl of BINANCE_APIS) {
+    try {
+      const url = `${baseUrl}/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+      const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      if (response.ok) {
+        const data = await response.json();
+        return data.map((d: any[]) => ({
+          timestamp: d[0],
+          open: parseFloat(d[1]),
+          high: parseFloat(d[2]),
+          low: parseFloat(d[3]),
+          close: parseFloat(d[4]),
+          volume: parseFloat(d[5]),
+        }));
+      }
+    } catch (e) {
+      console.log(`Binance API failed: ${baseUrl}, trying next...`);
+    }
+  }
 
-  return data.map((d: any[]) => ({
-    timestamp: d[0],
-    open: parseFloat(d[1]),
-    high: parseFloat(d[2]),
-    low: parseFloat(d[3]),
-    close: parseFloat(d[4]),
-    volume: parseFloat(d[5]),
-  }));
+  // Fallback to CoinGecko
+  try {
+    const coinId = COINGECKO_MAP[symbol] || "bitcoin";
+    const url = `https://api.coingecko.com/api/v3/coins/${coinId}/ohlc?vs_currency=usd&days=7`;
+    const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    if (response.ok) {
+      const data = await response.json();
+      return data.map((d: number[]) => ({
+        timestamp: d[0],
+        open: d[1],
+        high: d[2],
+        low: d[3],
+        close: d[4],
+        volume: 0,
+      }));
+    }
+  } catch (e) {
+    console.log(`CoinGecko API failed: ${e}`);
+  }
+
+  throw new Error(`Failed to fetch klines for ${symbol}`);
 }
 
-// Fetch current ticker
+// Fetch current ticker with fallback sources
 async function fetchTicker(symbol: string): Promise<{ price: number; change24h: number }> {
-  const url = `${BINANCE_API}/ticker/24hr?symbol=${symbol}`;
-  const response = await fetch(url);
-  const data = await response.json();
+  // Try Binance APIs first
+  for (const baseUrl of BINANCE_APIS) {
+    try {
+      const url = `${baseUrl}/ticker/24hr?symbol=${symbol}`;
+      const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      if (response.ok) {
+        const data = await response.json();
+        return {
+          price: parseFloat(data.lastPrice),
+          change24h: parseFloat(data.priceChangePercent),
+        };
+      }
+    } catch (e) {
+      console.log(`Binance ticker failed: ${baseUrl}, trying next...`);
+    }
+  }
 
-  return {
-    price: parseFloat(data.lastPrice),
-    change24h: parseFloat(data.priceChangePercent),
-  };
+  // Fallback to CoinGecko
+  try {
+    const coinId = COINGECKO_MAP[symbol] || "bitcoin";
+    const url = `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd&include_24hr_change=true`;
+    const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    if (response.ok) {
+      const data = await response.json();
+      const coinData = data[coinId];
+      return {
+        price: coinData.usd,
+        change24h: coinData.usd_24h_change || 0,
+      };
+    }
+  } catch (e) {
+    console.log(`CoinGecko ticker failed: ${e}`);
+  }
+
+  throw new Error(`Failed to fetch ticker for ${symbol}`);
 }
 
 // Calculate RSI
