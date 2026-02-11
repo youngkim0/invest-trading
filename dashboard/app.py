@@ -2,8 +2,12 @@
 
 import asyncio
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+# Korea Standard Time
+KST = ZoneInfo("Asia/Seoul")
 
 import numpy as np
 import pandas as pd
@@ -262,7 +266,8 @@ def get_trading_data_from_supabase():
     # Convert to DataFrames
     if perf_raw:
         equity_df = pd.DataFrame(perf_raw)
-        equity_df["date"] = pd.to_datetime(equity_df["timestamp"])
+        # Convert to Korea Standard Time (KST = UTC+9)
+        equity_df["date"] = pd.to_datetime(equity_df["timestamp"], utc=True).dt.tz_convert(KST)
         equity_df["equity"] = equity_df["total_equity"].astype(float)
         if "daily_pnl" in equity_df.columns and "total_equity" in equity_df.columns:
             equity_df["daily_return"] = equity_df["daily_pnl"].astype(float) / equity_df["total_equity"].astype(float)
@@ -275,8 +280,9 @@ def get_trading_data_from_supabase():
 
     if trades_raw:
         trades_df = pd.DataFrame(trades_raw)
-        trades_df["entry_date"] = pd.to_datetime(trades_df["entry_time"])
-        trades_df["exit_date"] = pd.to_datetime(trades_df["exit_time"])
+        # Convert timestamps to Korea Standard Time (KST = UTC+9)
+        trades_df["entry_date"] = pd.to_datetime(trades_df["entry_time"], utc=True).dt.tz_convert(KST)
+        trades_df["exit_date"] = pd.to_datetime(trades_df["exit_time"], utc=True).dt.tz_convert(KST)
         trades_df["exit_price"] = pd.to_numeric(trades_df.get("exit_price"), errors="coerce")
         trades_df["entry_price"] = pd.to_numeric(trades_df.get("entry_price"), errors="coerce")
         trades_df["pnl"] = pd.to_numeric(trades_df.get("net_pnl"), errors="coerce").fillna(0)
@@ -377,7 +383,7 @@ def main():
             )
 
         st.markdown("---")
-        st.caption("Last updated: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        st.caption("Last updated: " + datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S KST"))
 
         # Auto-refresh option
         if st.checkbox("Auto-refresh (30s)", value=False):
