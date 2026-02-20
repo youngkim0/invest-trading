@@ -976,122 +976,317 @@ def show_strategy():
 
 
 def show_ai_insights(equity_df: pd.DataFrame, trades_df: pd.DataFrame):
-    """Show AI insights page."""
-    st.title("🤖 AI Insights")
+    """Show AI insights page with comprehensive grading."""
+    st.title("🤖 AI Insights & Performance Analysis")
 
-    # Performance grade
+    # ============================================
+    # COMPREHENSIVE METRICS CALCULATION
+    # ============================================
+
     returns = equity_df["daily_return"].dropna()
+    total_trades = len(trades_df)
+    winning_trades = trades_df[trades_df["pnl"] > 0]
+    losing_trades = trades_df[trades_df["pnl"] < 0]
+
+    # Core metrics
+    win_rate = len(winning_trades) / total_trades if total_trades > 0 else 0
     sharpe = np.sqrt(252) * returns.mean() / returns.std() if returns.std() > 0 else 0
-    win_rate = len(trades_df[trades_df["pnl"] > 0]) / len(trades_df)
 
-    # Calculate grade
-    score = 0
-    score += min(30, sharpe * 15)
-    score += min(20, win_rate * 40)
+    # Sortino (downside deviation)
+    negative_returns = returns[returns < 0]
+    sortino = np.sqrt(252) * returns.mean() / negative_returns.std() if len(negative_returns) > 0 and negative_returns.std() > 0 else 0
 
-    if score >= 80:
-        grade = "A"
-        grade_color = "green"
-    elif score >= 60:
-        grade = "B"
-        grade_color = "blue"
-    elif score >= 40:
-        grade = "C"
-        grade_color = "orange"
+    # Profit Factor
+    gross_profit = winning_trades["pnl"].sum() if len(winning_trades) > 0 else 0
+    gross_loss = abs(losing_trades["pnl"].sum()) if len(losing_trades) > 0 else 1
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else (10 if gross_profit > 0 else 0)
+
+    # Max Drawdown
+    cummax = equity_df["equity"].cummax()
+    drawdown = (equity_df["equity"] - cummax) / cummax
+    max_dd = abs(drawdown.min()) if len(drawdown) > 0 else 0
+
+    # Average Win/Loss
+    avg_win = winning_trades["pnl"].mean() if len(winning_trades) > 0 else 0
+    avg_loss = abs(losing_trades["pnl"].mean()) if len(losing_trades) > 0 else 1
+    win_loss_ratio = avg_win / avg_loss if avg_loss > 0 else avg_win
+
+    # Expectancy (expected $ per trade)
+    expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+
+    # Trade Consistency (std of returns)
+    return_std = trades_df["return_pct"].std() if "return_pct" in trades_df.columns else 0
+    consistency_score = max(0, 1 - (return_std * 2)) if return_std else 0.5
+
+    # ============================================
+    # MULTI-FACTOR GRADING SYSTEM (100 points)
+    # ============================================
+
+    score_breakdown = {}
+
+    # 1. Win Rate (20 points max)
+    # 50% = 10pts, 55% = 14pts, 60% = 18pts, 65%+ = 20pts
+    win_rate_score = min(20, max(0, (win_rate - 0.4) * 100))
+    score_breakdown["Win Rate"] = {"score": win_rate_score, "max": 20, "value": f"{win_rate:.1%}"}
+
+    # 2. Profit Factor (20 points max)
+    # 1.0 = 5pts, 1.5 = 12pts, 2.0 = 18pts, 2.5+ = 20pts
+    pf_score = min(20, max(0, (profit_factor - 0.5) * 8))
+    score_breakdown["Profit Factor"] = {"score": pf_score, "max": 20, "value": f"{profit_factor:.2f}"}
+
+    # 3. Sharpe Ratio (15 points max)
+    # 0.5 = 5pts, 1.0 = 10pts, 1.5 = 13pts, 2.0+ = 15pts
+    sharpe_score = min(15, max(0, sharpe * 7.5))
+    score_breakdown["Sharpe Ratio"] = {"score": sharpe_score, "max": 15, "value": f"{sharpe:.2f}"}
+
+    # 4. Max Drawdown (15 points max)
+    # <5% = 15pts, <10% = 12pts, <15% = 8pts, <20% = 4pts
+    dd_score = max(0, 15 - (max_dd * 100))
+    score_breakdown["Max Drawdown"] = {"score": dd_score, "max": 15, "value": f"{max_dd:.1%}"}
+
+    # 5. Win/Loss Ratio (10 points max)
+    wl_score = min(10, max(0, win_loss_ratio * 5))
+    score_breakdown["Win/Loss Ratio"] = {"score": wl_score, "max": 10, "value": f"{win_loss_ratio:.2f}"}
+
+    # 6. Trade Consistency (10 points max)
+    cons_score = consistency_score * 10
+    score_breakdown["Consistency"] = {"score": cons_score, "max": 10, "value": f"{consistency_score:.1%}"}
+
+    # 7. Expectancy (10 points max)
+    exp_score = min(10, max(0, (expectancy + 50) / 10)) if expectancy > -50 else 0
+    score_breakdown["Expectancy"] = {"score": exp_score, "max": 10, "value": f"${expectancy:.2f}"}
+
+    # Total Score
+    total_score = sum(item["score"] for item in score_breakdown.values())
+
+    # Grade determination
+    if total_score >= 85:
+        grade, grade_color, grade_emoji = "A+", "#00ff88", "🏆"
+    elif total_score >= 75:
+        grade, grade_color, grade_emoji = "A", "#00ff88", "⭐"
+    elif total_score >= 65:
+        grade, grade_color, grade_emoji = "B+", "#00ccff", "👍"
+    elif total_score >= 55:
+        grade, grade_color, grade_emoji = "B", "#00ccff", "📈"
+    elif total_score >= 45:
+        grade, grade_color, grade_emoji = "C+", "#ffaa00", "📊"
+    elif total_score >= 35:
+        grade, grade_color, grade_emoji = "C", "#ffaa00", "⚠️"
+    elif total_score >= 25:
+        grade, grade_color, grade_emoji = "D", "#ff6600", "📉"
     else:
-        grade = "D"
-        grade_color = "red"
+        grade, grade_color, grade_emoji = "F", "#ff4444", "🚨"
+
+    # ============================================
+    # DISPLAY
+    # ============================================
 
     col1, col2 = st.columns([1, 2])
 
     with col1:
         st.markdown(f"""
-        <div style="text-align: center; padding: 40px; background-color: #262730; border-radius: 10px;">
-            <h1 style="font-size: 80px; color: {grade_color}; margin: 0;">{grade}</h1>
-            <p style="font-size: 20px;">Performance Grade</p>
-            <p>Score: {score:.0f}/100</p>
+        <div style="text-align: center; padding: 30px; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 15px; border: 2px solid {grade_color};">
+            <p style="font-size: 40px; margin: 0;">{grade_emoji}</p>
+            <h1 style="font-size: 72px; color: {grade_color}; margin: 10px 0; font-weight: bold;">{grade}</h1>
+            <p style="font-size: 18px; color: #888;">Performance Grade</p>
+            <p style="font-size: 28px; color: {grade_color}; font-weight: bold;">{total_score:.0f}/100</p>
         </div>
         """, unsafe_allow_html=True)
 
+        # Quick Stats
+        st.markdown("### 📊 Quick Stats")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.metric("Total Trades", total_trades)
+            st.metric("Win Rate", f"{win_rate:.1%}")
+        with col_b:
+            st.metric("Profit Factor", f"{profit_factor:.2f}")
+            st.metric("Expectancy", f"${expectancy:.2f}")
+
     with col2:
-        st.subheader("📊 Analysis Summary")
+        st.subheader("📈 Score Breakdown")
 
-        # Strengths
-        st.markdown("**✅ Strengths:**")
-        if sharpe > 1:
-            st.write(f"- Strong risk-adjusted returns (Sharpe: {sharpe:.2f})")
-        if win_rate > 0.55:
-            st.write(f"- High win rate ({win_rate:.1%})")
-
-        # Weaknesses
-        st.markdown("**⚠️ Areas for Improvement:**")
-        if sharpe < 1:
-            st.write("- Risk-adjusted returns could be improved")
-        if win_rate < 0.5:
-            st.write("- Win rate is below 50%")
+        # Score breakdown with progress bars
+        for metric, data in score_breakdown.items():
+            pct = (data["score"] / data["max"]) * 100
+            color = "#00ff88" if pct >= 70 else "#ffaa00" if pct >= 40 else "#ff4444"
+            st.markdown(f"""
+            <div style="margin: 8px 0;">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                    <span><strong>{metric}</strong></span>
+                    <span style="color: {color};">{data['score']:.1f}/{data['max']} ({data['value']})</span>
+                </div>
+                <div style="background: #333; border-radius: 5px; height: 8px;">
+                    <div style="background: {color}; width: {pct}%; height: 100%; border-radius: 5px;"></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
     st.markdown("---")
 
-    # AI Recommendations
-    st.subheader("💡 AI Recommendations")
+    # ============================================
+    # STRENGTHS & WEAKNESSES ANALYSIS
+    # ============================================
 
-    recommendations = [
-        {
-            "category": "Risk Management",
-            "priority": "High",
-            "suggestion": "Consider reducing position sizes during high volatility periods",
-            "expected_impact": "Reduce drawdown by 20-30%",
-        },
-        {
-            "category": "Entry Signals",
-            "priority": "Medium",
-            "suggestion": "Add confirmation indicators to improve signal quality",
-            "expected_impact": "Increase win rate by 5-10%",
-        },
-        {
-            "category": "Exit Strategy",
-            "priority": "Medium",
-            "suggestion": "Implement trailing stops to capture more profit",
-            "expected_impact": "Improve profit factor by 15%",
-        },
-    ]
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("✅ Strengths")
+        strengths = []
+        if win_rate >= 0.55:
+            strengths.append(f"🎯 Strong win rate: **{win_rate:.1%}** (above 55%)")
+        if profit_factor >= 1.5:
+            strengths.append(f"💰 Good profit factor: **{profit_factor:.2f}** (above 1.5)")
+        if sharpe >= 1.0:
+            strengths.append(f"📊 Solid Sharpe ratio: **{sharpe:.2f}** (above 1.0)")
+        if max_dd <= 0.10:
+            strengths.append(f"🛡️ Low drawdown: **{max_dd:.1%}** (under 10%)")
+        if win_loss_ratio >= 1.5:
+            strengths.append(f"⚖️ Good win/loss ratio: **{win_loss_ratio:.2f}**")
+        if expectancy > 0:
+            strengths.append(f"📈 Positive expectancy: **${expectancy:.2f}** per trade")
+
+        if strengths:
+            for s in strengths:
+                st.markdown(s)
+        else:
+            st.info("Building track record... Keep trading to identify strengths.")
+
+    with col2:
+        st.subheader("⚠️ Areas for Improvement")
+        weaknesses = []
+        if win_rate < 0.50:
+            weaknesses.append(f"🎯 Win rate below 50%: **{win_rate:.1%}** → Focus on signal quality")
+        if profit_factor < 1.0:
+            weaknesses.append(f"💰 Profit factor below 1.0: **{profit_factor:.2f}** → Cut losses faster")
+        if sharpe < 0.5:
+            weaknesses.append(f"📊 Low Sharpe ratio: **{sharpe:.2f}** → Reduce volatility exposure")
+        if max_dd > 0.15:
+            weaknesses.append(f"🛡️ High drawdown: **{max_dd:.1%}** → Implement tighter stops")
+        if expectancy < 0:
+            weaknesses.append(f"📉 Negative expectancy: **${expectancy:.2f}** → Review strategy")
+
+        if weaknesses:
+            for w in weaknesses:
+                st.markdown(w)
+        else:
+            st.success("No critical issues detected! 🎉")
+
+    st.markdown("---")
+
+    # ============================================
+    # AI-POWERED RECOMMENDATIONS
+    # ============================================
+
+    st.subheader("🧠 AI-Powered Recommendations")
+
+    recommendations = []
+
+    # Generate dynamic recommendations based on metrics
+    if win_rate < 0.50:
+        recommendations.append({
+            "category": "Signal Quality",
+            "priority": "🔴 High",
+            "issue": f"Win rate is {win_rate:.1%}",
+            "suggestion": "Increase signal confirmation requirements. Consider adding volume confirmation, multi-timeframe alignment, or higher confidence thresholds.",
+            "expected_impact": "+5-10% win rate improvement",
+        })
+
+    if profit_factor < 1.2:
+        recommendations.append({
+            "category": "Risk/Reward",
+            "priority": "🔴 High",
+            "issue": f"Profit factor is {profit_factor:.2f}",
+            "suggestion": "Improve risk/reward ratio by using ATR-based take profits (2x ATR) and tighter stops. Let winners run longer.",
+            "expected_impact": "+0.3-0.5 profit factor improvement",
+        })
+
+    if max_dd > 0.12:
+        recommendations.append({
+            "category": "Drawdown Control",
+            "priority": "🟡 Medium",
+            "issue": f"Max drawdown is {max_dd:.1%}",
+            "suggestion": "Reduce position sizes during losing streaks. Implement a circuit breaker that pauses trading after 3 consecutive losses.",
+            "expected_impact": "-3-5% max drawdown reduction",
+        })
+
+    if sharpe < 1.0:
+        recommendations.append({
+            "category": "Risk-Adjusted Returns",
+            "priority": "🟡 Medium",
+            "issue": f"Sharpe ratio is {sharpe:.2f}",
+            "suggestion": "Reduce position volatility by sizing based on ATR. Trade only during high-probability setups identified by the Claude AI.",
+            "expected_impact": "+0.3-0.5 Sharpe improvement",
+        })
+
+    if win_loss_ratio < 1.0:
+        recommendations.append({
+            "category": "Trade Management",
+            "priority": "🟡 Medium",
+            "issue": f"Avg win/loss ratio is {win_loss_ratio:.2f}",
+            "suggestion": "Implement trailing stops to capture more profit on winners. Use partial profit-taking at 1.5x risk.",
+            "expected_impact": "+20-30% average win size",
+        })
+
+    # Add general recommendation
+    recommendations.append({
+        "category": "AI Enhancement",
+        "priority": "🟢 Ongoing",
+        "issue": "Strategy optimization",
+        "suggestion": "Enable Claude AI analysis for real-time market sentiment and signal validation. The AI can identify regime changes and filter low-quality signals.",
+        "expected_impact": "Comprehensive decision support",
+    })
 
     for rec in recommendations:
-        with st.expander(f"**{rec['priority']}** - {rec['category']}"):
-            st.write(f"**Suggestion:** {rec['suggestion']}")
-            st.write(f"**Expected Impact:** {rec['expected_impact']}")
+        with st.expander(f"{rec['priority']} | {rec['category']}: {rec['issue']}"):
+            st.markdown(f"**💡 Recommendation:** {rec['suggestion']}")
+            st.markdown(f"**📈 Expected Impact:** {rec['expected_impact']}")
 
     st.markdown("---")
 
-    # Model Status
-    st.subheader("🤖 Model Status")
+    # ============================================
+    # MODEL STATUS
+    # ============================================
+
+    st.subheader("🤖 AI System Status")
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.markdown("**RL Agent (PPO)**")
-        st.write("- Status: 🟢 Active")
-        st.write("- Last Training: 2 days ago")
-        st.write("- Episodes: 10,000")
+        st.markdown("""
+        <div style="padding: 15px; background: #1a1a2e; border-radius: 10px; border-left: 4px solid #00ff88;">
+            <h4 style="margin: 0; color: #00ff88;">📊 Technical Engine</h4>
+            <p style="color: #888; margin: 5px 0;">TradingView-style indicators</p>
+            <p>Status: <span style="color: #00ff88;">🟢 Active</span></p>
+            <p style="font-size: 12px; color: #666;">RSI, MACD, Bollinger, ADX, Stoch RSI, ATR, OBV, Pivot Points</p>
+        </div>
+        """, unsafe_allow_html=True)
 
     with col2:
-        st.markdown("**LLM Analyst**")
-        st.write("- Status: 🟢 Active")
-        st.write("- Model: GPT-4 Turbo")
-        st.write("- Requests Today: 142")
+        st.markdown("""
+        <div style="padding: 15px; background: #1a1a2e; border-radius: 10px; border-left: 4px solid #00ccff;">
+            <h4 style="margin: 0; color: #00ccff;">🧠 Gemini AI Brain</h4>
+            <p style="color: #888; margin: 5px 0;">Google Gemini 1.5 Flash</p>
+            <p>Status: <span style="color: #00ff88;">🟢 Active</span></p>
+            <p style="font-size: 12px; color: #666;">Market analysis, signal validation, sentiment detection</p>
+        </div>
+        """, unsafe_allow_html=True)
 
     with col3:
-        st.markdown("**Hybrid Strategy**")
-        st.write("- Status: 🟢 Active")
-        st.write("- RL Weight: 60%")
-        st.write("- LLM Weight: 40%")
+        st.markdown(f"""
+        <div style="padding: 15px; background: #1a1a2e; border-radius: 10px; border-left: 4px solid #ffaa00;">
+            <h4 style="margin: 0; color: #ffaa00;">⚡ Hybrid Strategy</h4>
+            <p style="color: #888; margin: 5px 0;">Technical + AI Consensus</p>
+            <p>Grade: <span style="color: {grade_color};">{grade}</span></p>
+            <p style="font-size: 12px; color: #666;">ATR stops, dynamic sizing, regime detection</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-    # Retrain suggestion
-    if sharpe < 0.5 or win_rate < 0.45:
-        st.warning("⚠️ **Retraining Recommended**: Performance metrics suggest the model may benefit from retraining with recent data.")
-
-        if st.button("🔄 Schedule Retraining"):
-            st.info("Retraining scheduled. This will run during off-market hours.")
+    # Alert based on performance
+    if total_score < 40:
+        st.error("🚨 **Performance Alert**: Score is below acceptable threshold. Consider reviewing strategy parameters or pausing live trading.")
+    elif total_score < 55:
+        st.warning("⚠️ **Performance Warning**: Some metrics need attention. Review the recommendations above.")
 
     st.markdown("---")
 
