@@ -29,27 +29,28 @@ const CONFIG = {
 
   // NEW: Symbol-Side Win Rate Optimization
   // Based on historical analysis: ETH BUY=71%, BTC SELL=58%, ETH SELL=57%, BTC BUY=52%
+  // Adjusted Feb 22: Lower thresholds for more trades
   symbolSideFilters: {
     "BTCUSDT_buy": {
-      minConfidence: 0.65,      // BTC BUY needs higher confidence (worst performer)
-      requireMTFAlignment: true, // Require multi-timeframe alignment
+      minConfidence: 0.60,      // Lowered from 0.65
+      requireMTFAlignment: false, // Removed MTF requirement for more trades
       requireSqueeze: false,
-      positionMultiplier: 0.7,   // Smaller position size
+      positionMultiplier: 0.7,   // Still smaller position size (worst performer)
     },
     "BTCUSDT_sell": {
-      minConfidence: 0.60,
+      minConfidence: 0.55,      // Lowered from 0.60
       requireMTFAlignment: false,
       requireSqueeze: false,
       positionMultiplier: 1.0,
     },
     "ETHUSDT_buy": {
-      minConfidence: 0.58,       // ETH BUY can be more aggressive (best performer)
+      minConfidence: 0.55,       // Lowered from 0.58
       requireMTFAlignment: false,
       requireSqueeze: false,
-      positionMultiplier: 1.2,   // Larger position size
+      positionMultiplier: 1.2,   // Larger position size (best performer)
     },
     "ETHUSDT_sell": {
-      minConfidence: 0.60,
+      minConfidence: 0.55,      // Lowered from 0.60
       requireMTFAlignment: false,
       requireSqueeze: false,
       positionMultiplier: 1.0,
@@ -1937,6 +1938,7 @@ async function generateAdvancedSignal(
 
   // ============================================
   // FINAL SIGNAL CALCULATION (Updated for 8 strategies)
+  // Adjusted Feb 22: Lower thresholds for more trades
   // ============================================
 
   const totalScore = buyScore - sellScore;
@@ -1945,19 +1947,20 @@ async function generateAdvancedSignal(
   let signal: string;
   let confidence: number;
 
-  // Adjusted thresholds for expanded scoring system
-  if (totalScore >= 6) {
+  // ADJUSTED: Lower thresholds to trade more frequently
+  // Old: 6/3, New: 4/2 (more trades, still requires some agreement)
+  if (totalScore >= 4) {
     signal = "strong_buy";
-    confidence = Math.min(0.95, 0.7 + (totalScore / maxScore) * 0.25);
-  } else if (totalScore >= 3) {
+    confidence = Math.min(0.95, 0.65 + (totalScore / maxScore) * 0.30);
+  } else if (totalScore >= 2) {
     signal = "buy";
-    confidence = Math.min(0.85, 0.6 + (totalScore / maxScore) * 0.25);
-  } else if (totalScore <= -6) {
+    confidence = Math.min(0.85, 0.58 + (totalScore / maxScore) * 0.27);
+  } else if (totalScore <= -4) {
     signal = "strong_sell";
-    confidence = Math.min(0.95, 0.7 + (Math.abs(totalScore) / maxScore) * 0.25);
-  } else if (totalScore <= -3) {
+    confidence = Math.min(0.95, 0.65 + (Math.abs(totalScore) / maxScore) * 0.30);
+  } else if (totalScore <= -2) {
     signal = "sell";
-    confidence = Math.min(0.85, 0.6 + (Math.abs(totalScore) / maxScore) * 0.25);
+    confidence = Math.min(0.85, 0.58 + (Math.abs(totalScore) / maxScore) * 0.27);
   } else {
     signal = "hold";
     confidence = 0.5;
