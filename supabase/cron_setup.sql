@@ -10,13 +10,13 @@ CREATE EXTENSION IF NOT EXISTS pg_net;
 -- Grant usage to postgres role
 GRANT USAGE ON SCHEMA cron TO postgres;
 
--- Create the cron job to run every 5 minutes
+-- Create the cron job to run every 1 minute
 -- Replace YOUR_PROJECT_REF with your actual project reference
 -- Replace YOUR_ANON_KEY with your actual anon key
 
 SELECT cron.schedule(
   'paper-trading-job',           -- Job name
-  '*/5 * * * *',                  -- Every 5 minutes
+  '* * * * *',                    -- Every 1 minute
   $$
   SELECT net.http_post(
     url := 'https://YOUR_PROJECT_REF.supabase.co/functions/v1/paper-trader',
