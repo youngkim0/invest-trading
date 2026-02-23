@@ -1983,7 +1983,12 @@ async function generateAdvancedSignal(
 
   let aiAnalysis = "";
 
-  if (CONFIG.useGeminiAI && (signal !== "hold" || Math.random() < 0.2)) {
+  // Only call Gemini for strong signals to avoid rate limits (429 errors)
+  // Free tier: ~15 requests/minute, we run 2 symbols/minute
+  const shouldCallGemini = CONFIG.useGeminiAI &&
+    (signal.includes("strong") || (signal !== "hold" && Math.random() < 0.3));
+
+  if (shouldCallGemini) {
     const geminiResult = await getGeminiAnalysis(symbol, indicators, recentTrades);
     aiAnalysis = geminiResult.analysis;
 
