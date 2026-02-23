@@ -2482,7 +2482,7 @@ serve(async (req) => {
                            lossStreakFilter &&
                            correlationFilter &&
                            timeFilter &&
-                           signal.riskScore < 0.7 &&
+                           signal.riskScore <= 0.7 &&
                            (signal.signal.includes("buy") || signal.signal.includes("sell"));
 
         // Log filter results for debugging
