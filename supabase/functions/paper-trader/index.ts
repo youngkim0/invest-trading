@@ -82,7 +82,7 @@ const CONFIG = {
 
   // Gemini AI
   useGeminiAI: true,
-  geminiModel: "gemini-2.5-flash",
+  geminiModel: "gemini-1.5-flash",  // Fixed: was gemini-2.5-flash (doesn't exist)
 };
 
 interface Candle {
