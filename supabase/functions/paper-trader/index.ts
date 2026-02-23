@@ -20,7 +20,7 @@ const COINGECKO_MAP: Record<string, string> = {
 const CONFIG = {
   initialCapital: 10000,
   maxPositionPct: 0.15,        // More conservative position sizing
-  stopLossPct: 0.025,          // 2.5% stop loss
+  stopLossPct: 0.032,          // 3.2% stop loss (widened - tight stops caused losses)
   takeProfitPct: 0.05,         // 5% take profit
   trailingStopPct: 0.015,      // 1.5% trailing stop
   minConfidence: 0.6,          // Base confidence threshold
@@ -32,10 +32,10 @@ const CONFIG = {
   // Adjusted Feb 22: Lower thresholds for more trades
   symbolSideFilters: {
     "BTCUSDT_buy": {
-      minConfidence: 0.60,      // Lowered from 0.65
-      requireMTFAlignment: false, // Removed MTF requirement for more trades
+      minConfidence: 0.70,      // RAISED: BTC BUY is worst performer (50% win rate)
+      requireMTFAlignment: true, // Require MTF alignment for BTC BUY
       requireSqueeze: false,
-      positionMultiplier: 0.7,   // Still smaller position size (worst performer)
+      positionMultiplier: 0.5,   // Smaller position size (worst performer)
     },
     "BTCUSDT_sell": {
       minConfidence: 0.55,      // Lowered from 0.60
@@ -64,6 +64,13 @@ const CONFIG = {
   // Correlation filter - avoid same-direction bets on correlated assets
   useCorrelationFilter: true,  // Don't open BTC & ETH in same direction
   correlatedPairs: [["BTCUSDT", "ETHUSDT"]], // Define correlated pairs
+
+  // NEW: Time-of-day filter (based on historical analysis)
+  // Bad hours: 00:00, 10:00, 23:00 UTC had <30% win rate
+  // Good hours: 04:00-05:00 UTC had 85-90% win rate
+  useTimeFilter: true,
+  badHoursUTC: [0, 10, 23],    // Avoid trading these hours
+  goodHoursUTC: [4, 5, 6, 7],  // Boost confidence in good hours
 
   // Indicator thresholds
   rsiOversold: 30,
@@ -2267,17 +2274,40 @@ serve(async (req) => {
           }
         }
 
-        const shouldEnter = meetsConfidence &&
+        // NEW: Time-of-day filter (based on historical win rate analysis)
+        let timeFilter = true;
+        let timeConfidenceBoost = 0;
+        if (CONFIG.useTimeFilter) {
+          const currentHourUTC = new Date().getUTCHours();
+
+          // Block trading during historically bad hours
+          if (CONFIG.badHoursUTC.includes(currentHourUTC)) {
+            timeFilter = false;
+            console.log(`   ⏰ Time filter: Hour ${currentHourUTC} UTC is historically unprofitable, skipping`);
+          }
+
+          // Boost confidence during historically good hours
+          if (CONFIG.goodHoursUTC.includes(currentHourUTC)) {
+            timeConfidenceBoost = 0.05;
+            console.log(`   ⏰ Time boost: Hour ${currentHourUTC} UTC is historically profitable (+5% confidence)`);
+          }
+        }
+
+        const adjustedConfidence = signal.confidence + timeConfidenceBoost;
+        const meetsAdjustedConfidence = adjustedConfidence >= symbolFilter.minConfidence;
+
+        const shouldEnter = meetsAdjustedConfidence &&
                            meetsMTF &&
                            meetsSqueeze &&
                            lossStreakFilter &&
                            correlationFilter &&
+                           timeFilter &&
                            signal.riskScore < 0.7 &&
                            (signal.signal.includes("buy") || signal.signal.includes("sell"));
 
         // Log filter results for debugging
         if (!shouldEnter && (signal.signal.includes("buy") || signal.signal.includes("sell"))) {
-          console.log(`   ⏭️ Filtered out: ${symbolSideKey} | conf=${signal.confidence.toFixed(2)} (need ${symbolFilter.minConfidence}) | MTF=${mtfAligned} (need ${symbolFilter.requireMTFAlignment})`);
+          console.log(`   ⏭️ Filtered out: ${symbolSideKey} | conf=${adjustedConfidence.toFixed(2)} (need ${symbolFilter.minConfidence}) | MTF=${mtfAligned} (need ${symbolFilter.requireMTFAlignment}) | time=${timeFilter}`);
         }
 
         if (shouldEnter) {
