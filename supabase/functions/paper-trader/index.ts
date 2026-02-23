@@ -82,7 +82,7 @@ const CONFIG = {
 
   // Gemini AI
   useGeminiAI: true,
-  geminiModel: "gemini-1.5-flash",  // Fixed: was gemini-2.5-flash (doesn't exist)
+  geminiModel: "gemini-2.5-flash",  // Latest: best price-performance for reasoning tasks
 };
 
 interface Candle {
@@ -1236,11 +1236,12 @@ Valid recommendations: STRONG_BUY, BUY, HOLD, SELL, STRONG_SELL
 Confidence must be between 0.0 and 1.0`;
 
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${CONFIG.geminiModel}:generateContent?key=${geminiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${CONFIG.geminiModel}:generateContent`,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "x-goog-api-key": geminiKey,  // Updated: use header instead of URL param
         },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
@@ -1256,7 +1257,7 @@ Confidence must be between 0.0 and 1.0`;
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`Gemini API error: ${response.status} - ${errorText}`);
-      return { analysis: "API error", recommendation: "use_technical", confidence: 0.5 };
+      return { analysis: `API error: ${response.status}`, recommendation: "use_technical", confidence: 0.5 };
     }
 
     const data = await response.json();
