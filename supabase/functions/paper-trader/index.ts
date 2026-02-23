@@ -1139,7 +1139,8 @@ function detectFairValueGaps(candles: Candle[], lookback = 50): {
 async function getGeminiAnalysis(
   symbol: string,
   indicators: AdvancedIndicators,
-  recentTrades: any[]
+  recentTrades: any[],
+  sentiment?: MarketSentiment
 ): Promise<{ analysis: string; recommendation: string; confidence: number }> {
   const geminiKey = Deno.env.get("GEMINI_API_KEY");
 
@@ -1223,6 +1224,34 @@ ${indicators.waveTrend.overbought ? '⚠️ OVERBOUGHT (>60)' : indicators.waveT
 ${recentTrades.length > 0 ? recentTrades.slice(0, 5).map(t =>
   `- ${t.side.toUpperCase()} @ $${t.entry_price} → ${t.exit_price ? `$${t.exit_price} (${t.return_pct > 0 ? '+' : ''}${t.return_pct?.toFixed(2)}%)` : 'OPEN'}`
 ).join('\n') : '- No recent trades'}
+
+## 📰 MARKET SENTIMENT & NEWS (IMPORTANT - Use this for context!)
+${sentiment ? `
+### Fear & Greed Index
+- Current Value: ${sentiment.fearGreedIndex.value}/100 (${sentiment.fearGreedIndex.classification})
+- Market Mood: ${sentiment.marketMood.toUpperCase().replace('_', ' ')}
+${sentiment.fearGreedIndex.value <= 25 ? '⚠️ EXTREME FEAR - Potential buying opportunity (contrarian)' : ''}
+${sentiment.fearGreedIndex.value >= 75 ? '⚠️ EXTREME GREED - Potential selling opportunity (contrarian)' : ''}
+
+### Recent Crypto News
+${sentiment.cryptoNews.length > 0 ? sentiment.cryptoNews.map(n =>
+  `- [${n.sentiment.toUpperCase()}] ${n.title} (${n.source})`
+).join('\n') : '- No recent news'}
+
+News Sentiment Summary: ${sentiment.cryptoNews.filter(n => n.sentiment === 'bullish').length} bullish, ${sentiment.cryptoNews.filter(n => n.sentiment === 'bearish').length} bearish, ${sentiment.cryptoNews.filter(n => n.sentiment === 'neutral').length} neutral
+
+### Social Trending
+- Trending coins: ${sentiment.socialTrending.length > 0 ? sentiment.socialTrending.join(', ') : 'None'}
+` : '- Sentiment data unavailable'}
+
+SENTIMENT STRATEGY:
+- EXTREME FEAR (0-25): Consider contrarian buying if technicals support
+- FEAR (25-45): Cautious accumulation possible
+- NEUTRAL (45-55): Follow technical signals
+- GREED (55-75): Consider taking profits
+- EXTREME GREED (75-100): Consider contrarian selling if technicals support
+- Bullish news with bullish technicals = STRONGER signal
+- Bearish news contradicting bullish technicals = BE CAUTIOUS
 
 STRATEGY SELECTION:
 - In TRENDING markets (ADX > 25): Prioritize trend-following and momentum
@@ -1373,6 +1402,142 @@ async function fetchTicker(symbol: string): Promise<{ price: number; change24h: 
 }
 
 // ============================================
+// NEWS & SENTIMENT DATA
+// ============================================
+
+interface MarketSentiment {
+  fearGreedIndex: { value: number; classification: string };
+  cryptoNews: Array<{ title: string; sentiment: string; source: string }>;
+  socialTrending: string[];
+  marketMood: "extreme_fear" | "fear" | "neutral" | "greed" | "extreme_greed";
+}
+
+// Fear & Greed Index (Alternative.me API - Free)
+async function fetchFearGreedIndex(): Promise<{ value: number; classification: string }> {
+  try {
+    const response = await fetch(
+      "https://api.alternative.me/fng/?limit=1",
+      { signal: AbortSignal.timeout(5000) }
+    );
+    if (response.ok) {
+      const data = await response.json();
+      const fng = data.data?.[0];
+      return {
+        value: parseInt(fng?.value || "50"),
+        classification: fng?.value_classification || "Neutral",
+      };
+    }
+  } catch (e) {
+    console.log("Fear & Greed fetch failed:", e);
+  }
+  return { value: 50, classification: "Neutral" };
+}
+
+// CryptoCompare News API (Free tier: 100k calls/month)
+async function fetchCryptoNews(symbol: string): Promise<Array<{ title: string; sentiment: string; source: string }>> {
+  try {
+    const coinMap: Record<string, string> = { "BTCUSDT": "BTC", "ETHUSDT": "ETH" };
+    const coin = coinMap[symbol] || "BTC";
+
+    const response = await fetch(
+      `https://min-api.cryptocompare.com/data/v2/news/?categories=${coin}&excludeCategories=Sponsored&lang=EN`,
+      { signal: AbortSignal.timeout(8000) }
+    );
+
+    if (response.ok) {
+      const data = await response.json();
+      const articles = data.Data?.slice(0, 5) || [];
+
+      return articles.map((article: any) => {
+        // Simple sentiment analysis based on title keywords
+        const title = (article.title || "").toLowerCase();
+        let sentiment = "neutral";
+
+        const bullishWords = ["surge", "soar", "rally", "bullish", "breakout", "ath", "record", "adoption", "etf approved", "buy"];
+        const bearishWords = ["crash", "plunge", "bearish", "dump", "sell-off", "hack", "ban", "lawsuit", "sec", "fear"];
+
+        if (bullishWords.some(w => title.includes(w))) sentiment = "bullish";
+        else if (bearishWords.some(w => title.includes(w))) sentiment = "bearish";
+
+        return {
+          title: article.title?.substring(0, 100) || "No title",
+          sentiment,
+          source: article.source || "Unknown",
+        };
+      });
+    }
+  } catch (e) {
+    console.log("CryptoCompare news fetch failed:", e);
+  }
+  return [];
+}
+
+// CoinGecko Trending & Market Data (Free)
+async function fetchCoinGeckoSentiment(): Promise<{ trending: string[]; globalMarketCap24hChange: number }> {
+  try {
+    // Fetch trending coins
+    const trendingResponse = await fetch(
+      "https://api.coingecko.com/api/v3/search/trending",
+      { signal: AbortSignal.timeout(5000) }
+    );
+
+    let trending: string[] = [];
+    if (trendingResponse.ok) {
+      const data = await trendingResponse.json();
+      trending = data.coins?.slice(0, 5).map((c: any) => c.item?.symbol || "") || [];
+    }
+
+    // Fetch global market data
+    const globalResponse = await fetch(
+      "https://api.coingecko.com/api/v3/global",
+      { signal: AbortSignal.timeout(5000) }
+    );
+
+    let globalMarketCap24hChange = 0;
+    if (globalResponse.ok) {
+      const data = await globalResponse.json();
+      globalMarketCap24hChange = data.data?.market_cap_change_percentage_24h_usd || 0;
+    }
+
+    return { trending, globalMarketCap24hChange };
+  } catch (e) {
+    console.log("CoinGecko sentiment fetch failed:", e);
+  }
+  return { trending: [], globalMarketCap24hChange: 0 };
+}
+
+// Aggregate all sentiment data
+async function fetchMarketSentiment(symbol: string): Promise<MarketSentiment> {
+  console.log("📰 Fetching market sentiment and news...");
+
+  // Fetch all data in parallel
+  const [fearGreed, news, geckoData] = await Promise.all([
+    fetchFearGreedIndex(),
+    fetchCryptoNews(symbol),
+    fetchCoinGeckoSentiment(),
+  ]);
+
+  // Determine overall market mood
+  let marketMood: MarketSentiment["marketMood"] = "neutral";
+  if (fearGreed.value <= 20) marketMood = "extreme_fear";
+  else if (fearGreed.value <= 40) marketMood = "fear";
+  else if (fearGreed.value >= 80) marketMood = "extreme_greed";
+  else if (fearGreed.value >= 60) marketMood = "greed";
+
+  const sentiment: MarketSentiment = {
+    fearGreedIndex: fearGreed,
+    cryptoNews: news,
+    socialTrending: geckoData.trending,
+    marketMood,
+  };
+
+  console.log(`   Fear & Greed: ${fearGreed.value} (${fearGreed.classification})`);
+  console.log(`   News articles: ${news.length}, Bullish: ${news.filter(n => n.sentiment === "bullish").length}, Bearish: ${news.filter(n => n.sentiment === "bearish").length}`);
+
+  return sentiment;
+}
+
+// ============================================
 // SIGNAL GENERATION
 // ============================================
 
@@ -1487,7 +1652,8 @@ async function generateAdvancedSignal(
   symbol: string,
   candles: Candle[],
   ticker: { price: number; change24h: number },
-  recentTrades: any[]
+  recentTrades: any[],
+  sentiment?: MarketSentiment
 ): Promise<Signal> {
   if (candles.length < 60) {
     return {
@@ -1989,7 +2155,7 @@ async function generateAdvancedSignal(
     (signal.includes("strong") || (signal !== "hold" && Math.random() < 0.3));
 
   if (shouldCallGemini) {
-    const geminiResult = await getGeminiAnalysis(symbol, indicators, recentTrades);
+    const geminiResult = await getGeminiAnalysis(symbol, indicators, recentTrades, sentiment);
     aiAnalysis = geminiResult.analysis;
 
     // Adjust confidence based on AI agreement
@@ -2111,6 +2277,14 @@ serve(async (req) => {
     }
     console.log(`📍 Open positions: ${JSON.stringify(Object.fromEntries(openPositionMap))}`);
 
+    // Fetch market sentiment once (shared across all symbols)
+    let marketSentiment: MarketSentiment | undefined;
+    try {
+      marketSentiment = await fetchMarketSentiment("BTCUSDT"); // BTC sentiment represents overall market
+    } catch (e) {
+      console.log("⚠️ Could not fetch market sentiment:", e);
+    }
+
     for (const symbol of SYMBOLS) {
       console.log(`\n📊 Processing ${symbol}...`);
 
@@ -2127,8 +2301,8 @@ serve(async (req) => {
         .order("entry_time", { ascending: false })
         .limit(10);
 
-      // Generate advanced signal
-      const signal = await generateAdvancedSignal(symbol, candles, ticker, recentTrades || []);
+      // Generate advanced signal (now with sentiment data!)
+      const signal = await generateAdvancedSignal(symbol, candles, ticker, recentTrades || [], marketSentiment);
 
       console.log(`Signal: ${signal.signal} (confidence: ${(signal.confidence * 100).toFixed(0)}%)`);
       console.log(`Reasoning: ${signal.reasoning}`);
