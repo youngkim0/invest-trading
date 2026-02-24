@@ -128,27 +128,50 @@ def fetch_current_prices():
 
 @st.cache_data(ttl=60)
 def fetch_klines(symbol: str, interval: str = "1h", limit: int = 48):
-    """Fetch candlestick data from Binance."""
+    """Fetch candlestick data from multiple sources."""
+    # Try multiple Binance endpoints
+    urls = [
+        f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
+        f"https://api1.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
+    ]
+
+    for url in urls:
+        try:
+            resp = requests.get(url, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                df = pd.DataFrame(data, columns=[
+                    'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                    'close_time', 'quote_volume', 'trades', 'taker_buy_base',
+                    'taker_buy_quote', 'ignore'
+                ])
+                # Convert timestamp to datetime, add 9 hours for KST
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') + timedelta(hours=9)
+                df['open'] = df['open'].astype(float)
+                df['high'] = df['high'].astype(float)
+                df['low'] = df['low'].astype(float)
+                df['close'] = df['close'].astype(float)
+                df['volume'] = df['volume'].astype(float)
+                return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+        except:
+            continue
+
+    # Fallback to CoinGecko OHLC
     try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-        resp = requests.get(url, timeout=10)
+        coin_map = {"BTCUSDT": "bitcoin", "ETHUSDT": "ethereum"}
+        coin_id = coin_map.get(symbol, "bitcoin")
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc?vs_currency=usd&days=2"
+        resp = requests.get(url, timeout=15)
         if resp.status_code == 200:
             data = resp.json()
-            df = pd.DataFrame(data, columns=[
-                'timestamp', 'open', 'high', 'low', 'close', 'volume',
-                'close_time', 'quote_volume', 'trades', 'taker_buy_base',
-                'taker_buy_quote', 'ignore'
-            ])
-            # Convert timestamp to datetime, add 9 hours for KST
+            df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') + timedelta(hours=9)
-            df['open'] = df['open'].astype(float)
-            df['high'] = df['high'].astype(float)
-            df['low'] = df['low'].astype(float)
-            df['close'] = df['close'].astype(float)
-            df['volume'] = df['volume'].astype(float)
-            return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-    except Exception as e:
-        st.error(f"Error fetching {symbol}: {e}")
+            df['volume'] = 0.0
+            return df
+    except:
+        pass
+
     return pd.DataFrame()
 
 
