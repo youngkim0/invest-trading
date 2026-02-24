@@ -1,15 +1,22 @@
 """Simplified AI Trading Dashboard - Focus on Signals, Trades, Performance"""
 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pandas as pd
+import plotly.graph_objects as go
+import requests
 import streamlit as st
 
 # Korea Standard Time (UTC+9)
-KST = ZoneInfo("Asia/Seoul")
+try:
+    from zoneinfo import ZoneInfo
+    KST = ZoneInfo("Asia/Seoul")
+except ImportError:
+    # Fallback for older Python versions
+    from datetime import timezone as tz
+    KST = tz(timedelta(hours=9))
 NEW_SYSTEM_DATE = "2026-02-20T00:00:00Z"
 
 
@@ -108,7 +115,6 @@ def fetch_trades(limit: int = 100):
 @st.cache_data(ttl=30)
 def fetch_current_prices():
     """Fetch current BTC and ETH prices."""
-    import requests
     prices = {}
     try:
         for symbol in ["BTCUSDT", "ETHUSDT"]:
@@ -123,7 +129,6 @@ def fetch_current_prices():
 @st.cache_data(ttl=60)
 def fetch_klines(symbol: str, interval: str = "1h", limit: int = 48):
     """Fetch candlestick data from Binance."""
-    import requests
     try:
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
         resp = requests.get(url, timeout=10)
@@ -380,8 +385,6 @@ def main():
     # ============================================
     st.markdown("---")
     st.header("📈 Price Charts")
-
-    import plotly.graph_objects as go
 
     # Timeframe selector
     timeframe_options = {
