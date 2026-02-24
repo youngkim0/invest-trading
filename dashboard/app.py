@@ -379,16 +379,35 @@ def main():
     # SECTION 5: PRICE CHARTS
     # ============================================
     st.markdown("---")
-    st.header("📈 Price Charts (1H)")
+    st.header("📈 Price Charts")
 
     import plotly.graph_objects as go
+
+    # Timeframe selector
+    timeframe_options = {
+        "1분": ("1m", 60),
+        "5분": ("5m", 60),
+        "15분": ("15m", 48),
+        "1시간": ("1h", 48),
+        "4시간": ("4h", 48),
+        "1일": ("1d", 30),
+    }
+
+    selected_tf = st.selectbox(
+        "차트 시간대 선택",
+        options=list(timeframe_options.keys()),
+        index=3,  # Default to 1시간
+        key="timeframe_select"
+    )
+
+    interval, limit = timeframe_options[selected_tf]
 
     col1, col2 = st.columns(2)
 
     # BTC Chart
     with col1:
         st.subheader("Bitcoin (BTC)")
-        btc_df = fetch_klines("BTCUSDT", "1h", 48)
+        btc_df = fetch_klines("BTCUSDT", interval, limit)
         if not btc_df.empty:
             fig_btc = go.Figure(data=[go.Candlestick(
                 x=btc_df['timestamp'],
@@ -421,7 +440,7 @@ def main():
     # ETH Chart
     with col2:
         st.subheader("Ethereum (ETH)")
-        eth_df = fetch_klines("ETHUSDT", "1h", 48)
+        eth_df = fetch_klines("ETHUSDT", interval, limit)
         if not eth_df.empty:
             fig_eth = go.Figure(data=[go.Candlestick(
                 x=eth_df['timestamp'],
