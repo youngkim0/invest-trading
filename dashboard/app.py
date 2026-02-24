@@ -139,15 +139,16 @@ def fetch_klines(symbol: str, interval: str = "1h", limit: int = 48):
                 'close_time', 'quote_volume', 'trades', 'taker_buy_base',
                 'taker_buy_quote', 'ignore'
             ])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True).dt.tz_convert(KST)
+            # Convert timestamp to datetime, add 9 hours for KST
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') + timedelta(hours=9)
             df['open'] = df['open'].astype(float)
             df['high'] = df['high'].astype(float)
             df['low'] = df['low'].astype(float)
             df['close'] = df['close'].astype(float)
             df['volume'] = df['volume'].astype(float)
             return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-    except:
-        pass
+    except Exception as e:
+        st.error(f"Error fetching {symbol}: {e}")
     return pd.DataFrame()
 
 
