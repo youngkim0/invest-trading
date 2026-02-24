@@ -8,9 +8,26 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
-# Korea Standard Time
+# Korea Standard Time (UTC+9)
 KST = ZoneInfo("Asia/Seoul")
 NEW_SYSTEM_DATE = "2026-02-20T00:00:00Z"
+
+
+def to_kst(timestamp_str: str) -> str:
+    """Convert UTC timestamp string to KST formatted string."""
+    if not timestamp_str:
+        return ""
+    try:
+        # Parse the timestamp (handles both with and without timezone)
+        if '+' in timestamp_str or 'Z' in timestamp_str:
+            dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+        else:
+            dt = datetime.fromisoformat(timestamp_str).replace(tzinfo=ZoneInfo("UTC"))
+        # Convert to KST
+        dt_kst = dt.astimezone(KST)
+        return dt_kst.strftime('%m/%d %H:%M')
+    except:
+        return timestamp_str[:16].replace('T', ' ')
 
 # Load environment variables
 project_root = Path(__file__).parent.parent
@@ -103,6 +120,32 @@ def fetch_current_prices():
     return prices
 
 
+@st.cache_data(ttl=60)
+def fetch_klines(symbol: str, interval: str = "1h", limit: int = 48):
+    """Fetch candlestick data from Binance."""
+    import requests
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            df = pd.DataFrame(data, columns=[
+                'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                'close_time', 'quote_volume', 'trades', 'taker_buy_base',
+                'taker_buy_quote', 'ignore'
+            ])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True).dt.tz_convert(KST)
+            df['open'] = df['open'].astype(float)
+            df['high'] = df['high'].astype(float)
+            df['low'] = df['low'].astype(float)
+            df['close'] = df['close'].astype(float)
+            df['volume'] = df['volume'].astype(float)
+            return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+    except:
+        pass
+    return pd.DataFrame()
+
+
 def main():
     st.title("📈 AI Trading Dashboard")
     st.caption(f"Last updated: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')} | System started: Feb 20, 2026")
@@ -186,7 +229,7 @@ def main():
             symbol = t.get('symbol', 'N/A')
             side = t.get('side', 'N/A').upper()
             entry_price = float(t.get('entry_price') or 0)
-            entry_time = t.get('entry_time', '')[:16].replace('T', ' ')
+            entry_time_kst = to_kst(t.get('entry_time', ''))
             current_price = prices.get(symbol, entry_price)
 
             # Calculate P&L
@@ -198,7 +241,7 @@ def main():
             pnl_color = "🟢" if pnl_pct >= 0 else "🔴"
             side_emoji = "📈" if side == "BUY" else "📉"
 
-            col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
+            col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 2])
             with col1:
                 st.markdown(f"**{side_emoji} {symbol}** {side}")
             with col2:
@@ -207,6 +250,8 @@ def main():
                 st.markdown(f"Current: **${current_price:,.2f}**")
             with col4:
                 st.markdown(f"{pnl_color} **{pnl_pct:+.2f}%**")
+            with col5:
+                st.markdown(f"📅 {entry_time_kst}")
     else:
         st.info("No open positions")
 
@@ -217,18 +262,13 @@ def main():
     st.header("⚡ Recent Signals (Every Minute Decisions)")
 
     if signals:
-        # Create DataFrame
-        df = pd.DataFrame(signals)
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df['time'] = df['timestamp'].dt.strftime('%H:%M:%S')
-        df['date'] = df['timestamp'].dt.strftime('%m/%d')
-
-        # Format display
+        # Format display with KST timezone
         display_data = []
-        for _, row in df.head(30).iterrows():
-            signal_type = row.get('signal_type', 'hold')
-            confidence = float(row.get('confidence', 0)) * 100
-            risk_score = float(row.get('risk_score', 0))
+        for sig in signals[:30]:
+            signal_type = sig.get('signal_type', 'hold')
+            confidence = float(sig.get('confidence', 0)) * 100
+            risk_score = float(sig.get('risk_score', 0))
+            timestamp_kst = to_kst(sig.get('timestamp', ''))
 
             # Signal emoji
             if 'strong_buy' in signal_type:
@@ -243,8 +283,8 @@ def main():
                 signal_emoji = "⚪"
 
             display_data.append({
-                'Time': f"{row['date']} {row['time']}",
-                'Symbol': row.get('symbol', 'N/A'),
+                'Time (KST)': timestamp_kst,
+                'Symbol': sig.get('symbol', 'N/A'),
                 'Signal': f"{signal_emoji} {signal_type}",
                 'Confidence': f"{confidence:.0f}%",
                 'Risk': f"{risk_score:.2f}",
@@ -271,18 +311,18 @@ def main():
             side = t.get('side', 'N/A').upper()
             entry_price = float(t.get('entry_price') or 0)
             exit_price = float(t.get('exit_price') or 0)
-            entry_time = t.get('entry_time', '')[:16].replace('T', ' ')
+            entry_time_kst = to_kst(t.get('entry_time', ''))
             exit_time = t.get('exit_time', '')
             net_pnl = float(t.get('net_pnl') or 0)
             return_pct = float(t.get('return_pct') or 0)
 
             # Status
             if exit_time:
-                exit_time_display = exit_time[:16].replace('T', ' ')
+                exit_time_kst = to_kst(exit_time)
                 status = "✅" if net_pnl > 0 else "❌"
                 pnl_display = f"${net_pnl:+.2f} ({return_pct:+.2f}%)"
             else:
-                exit_time_display = "OPEN"
+                exit_time_kst = "OPEN"
                 status = "🔄"
                 pnl_display = "—"
 
@@ -295,8 +335,8 @@ def main():
                 'Entry': f"${entry_price:,.2f}",
                 'Exit': f"${exit_price:,.2f}" if exit_price else "—",
                 'P&L': pnl_display,
-                'Entry Time': entry_time,
-                'Exit Time': exit_time_display,
+                'Entry (KST)': entry_time_kst,
+                'Exit (KST)': exit_time_kst,
             })
 
         st.dataframe(
@@ -336,10 +376,86 @@ def main():
         st.info("No trades found since Feb 20")
 
     # ============================================
+    # SECTION 5: PRICE CHARTS
+    # ============================================
+    st.markdown("---")
+    st.header("📈 Price Charts (1H)")
+
+    import plotly.graph_objects as go
+
+    col1, col2 = st.columns(2)
+
+    # BTC Chart
+    with col1:
+        st.subheader("Bitcoin (BTC)")
+        btc_df = fetch_klines("BTCUSDT", "1h", 48)
+        if not btc_df.empty:
+            fig_btc = go.Figure(data=[go.Candlestick(
+                x=btc_df['timestamp'],
+                open=btc_df['open'],
+                high=btc_df['high'],
+                low=btc_df['low'],
+                close=btc_df['close'],
+                increasing_line_color='#00ff88',
+                decreasing_line_color='#ff4444'
+            )])
+            fig_btc.update_layout(
+                height=400,
+                template="plotly_dark",
+                xaxis_title="Time (KST)",
+                yaxis_title="Price (USDT)",
+                xaxis_rangeslider_visible=False,
+                margin=dict(l=0, r=0, t=0, b=0),
+            )
+            st.plotly_chart(fig_btc, use_container_width=True)
+
+            # Show current price
+            current_btc = btc_df['close'].iloc[-1]
+            prev_btc = btc_df['close'].iloc[-2]
+            change_btc = ((current_btc - prev_btc) / prev_btc) * 100
+            color = "🟢" if change_btc >= 0 else "🔴"
+            st.markdown(f"**Current: ${current_btc:,.2f}** {color} ({change_btc:+.2f}%)")
+        else:
+            st.warning("Could not load BTC data")
+
+    # ETH Chart
+    with col2:
+        st.subheader("Ethereum (ETH)")
+        eth_df = fetch_klines("ETHUSDT", "1h", 48)
+        if not eth_df.empty:
+            fig_eth = go.Figure(data=[go.Candlestick(
+                x=eth_df['timestamp'],
+                open=eth_df['open'],
+                high=eth_df['high'],
+                low=eth_df['low'],
+                close=eth_df['close'],
+                increasing_line_color='#00ff88',
+                decreasing_line_color='#ff4444'
+            )])
+            fig_eth.update_layout(
+                height=400,
+                template="plotly_dark",
+                xaxis_title="Time (KST)",
+                yaxis_title="Price (USDT)",
+                xaxis_rangeslider_visible=False,
+                margin=dict(l=0, r=0, t=0, b=0),
+            )
+            st.plotly_chart(fig_eth, use_container_width=True)
+
+            # Show current price
+            current_eth = eth_df['close'].iloc[-1]
+            prev_eth = eth_df['close'].iloc[-2]
+            change_eth = ((current_eth - prev_eth) / prev_eth) * 100
+            color = "🟢" if change_eth >= 0 else "🔴"
+            st.markdown(f"**Current: ${current_eth:,.2f}** {color} ({change_eth:+.2f}%)")
+        else:
+            st.warning("Could not load ETH data")
+
+    # ============================================
     # FOOTER
     # ============================================
     st.markdown("---")
-    st.caption("🤖 AI Trading System | Signals every minute | Gemini 2.5 Flash AI")
+    st.caption("🤖 AI Trading System | Signals every minute | Gemini 2.5 Flash AI | 🇰🇷 All times in KST (UTC+9)")
 
 
 if __name__ == "__main__":
