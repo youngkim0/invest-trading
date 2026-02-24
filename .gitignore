@@ -101,3 +101,4 @@ tmp/
 temp/
 *.tmp
 supabase/.temp/
+.streamlit/secrets.toml

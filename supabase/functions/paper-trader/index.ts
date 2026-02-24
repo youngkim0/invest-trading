@@ -17,60 +17,57 @@ const COINGECKO_MAP: Record<string, string> = {
 };
 
 // Advanced Trading Configuration
+// RELAXED Feb 24: More trades, less filtering
 const CONFIG = {
   initialCapital: 10000,
-  maxPositionPct: 0.15,        // More conservative position sizing
-  stopLossPct: 0.032,          // 3.2% stop loss (widened - tight stops caused losses)
+  maxPositionPct: 0.15,        // Position sizing
+  stopLossPct: 0.032,          // 3.2% stop loss
   takeProfitPct: 0.05,         // 5% take profit
   trailingStopPct: 0.015,      // 1.5% trailing stop
-  minConfidence: 0.6,          // Base confidence threshold
-  maxDrawdownPct: 0.10,        // Max 10% drawdown before pausing
-  cooldownMinutes: 30,         // Cooldown after loss
+  minConfidence: 0.50,         // LOWERED from 0.6 - base confidence threshold
+  maxDrawdownPct: 0.12,        // RAISED from 0.10 - allow more drawdown
+  cooldownMinutes: 15,         // LOWERED from 30 - faster recovery
 
-  // NEW: Symbol-Side Win Rate Optimization
-  // Based on historical analysis: ETH BUY=71%, BTC SELL=58%, ETH SELL=57%, BTC BUY=52%
-  // Adjusted Feb 22: Lower thresholds for more trades
+  // Symbol-Side Filters - RELAXED for more trades
   symbolSideFilters: {
     "BTCUSDT_buy": {
-      minConfidence: 0.70,      // RAISED: BTC BUY is worst performer (50% win rate)
-      requireMTFAlignment: true, // Require MTF alignment for BTC BUY
+      minConfidence: 0.58,      // LOWERED from 0.70
+      requireMTFAlignment: false, // DISABLED - was blocking too many
       requireSqueeze: false,
-      positionMultiplier: 0.5,   // Smaller position size (worst performer)
+      positionMultiplier: 0.7,   // RAISED from 0.5
     },
     "BTCUSDT_sell": {
-      minConfidence: 0.55,      // Lowered from 0.60
+      minConfidence: 0.52,      // LOWERED from 0.55
       requireMTFAlignment: false,
       requireSqueeze: false,
       positionMultiplier: 1.0,
     },
     "ETHUSDT_buy": {
-      minConfidence: 0.55,       // Lowered from 0.58
+      minConfidence: 0.52,       // LOWERED from 0.55
       requireMTFAlignment: false,
       requireSqueeze: false,
-      positionMultiplier: 1.2,   // Larger position size (best performer)
+      positionMultiplier: 1.2,   // Best performer - larger size
     },
     "ETHUSDT_sell": {
-      minConfidence: 0.55,      // Lowered from 0.60
+      minConfidence: 0.52,      // LOWERED from 0.55
       requireMTFAlignment: false,
       requireSqueeze: false,
       positionMultiplier: 1.0,
     },
   } as Record<string, { minConfidence: number; requireMTFAlignment: boolean; requireSqueeze: boolean; positionMultiplier: number }>,
 
-  // Loss protection
-  maxConsecutiveLosses: 3,     // Pause after 3 consecutive losses
-  lossRecoveryTrades: 2,       // Need 2 wins to reset loss counter
+  // Loss protection - RELAXED
+  maxConsecutiveLosses: 5,     // RAISED from 3 - more tolerance
+  lossRecoveryTrades: 1,       // LOWERED from 2 - faster recovery
 
-  // Correlation filter - avoid same-direction bets on correlated assets
-  useCorrelationFilter: true,  // Don't open BTC & ETH in same direction
-  correlatedPairs: [["BTCUSDT", "ETHUSDT"]], // Define correlated pairs
+  // Correlation filter - DISABLED for more trades
+  useCorrelationFilter: false,  // DISABLED - allow BTC & ETH same direction
+  correlatedPairs: [["BTCUSDT", "ETHUSDT"]],
 
-  // NEW: Time-of-day filter (based on historical analysis)
-  // Bad hours: 00:00, 10:00, 23:00 UTC had <30% win rate
-  // Good hours: 04:00-05:00 UTC had 85-90% win rate
-  useTimeFilter: true,
-  badHoursUTC: [0, 10, 23],    // Avoid trading these hours
-  goodHoursUTC: [4, 5, 6, 7],  // Boost confidence in good hours
+  // Time filter - DISABLED for 24/7 trading
+  useTimeFilter: false,         // DISABLED - trade all hours
+  badHoursUTC: [],              // No bad hours
+  goodHoursUTC: [4, 5, 6, 7],   // Still boost good hours
 
   // Indicator thresholds
   rsiOversold: 30,
@@ -2121,21 +2118,22 @@ async function generateAdvancedSignal(
   let signal: string;
   let confidence: number;
 
-  // ADJUSTED: Lower thresholds to trade more frequently
-  // Old: 6/3, New: 4/2 (more trades, still requires some agreement)
-  if (totalScore >= 4) {
+  // RELAXED Feb 24: Lower thresholds for more frequent trading
+  // Old: 4/2, New: 3/1 (more signals, less hold)
+  if (totalScore >= 3) {
     signal = "strong_buy";
-    confidence = Math.min(0.95, 0.65 + (totalScore / maxScore) * 0.30);
-  } else if (totalScore >= 2) {
+    confidence = Math.min(0.95, 0.62 + (totalScore / maxScore) * 0.33);
+  } else if (totalScore >= 1) {
     signal = "buy";
-    confidence = Math.min(0.85, 0.58 + (totalScore / maxScore) * 0.27);
-  } else if (totalScore <= -4) {
+    confidence = Math.min(0.85, 0.55 + (totalScore / maxScore) * 0.30);
+  } else if (totalScore <= -3) {
     signal = "strong_sell";
-    confidence = Math.min(0.95, 0.65 + (Math.abs(totalScore) / maxScore) * 0.30);
-  } else if (totalScore <= -2) {
+    confidence = Math.min(0.95, 0.62 + (Math.abs(totalScore) / maxScore) * 0.33);
+  } else if (totalScore <= -1) {
     signal = "sell";
-    confidence = Math.min(0.85, 0.58 + (Math.abs(totalScore) / maxScore) * 0.27);
+    confidence = Math.min(0.85, 0.55 + (Math.abs(totalScore) / maxScore) * 0.30);
   } else {
+    // Only hold when score is exactly 0
     signal = "hold";
     confidence = 0.5;
   }
@@ -2430,9 +2428,9 @@ serve(async (req) => {
         const inSqueeze = signal.indicators.squeezeMomentum.isSqueezing;
         const meetsSqueeze = !symbolFilter.requireSqueeze || inSqueeze;
 
-        // On loss streak: require higher confidence and strong signal only
+        // On loss streak: require slightly higher confidence (RELAXED Feb 24)
         const lossStreakFilter = onLossStreak
-          ? (signal.confidence >= 0.70 && signal.signal.includes("strong"))
+          ? (signal.confidence >= 0.58)  // LOWERED from 0.70, removed "strong" requirement
           : true;
 
         // NEW: Correlation filter - don't open same direction on correlated assets
@@ -2476,13 +2474,14 @@ serve(async (req) => {
         const adjustedConfidence = signal.confidence + timeConfidenceBoost;
         const meetsAdjustedConfidence = adjustedConfidence >= symbolFilter.minConfidence;
 
+        // RELAXED Feb 24: Allow more trades
         const shouldEnter = meetsAdjustedConfidence &&
                            meetsMTF &&
                            meetsSqueeze &&
                            lossStreakFilter &&
                            correlationFilter &&
                            timeFilter &&
-                           signal.riskScore <= 0.7 &&
+                           signal.riskScore <= 0.8 &&  // RAISED from 0.7
                            (signal.signal.includes("buy") || signal.signal.includes("sell"));
 
         // Log filter results for debugging
