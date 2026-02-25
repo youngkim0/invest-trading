@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -86,7 +86,7 @@ class StrategyMetrics:
     max_drawdown: float = 0.0
 
     last_signal_time: datetime | None = None
-    last_update: datetime = field(default_factory=datetime.utcnow)
+    last_update: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class BaseStrategy(ABC):
@@ -271,7 +271,7 @@ class BaseStrategy(ABC):
         # Update metrics
         self.metrics.total_signals += len(signals)
         if signals:
-            self.metrics.last_signal_time = datetime.utcnow()
+            self.metrics.last_signal_time = datetime.now(timezone.utc)
 
         return signals
 
@@ -317,7 +317,7 @@ class BaseStrategy(ABC):
                     (self.metrics.losing_signals * avg_loss_decimal)
                 )
 
-        self.metrics.last_update = datetime.utcnow()
+        self.metrics.last_update = datetime.now(timezone.utc)
 
     def calculate_position_size(
         self,

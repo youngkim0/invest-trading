@@ -13,7 +13,9 @@ class StrategyType(str, Enum):
     RL_DQN = "rl_dqn"
     LLM_ONLY = "llm_only"
     HYBRID = "hybrid"  # RL + LLM combined
+    HYBRID_SMC = "hybrid_smc"  # RL + LLM + SMC combined
     TECHNICAL = "technical"  # Pure technical analysis
+    SMC = "smc"  # Smart Money Concepts
 
 
 class TimeFrame(str, Enum):
@@ -115,6 +117,28 @@ class LLMStrategyConfig(BaseModel):
     market_context_days: int = 7
 
 
+class SMCStrategyConfig(BaseModel):
+    """Configuration for Smart Money Concepts strategy."""
+
+    # Confluence Settings
+    min_confluence_score: float = 0.65  # Minimum score for valid setup
+    require_htf_alignment: bool = True  # Require higher timeframe alignment
+    min_rr_ratio: float = 2.0  # Minimum risk/reward ratio
+
+    # Analysis Settings
+    use_mtf_analysis: bool = True  # Use multi-timeframe analysis
+    entry_on_retest: bool = True  # Wait for zone retest before entry
+    max_zones_per_direction: int = 5  # Maximum zones to track
+
+    # Risk Management
+    atr_stop_multiplier: float = 1.5  # ATR multiplier for stop loss
+    trailing_stop_threshold: float = 1.5  # Profit % to activate trailing stop
+
+    # Zone Detection
+    min_impulse_atr: float = 2.0  # Minimum impulse size for OB detection
+    swing_lookback: int = 5  # Candles on each side for swing detection
+
+
 class HybridStrategyConfig(BaseModel):
     """Configuration for hybrid RL + LLM strategies."""
 
@@ -132,6 +156,32 @@ class HybridStrategyConfig(BaseModel):
     # Meta Controller
     enable_regime_detection: bool = True
     regime_adaptation: bool = True  # Adapt weights based on market regime
+
+
+class HybridSMCStrategyConfig(BaseModel):
+    """Configuration for hybrid RL + LLM + SMC strategies."""
+
+    rl_config: RLStrategyConfig = Field(default_factory=RLStrategyConfig)
+    llm_config: LLMStrategyConfig = Field(default_factory=LLMStrategyConfig)
+    smc_config: SMCStrategyConfig = Field(default_factory=SMCStrategyConfig)
+
+    # Weight Distribution (must sum to 1.0)
+    rl_weight: float = 0.50  # 50% RL
+    llm_weight: float = 0.25  # 25% LLM
+    smc_weight: float = 0.25  # 25% SMC
+
+    # Conflict Resolution
+    conflict_resolution: str = "weighted_average"
+    smc_veto_threshold: float = 0.85  # SMC can veto if confluence > threshold
+    llm_veto_threshold: float = 0.9
+
+    # Meta Controller
+    enable_regime_detection: bool = True
+    regime_adaptation: bool = True
+
+    # SMC Integration
+    require_smc_alignment: bool = False  # Require SMC to agree with direction
+    smc_zone_filter: bool = True  # Only trade at SMC zones
 
 
 class StrategyConfig(BaseModel):
@@ -159,7 +209,9 @@ class StrategyConfig(BaseModel):
     # Strategy-Specific Configs
     rl_config: RLStrategyConfig = Field(default_factory=RLStrategyConfig)
     llm_config: LLMStrategyConfig = Field(default_factory=LLMStrategyConfig)
+    smc_config: SMCStrategyConfig = Field(default_factory=SMCStrategyConfig)
     hybrid_config: HybridStrategyConfig = Field(default_factory=HybridStrategyConfig)
+    hybrid_smc_config: HybridSMCStrategyConfig = Field(default_factory=HybridSMCStrategyConfig)
 
     # Risk Management
     max_position_per_symbol: float = 0.2  # Max 20% per symbol
@@ -175,6 +227,10 @@ class StrategyConfig(BaseModel):
         """Get configuration for the active strategy type."""
         if self.strategy_type == StrategyType.HYBRID:
             return self.hybrid_config.model_dump()
+        elif self.strategy_type == StrategyType.HYBRID_SMC:
+            return self.hybrid_smc_config.model_dump()
+        elif self.strategy_type == StrategyType.SMC:
+            return self.smc_config.model_dump()
         elif self.strategy_type in (StrategyType.RL_PPO, StrategyType.RL_DQN):
             return self.rl_config.model_dump()
         elif self.strategy_type == StrategyType.LLM_ONLY:

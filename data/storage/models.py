@@ -103,6 +103,7 @@ class SignalSource(str, PyEnum):
     TECHNICAL = "technical"
     HYBRID = "hybrid"
     MANUAL = "manual"
+    SMC = "smc"  # Smart Money Concepts
 
 
 # =============================================================================
