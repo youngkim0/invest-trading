@@ -112,17 +112,49 @@ def fetch_trades(limit: int = 100):
         return []
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=10)
 def fetch_current_prices():
-    """Fetch current BTC and ETH prices."""
+    """Fetch current BTC and ETH prices from multiple sources."""
     prices = {}
-    try:
-        for symbol in ["BTCUSDT", "ETHUSDT"]:
-            resp = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}", timeout=5)
+    symbols = ["BTCUSDT", "ETHUSDT"]
+
+    # Try multiple Binance endpoints
+    binance_urls = [
+        "https://api.binance.com/api/v3/ticker/price",
+        "https://api.binance.us/api/v3/ticker/price",
+        "https://api1.binance.com/api/v3/ticker/price",
+    ]
+
+    for base_url in binance_urls:
+        if len(prices) == len(symbols):
+            break
+        for symbol in symbols:
+            if symbol in prices:
+                continue
+            try:
+                resp = requests.get(f"{base_url}?symbol={symbol}", timeout=5)
+                if resp.status_code == 200:
+                    prices[symbol] = float(resp.json()["price"])
+            except:
+                continue
+
+    # Fallback to CoinGecko if any symbol missing
+    if len(prices) < len(symbols):
+        try:
+            coin_map = {"BTCUSDT": "bitcoin", "ETHUSDT": "ethereum"}
+            resp = requests.get(
+                "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd",
+                timeout=5
+            )
             if resp.status_code == 200:
-                prices[symbol] = float(resp.json()["price"])
-    except:
-        pass
+                data = resp.json()
+                if "BTCUSDT" not in prices and "bitcoin" in data:
+                    prices["BTCUSDT"] = float(data["bitcoin"]["usd"])
+                if "ETHUSDT" not in prices and "ethereum" in data:
+                    prices["ETHUSDT"] = float(data["ethereum"]["usd"])
+        except:
+            pass
+
     return prices
 
 
