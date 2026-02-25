@@ -530,6 +530,140 @@ def main():
             st.warning("Could not load ETH data")
 
     # ============================================
+    # SECTION 6: PERFORMANCE REPORTS
+    # ============================================
+    st.markdown("---")
+    st.header("📊 Performance Reports")
+
+    # Calculate daily and weekly stats
+    now_utc = datetime.now(timezone.utc)
+    today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = today_start - timedelta(days=7)
+
+    def parse_time(ts):
+        if not ts:
+            return None
+        try:
+            if '+' in ts or 'Z' in ts:
+                return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+            return datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+        except:
+            return None
+
+    # Filter trades by period
+    today_trades = []
+    week_trades = []
+    for t in closed_trades:
+        exit_time = parse_time(t.get('exit_time'))
+        if exit_time:
+            if exit_time >= today_start:
+                today_trades.append(t)
+            if exit_time >= week_start:
+                week_trades.append(t)
+
+    def calc_stats(trade_list):
+        if not trade_list:
+            return {'trades': 0, 'wins': 0, 'losses': 0, 'pnl': 0, 'win_rate': 0, 'avg_pnl': 0}
+        wins = [t for t in trade_list if (t.get('net_pnl') or 0) > 0]
+        losses = [t for t in trade_list if (t.get('net_pnl') or 0) < 0]
+        pnl = sum(t.get('net_pnl') or 0 for t in trade_list)
+        return {
+            'trades': len(trade_list),
+            'wins': len(wins),
+            'losses': len(losses),
+            'pnl': pnl,
+            'win_rate': (len(wins) / len(trade_list) * 100) if trade_list else 0,
+            'avg_pnl': pnl / len(trade_list) if trade_list else 0
+        }
+
+    today_stats = calc_stats(today_trades)
+    week_stats = calc_stats(week_trades)
+    all_stats = calc_stats(closed_trades)
+
+    # Display reports in columns
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.subheader("📅 Today")
+        if today_stats['trades'] > 0:
+            pnl_color = "🟢" if today_stats['pnl'] >= 0 else "🔴"
+            st.markdown(f"""
+            - **Trades:** {today_stats['trades']}
+            - **Win Rate:** {today_stats['win_rate']:.1f}% ({today_stats['wins']}W/{today_stats['losses']}L)
+            - **P&L:** {pnl_color} ${today_stats['pnl']:+.2f}
+            - **Avg P&L:** ${today_stats['avg_pnl']:+.2f}/trade
+            """)
+        else:
+            st.info("No closed trades today")
+
+    with col2:
+        st.subheader("📆 Last 7 Days")
+        if week_stats['trades'] > 0:
+            pnl_color = "🟢" if week_stats['pnl'] >= 0 else "🔴"
+            st.markdown(f"""
+            - **Trades:** {week_stats['trades']}
+            - **Win Rate:** {week_stats['win_rate']:.1f}% ({week_stats['wins']}W/{week_stats['losses']}L)
+            - **P&L:** {pnl_color} ${week_stats['pnl']:+.2f}
+            - **Avg P&L:** ${week_stats['avg_pnl']:+.2f}/trade
+            """)
+        else:
+            st.info("No closed trades this week")
+
+    with col3:
+        st.subheader("📈 All Time")
+        if all_stats['trades'] > 0:
+            pnl_color = "🟢" if all_stats['pnl'] >= 0 else "🔴"
+            st.markdown(f"""
+            - **Trades:** {all_stats['trades']}
+            - **Win Rate:** {all_stats['win_rate']:.1f}% ({all_stats['wins']}W/{all_stats['losses']}L)
+            - **P&L:** {pnl_color} ${all_stats['pnl']:+.2f}
+            - **Avg P&L:** ${all_stats['avg_pnl']:+.2f}/trade
+            """)
+        else:
+            st.info("No closed trades yet")
+
+    # Progress tracker towards 100 trades
+    st.markdown("---")
+    st.subheader("🎯 Progress to Real Money")
+
+    target_trades = 100
+    current_trades = all_stats['trades']
+    progress_pct = min(current_trades / target_trades * 100, 100)
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.progress(progress_pct / 100)
+    with col2:
+        st.markdown(f"**{current_trades} / {target_trades} trades**")
+
+    # Status checklist
+    days_trading = (now_utc - datetime.fromisoformat(NEW_SYSTEM_DATE.replace('Z', '+00:00'))).days
+    target_days = 30
+
+    checks = {
+        "100+ closed trades": current_trades >= 100,
+        "30+ days of data": days_trading >= 30,
+        "Win rate > 50%": all_stats['win_rate'] > 50,
+        "Profit factor > 1.5": profit_factor > 1.5,
+        "Positive total P&L": all_stats['pnl'] > 0,
+    }
+
+    st.markdown("**Readiness Checklist:**")
+    cols = st.columns(len(checks))
+    for i, (check, passed) in enumerate(checks.items()):
+        with cols[i]:
+            icon = "✅" if passed else "⬜"
+            st.markdown(f"{icon} {check}")
+
+    passed_checks = sum(checks.values())
+    if passed_checks == len(checks):
+        st.success("🎉 All criteria met! System may be ready for real money testing with small amounts.")
+    elif passed_checks >= 3:
+        st.warning(f"⏳ {passed_checks}/{len(checks)} criteria met. Keep paper trading.")
+    else:
+        st.info(f"📊 {passed_checks}/{len(checks)} criteria met. More data needed.")
+
+    # ============================================
     # FOOTER
     # ============================================
     st.markdown("---")
