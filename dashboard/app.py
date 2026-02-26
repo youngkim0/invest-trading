@@ -450,9 +450,9 @@ def main():
         # Format display with KST timezone
         display_data = []
         for sig in signals[:30]:
-            signal_type = sig.get('signal_type', 'hold')
-            confidence = float(sig.get('confidence', 0)) * 100
-            risk_score = float(sig.get('risk_score', 0))
+            signal_type = sig.get('signal_type', 'hold') or 'hold'
+            confidence = float(sig.get('confidence') or 0) * 100
+            risk_score = float(sig.get('risk_score') or 0)
             timestamp_kst = to_kst(sig.get('timestamp', ''))
 
             # Signal emoji
