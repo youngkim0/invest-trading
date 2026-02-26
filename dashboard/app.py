@@ -10,7 +10,14 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-import google.generativeai as genai
+
+# Optional: Google Gemini for AI insights
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    genai = None
 
 # Korea Standard Time (UTC+9)
 try:
@@ -212,6 +219,9 @@ def fetch_klines(symbol: str, interval: str = "1h", limit: int = 48):
 
 def get_gemini_client():
     """Initialize Gemini client."""
+    if not GEMINI_AVAILABLE:
+        return None
+
     if hasattr(st, 'secrets') and 'GEMINI_API_KEY' in st.secrets:
         api_key = st.secrets['GEMINI_API_KEY']
     else:
