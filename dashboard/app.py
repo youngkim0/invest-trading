@@ -11,13 +11,8 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
-# Optional: Google Gemini for AI insights
-try:
-    import google.generativeai as genai
-    GEMINI_AVAILABLE = True
-except ImportError:
-    GEMINI_AVAILABLE = False
-    genai = None
+# Gemini API via REST (no package needed)
+GEMINI_AVAILABLE = True  # Always available via REST API
 
 # Korea Standard Time (UTC+9)
 try:
@@ -217,21 +212,33 @@ def fetch_klines(symbol: str, interval: str = "1h", limit: int = 48):
     return pd.DataFrame()
 
 
-def get_gemini_client():
-    """Initialize Gemini client."""
-    if not GEMINI_AVAILABLE:
-        return None
-
+def get_gemini_api_key():
+    """Get Gemini API key from secrets or environment."""
     if hasattr(st, 'secrets') and 'GEMINI_API_KEY' in st.secrets:
-        api_key = st.secrets['GEMINI_API_KEY']
+        return st.secrets['GEMINI_API_KEY']
+    return os.environ.get('GEMINI_API_KEY', '')
+
+
+def call_gemini_api(prompt: str, api_key: str) -> str:
+    """Call Gemini API via REST (no package needed)."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.7,
+            "maxOutputTokens": 1024,
+        }
+    }
+
+    response = requests.post(url, headers=headers, json=data, timeout=30)
+
+    if response.status_code == 200:
+        result = response.json()
+        return result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
     else:
-        api_key = os.environ.get('GEMINI_API_KEY', '')
-
-    if not api_key:
-        return None
-
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel('gemini-2.0-flash')
+        raise Exception(f"Gemini API error: {response.status_code} - {response.text[:200]}")
 
 
 def get_analysis_cache_key(trades, signals):
@@ -246,10 +253,10 @@ def get_analysis_cache_key(trades, signals):
 
 @st.cache_data(ttl=21600)  # Cache for 6 hours (21600 seconds)
 def generate_ai_insights(trades_json: str, signals_json: str, prices_json: str, cache_key: str):
-    """Generate AI insights about trading performance using Gemini."""
+    """Generate AI insights about trading performance using Gemini REST API."""
     try:
-        model = get_gemini_client()
-        if not model:
+        api_key = get_gemini_api_key()
+        if not api_key:
             return None
 
         trades = json.loads(trades_json)
@@ -317,10 +324,10 @@ Provide your analysis in a clear, concise format using markdown. Be specific and
 Focus on patterns you see in the data, not generic advice.
 Keep response under 500 words."""
 
-        response = model.generate_content(prompt)
+        analysis_text = call_gemini_api(prompt, api_key)
 
         return {
-            'analysis': response.text,
+            'analysis': analysis_text,
             'signal_accuracy': signal_accuracy,
             'total_signals_analyzed': total_actionable,
             'correct_signals': correct_signals,
@@ -845,10 +852,8 @@ def main():
                 st.markdown(insights.get('analysis', 'No analysis available'))
 
         else:
-            # Show more details about why AI is not available
-            if not GEMINI_AVAILABLE:
-                st.warning("AI analysis not available. Package 'google-generativeai' not installed.")
-            elif not (hasattr(st, 'secrets') and 'GEMINI_API_KEY' in st.secrets) and not os.environ.get('GEMINI_API_KEY'):
+            # Show details about why AI is not available
+            if not get_gemini_api_key():
                 st.warning("AI analysis not available. GEMINI_API_KEY not found in secrets.")
             else:
                 st.warning("AI analysis not available. Check API key configuration.")
