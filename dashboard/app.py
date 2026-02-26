@@ -228,11 +228,11 @@ def call_gemini_api(prompt: str, api_key: str) -> str:
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.7,
-            "maxOutputTokens": 2048,
+            "maxOutputTokens": 4096,
         }
     }
 
-    response = requests.post(url, headers=headers, json=data, timeout=30)
+    response = requests.post(url, headers=headers, json=data, timeout=60)
 
     if response.status_code == 200:
         result = response.json()
