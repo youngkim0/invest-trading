@@ -845,7 +845,13 @@ def main():
                 st.markdown(insights.get('analysis', 'No analysis available'))
 
         else:
-            st.warning("AI analysis not available. Check if GEMINI_API_KEY is configured.")
+            # Show more details about why AI is not available
+            if not GEMINI_AVAILABLE:
+                st.warning("AI analysis not available. Package 'google-generativeai' not installed.")
+            elif not (hasattr(st, 'secrets') and 'GEMINI_API_KEY' in st.secrets) and not os.environ.get('GEMINI_API_KEY'):
+                st.warning("AI analysis not available. GEMINI_API_KEY not found in secrets.")
+            else:
+                st.warning("AI analysis not available. Check API key configuration.")
 
     except Exception as e:
         st.error(f"Error generating AI insights: {e}")
