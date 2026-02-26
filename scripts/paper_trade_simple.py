@@ -26,14 +26,30 @@ from data.storage.supabase_client import (
     SignalRepository,
     PerformanceRepository,
 )
+from data.features.smc.detector import SMCDetector
+from data.features.smc.confluence import ConfluenceEngine
+from data.features.smc.zones import ZoneDirection
 
 
 class TechnicalSignalGenerator:
-    """Generate trading signals from technical indicators."""
+    """Generate trading signals from technical indicators + SMC."""
 
     def __init__(self, rsi_oversold: float = 30, rsi_overbought: float = 70):
         self.rsi_oversold = rsi_oversold
         self.rsi_overbought = rsi_overbought
+
+        # Initialize SMC components
+        self.smc_detector = SMCDetector(
+            lookback=100,
+            atr_period=14,
+            swing_lookback=5,
+            min_impulse_atr=1.5,  # Slightly lower for more OB detection
+        )
+        self.confluence_engine = ConfluenceEngine(
+            min_confluence_score=0.55,  # Lower threshold for paper trading
+            min_rr_ratio=1.5,
+            atr_stop_multiplier=1.5,
+        )
 
     def calculate_rsi(self, prices: pd.Series, period: int = 14) -> dict:
         """Calculate RSI with momentum detection."""
@@ -97,12 +113,11 @@ class TechnicalSignalGenerator:
         }
 
     def generate_signal(self, df: pd.DataFrame) -> dict:
-        """Generate trading signal based on technical indicators.
+        """Generate trading signal based on technical indicators + SMC.
 
-        Improved scoring system:
-        - Lower thresholds for sell signals
-        - Add momentum reversal detection
-        - Reduce SMA trend bias
+        Combined scoring system:
+        - Technical indicators (RSI, MACD, SMA, momentum): 60% weight
+        - SMC confluence (Order Blocks, FVG, market structure): 40% weight
         """
         if len(df) < 60:
             return {"signal": "hold", "confidence": 0.5, "reasoning": "Insufficient data"}
@@ -110,13 +125,53 @@ class TechnicalSignalGenerator:
         prices = df["close"]
         current_price = float(prices.iloc[-1])
 
-        # Calculate indicators
+        # Calculate technical indicators
         rsi = self.calculate_rsi(prices)
         macd = self.calculate_macd(prices)
         sma = self.calculate_sma_crossover(prices)
         momentum = self.calculate_price_momentum(prices)
 
-        # Scoring system - more balanced
+        # === SMC Analysis ===
+        smc_result = None
+        smc_score = 0
+        smc_direction = None
+        smc_reasons = []
+
+        try:
+            smc_analysis = self.smc_detector.analyze(df)
+            if smc_analysis:
+                smc_result = self.confluence_engine.analyze(
+                    current_price=current_price,
+                    order_blocks=smc_analysis.get("order_blocks", []),
+                    fair_value_gaps=smc_analysis.get("fair_value_gaps", []),
+                    liquidity_sweeps=smc_analysis.get("liquidity_sweeps", []),
+                    channels=smc_analysis.get("channels", []),
+                    market_structure=smc_analysis.get("market_structure"),
+                    atr=smc_analysis.get("atr", 0.0),
+                )
+
+                if smc_result:
+                    smc_score = smc_result.score
+                    smc_direction = smc_result.direction
+                    smc_reasons.append(f"SMC confluence {smc_score:.0%}")
+
+                    # Add specific SMC factors
+                    if smc_result.factors.get("zone_confluence", 0) > 0.15:
+                        smc_reasons.append("OB+FVG overlap")
+                    if smc_result.factors.get("htf_alignment", 0) > 0.1:
+                        smc_reasons.append("HTF aligned")
+
+                # Check market structure trend
+                market_structure = smc_analysis.get("market_structure")
+                if market_structure:
+                    if market_structure.trend == ZoneDirection.BULLISH:
+                        smc_reasons.append("Bullish structure")
+                    elif market_structure.trend == ZoneDirection.BEARISH:
+                        smc_reasons.append("Bearish structure")
+        except Exception as e:
+            logger.debug(f"SMC analysis failed: {e}")
+
+        # === Technical Scoring ===
         buy_score = 0
         sell_score = 0
         reasons = []
@@ -133,71 +188,69 @@ class TechnicalSignalGenerator:
         elif rsi["value"] > 60:
             sell_score += 1
 
-        # RSI momentum reversal (early exit signals)
+        # RSI momentum reversal
         if rsi["value"] > 65 and rsi["falling"]:
             sell_score += 1
-            reasons.append(f"RSI reversing from {rsi['prev']:.0f}→{rsi['value']:.0f}")
+            reasons.append(f"RSI reversing {rsi['prev']:.0f}→{rsi['value']:.0f}")
         elif rsi["value"] < 35 and rsi["rising"]:
             buy_score += 1
-            reasons.append(f"RSI recovering from {rsi['prev']:.0f}→{rsi['value']:.0f}")
+            reasons.append(f"RSI recovering {rsi['prev']:.0f}→{rsi['value']:.0f}")
 
-        # MACD signals (with momentum)
+        # MACD signals
         if macd["histogram"] > 0 and macd["macd"] > macd["signal"]:
             if macd["hist_rising"]:
                 buy_score += 1.5
-                reasons.append("MACD bullish + strengthening")
+                reasons.append("MACD bullish+")
             else:
-                buy_score += 0.5  # Weakening bullish
+                buy_score += 0.5
         elif macd["histogram"] < 0 and macd["macd"] < macd["signal"]:
             if macd["hist_falling"]:
                 sell_score += 1.5
-                reasons.append("MACD bearish + strengthening")
+                reasons.append("MACD bearish+")
             else:
-                sell_score += 0.5  # Weakening bearish
+                sell_score += 0.5
 
         # MACD histogram reversal
         if macd["histogram"] > 0 and macd["hist_falling"]:
             sell_score += 0.5
-            reasons.append("MACD histogram weakening")
         elif macd["histogram"] < 0 and macd["hist_rising"]:
             buy_score += 0.5
-            reasons.append("MACD histogram recovering")
 
-        # SMA crossover (reduced trend bias)
+        # SMA crossover
         if sma["bullish_cross"]:
             buy_score += 2
-            reasons.append("SMA bullish crossover")
+            reasons.append("SMA bullish cross")
         elif sma["bearish_cross"]:
             sell_score += 2
-            reasons.append("SMA bearish crossover")
-        # Removed constant +0.5 bias - only count on actual crossovers
+            reasons.append("SMA bearish cross")
 
-        # Price momentum signals
+        # Price momentum
         if momentum["strong_up"]:
             buy_score += 1
-            reasons.append(f"Strong momentum +{momentum['momentum_5']:.1f}%")
+            reasons.append(f"Momentum +{momentum['momentum_5']:.1f}%")
         elif momentum["strong_down"]:
             sell_score += 1
-            reasons.append(f"Strong momentum {momentum['momentum_5']:.1f}%")
+            reasons.append(f"Momentum {momentum['momentum_5']:.1f}%")
 
-        # Momentum weakening (mean reversion signals)
-        if momentum["weakening_up"] and rsi["value"] > 55:
-            sell_score += 0.5
-            reasons.append("Uptrend weakening")
-        elif momentum["weakening_down"] and rsi["value"] < 45:
-            buy_score += 0.5
-            reasons.append("Downtrend weakening")
+        # === SMC Integration (40% weight) ===
+        if smc_result and smc_score >= 0.55:
+            if smc_direction == ZoneDirection.BULLISH:
+                buy_score += smc_score * 3  # Up to 3 points from SMC
+                reasons.extend(smc_reasons)
+            elif smc_direction == ZoneDirection.BEARISH:
+                sell_score += smc_score * 3
+                reasons.extend(smc_reasons)
 
-        # Determine signal with LOWER thresholds
+        # === Final Signal Determination ===
         total_score = buy_score - sell_score
-        max_score = 6.0  # Increased max due to new factors
+        max_score = 9.0  # Increased for SMC contribution
 
-        # Lowered thresholds: 1.5 instead of 2, -1.5 instead of -2
-        if total_score >= 1.5:
-            signal = "strong_buy" if total_score >= 3.0 else "buy"
+        # Higher thresholds with SMC (requires more confluence)
+        if total_score >= 2.5:
+            signal = "strong_buy" if total_score >= 4.5 else "buy"
             confidence = min(0.9, 0.55 + (total_score / max_score) * 0.35)
-        elif total_score <= -1.5:
-            signal = "strong_sell" if total_score <= -3.0 else "sell"
+        elif total_score <= -2.5:
+            signal = "strong_sell" if total_score <= -4.5 else "sell"
             confidence = min(0.9, 0.55 + (abs(total_score) / max_score) * 0.35)
         else:
             signal = "hold"
@@ -214,6 +267,8 @@ class TechnicalSignalGenerator:
                 "sma": sma,
                 "momentum": momentum,
                 "price": current_price,
+                "smc_score": smc_score if smc_result else 0,
+                "smc_direction": smc_direction.value if smc_direction else None,
             },
         }
 
