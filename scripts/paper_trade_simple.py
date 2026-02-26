@@ -268,9 +268,81 @@ class SimplePaperTrader:
         self.winning_trades = 0
         self.total_pnl = 0.0
 
+    async def _load_existing_positions(self):
+        """Load existing open positions from database on startup."""
+        try:
+            # Query for open positions (no exit_price)
+            result = await asyncio.to_thread(
+                lambda: self.trade_repo.table.select("*")
+                .is_("exit_price", "null")
+                .eq("strategy_name", "paper_technical")
+                .execute()
+            )
+
+            if result.data:
+                for trade in result.data:
+                    symbol = trade.get("symbol")
+                    if not symbol:
+                        continue
+
+                    # Reconstruct position from trade log
+                    entry_price = float(trade.get("entry_price", 0))
+                    quantity = float(trade.get("quantity", 0))
+                    side = "long" if trade.get("side") == "buy" else "short"
+                    entry_time_str = trade.get("entry_time")
+
+                    if entry_price <= 0 or quantity <= 0:
+                        continue
+
+                    # Parse entry time
+                    if entry_time_str:
+                        try:
+                            entry_time = datetime.fromisoformat(entry_time_str.replace("Z", "+00:00"))
+                        except:
+                            entry_time = datetime.now(timezone.utc)
+                    else:
+                        entry_time = datetime.now(timezone.utc)
+
+                    # Calculate stop/take profit prices
+                    if side == "long":
+                        stop_price = entry_price * (1 - self.stop_loss_pct)
+                        take_profit_price = entry_price * (1 + self.take_profit_pct)
+                    else:
+                        stop_price = entry_price * (1 + self.stop_loss_pct)
+                        take_profit_price = entry_price * (1 - self.take_profit_pct)
+
+                    self.positions[symbol] = {
+                        "position_id": trade.get("position_id", str(uuid.uuid4())),
+                        "side": side,
+                        "entry_price": entry_price,
+                        "quantity": quantity,
+                        "entry_time": entry_time,
+                        "signal": {"confidence": trade.get("signal_confidence", 0.5)},
+                        "trailing_stop_active": False,
+                        "peak_pnl_pct": 0.0,
+                        "stop_loss_price": stop_price,
+                        "take_profit_price": take_profit_price,
+                    }
+
+                    hours_open = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
+                    logger.info(
+                        f"📂 Loaded existing position: {symbol} {side.upper()} @ ${entry_price:,.2f} | "
+                        f"Qty: {quantity:.6f} | Open for {hours_open:.1f}h"
+                    )
+
+                if self.positions:
+                    logger.info(f"✅ Loaded {len(self.positions)} existing position(s) from database")
+
+        except Exception as e:
+            logger.warning(f"Could not load existing positions: {e}")
+
     async def start(self):
         """Start paper trading."""
         self.running = True
+
+        # Load existing positions from database
+        await self._load_existing_positions()
+
         logger.info("=" * 60)
         logger.info("🚀 Starting Paper Trading")
         logger.info(f"   Symbols: {self.symbols}")
