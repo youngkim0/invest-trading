@@ -221,7 +221,7 @@ def get_gemini_api_key():
 
 def call_gemini_api(prompt: str, api_key: str) -> str:
     """Call Gemini API via REST (no package needed)."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
 
     headers = {"Content-Type": "application/json"}
     data = {
