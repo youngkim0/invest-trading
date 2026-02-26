@@ -279,27 +279,29 @@ class SimplePaperTrader:
     def __init__(
         self,
         symbols: list[str] = ["BTCUSDT"],
-        initial_capital: float = 10000.0,
-        max_position_pct: float = 0.2,
+        initial_capital: float = 1000.0,  # Realistic starting capital
+        max_position_pct: float = 0.25,  # 25% per position (can have 2-4 positions)
+        leverage: int = 10,  # 10x leverage (realistic for crypto futures)
         check_interval: int = 60,  # seconds
-        # Exit configuration - more aggressive for capturing swings
-        stop_loss_pct: float = 0.02,  # 2% stop loss
-        take_profit_pct: float = 0.025,  # 2.5% take profit (lowered from 4%)
-        trailing_stop_activation_pct: float = 0.012,  # Activate trailing stop at 1.2% profit (lowered)
-        trailing_stop_distance_pct: float = 0.008,  # Trail 0.8% behind peak (tighter)
-        signal_exit_min_confidence: float = 0.60,  # Lowered from 80% to allow more exits
-        signal_exit_min_profit_pct: float = 0.01,  # If profit > 1%, require strong signal
-        # New: time-based exit
-        max_position_hours: float = 8.0,  # Exit stale positions after 8 hours
-        stale_position_min_profit_pct: float = 0.005,  # Exit stale pos if profit < 0.5%
+        # Exit configuration - tighter for leveraged trading
+        stop_loss_pct: float = 0.015,  # 1.5% stop loss (with 10x = 15% account risk)
+        take_profit_pct: float = 0.02,  # 2% take profit (with 10x = 20% gain)
+        trailing_stop_activation_pct: float = 0.01,  # Activate trailing at 1%
+        trailing_stop_distance_pct: float = 0.006,  # Trail 0.6% behind peak
+        signal_exit_min_confidence: float = 0.60,
+        signal_exit_min_profit_pct: float = 0.008,  # 0.8% profit threshold
+        # Time-based exit
+        max_position_hours: float = 6.0,  # Shorter hold time for leveraged
+        stale_position_min_profit_pct: float = 0.003,  # Exit stale if < 0.3%
     ):
         self.symbols = symbols
         self.initial_capital = initial_capital
         self.capital = initial_capital
         self.max_position_pct = max_position_pct
+        self.leverage = leverage
         self.check_interval = check_interval
 
-        # Exit parameters
+        # Exit parameters (adjusted for leverage)
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
         self.trailing_stop_activation_pct = trailing_stop_activation_pct
@@ -309,6 +311,9 @@ class SimplePaperTrader:
         # Time-based exit
         self.max_position_hours = max_position_hours
         self.stale_position_min_profit_pct = stale_position_min_profit_pct
+
+        # Liquidation tracking
+        self.liquidation_pct = 1.0 / leverage * 0.9  # ~9% for 10x (with 10% buffer)
 
         self.positions: dict[str, dict] = {}
         self.signal_generator = TechnicalSignalGenerator()
@@ -399,17 +404,16 @@ class SimplePaperTrader:
         await self._load_existing_positions()
 
         logger.info("=" * 60)
-        logger.info("🚀 Starting Paper Trading")
+        logger.info("🚀 Starting Leveraged Paper Trading")
         logger.info(f"   Symbols: {self.symbols}")
-        logger.info(f"   Initial Capital: ${self.initial_capital:,.2f}")
-        logger.info(f"   Max Position: {self.max_position_pct:.0%}")
-        logger.info(f"   Check Interval: {self.check_interval}s")
+        logger.info(f"   Capital: ${self.initial_capital:,.2f} | Leverage: {self.leverage}x")
+        logger.info(f"   Max Position: {self.max_position_pct:.0%} margin → ${self.initial_capital * self.max_position_pct * self.leverage:,.2f} size")
+        logger.info(f"   Liquidation at: {self.liquidation_pct:.1%} against position")
         logger.info("-" * 60)
-        logger.info("📊 Exit Configuration:")
-        logger.info(f"   Stop Loss: {self.stop_loss_pct:.1%}")
-        logger.info(f"   Take Profit: {self.take_profit_pct:.1%}")
+        logger.info("📊 Exit Configuration (adjusted for leverage):")
+        logger.info(f"   Stop Loss: {self.stop_loss_pct:.1%} (={self.stop_loss_pct * self.leverage:.0%} ROE)")
+        logger.info(f"   Take Profit: {self.take_profit_pct:.1%} (={self.take_profit_pct * self.leverage:.0%} ROE)")
         logger.info(f"   Trailing Stop: activates at {self.trailing_stop_activation_pct:.1%}, trails {self.trailing_stop_distance_pct:.1%}")
-        logger.info(f"   Signal Exit: min confidence {self.signal_exit_min_confidence:.0%}, profit threshold {self.signal_exit_min_profit_pct:.1%}")
         logger.info(f"   Stale Position: exit after {self.max_position_hours}h if profit < {self.stale_position_min_profit_pct:.1%}")
         logger.info("=" * 60)
 
@@ -483,15 +487,16 @@ class SimplePaperTrader:
             await self._open_position(symbol, "short", price, signal)
 
     async def _check_exit(self, symbol: str, signal: dict, price: float):
-        """Check if should exit a position with improved logic.
+        """Check if should exit a leveraged position.
 
         Priority order:
-        1. Take profit (highest priority - lock in gains)
-        2. Trailing stop (protect accumulated profits)
-        3. Stop loss (limit losses)
-        4. Time-based exit (stale positions)
-        5. RSI-based profit taking (exit on overbought while profitable)
-        6. Signal-based exit (with conditions met)
+        0. LIQUIDATION - forced exit (highest priority)
+        1. Take profit - lock in gains
+        2. Trailing stop - protect accumulated profits
+        3. Stop loss - limit losses
+        4. Time-based exit - stale positions
+        5. RSI-based profit taking
+        6. Signal-based exit
         """
         position = self.positions.get(symbol)
         if not position:
@@ -505,10 +510,18 @@ class SimplePaperTrader:
         should_exit = False
         exit_reason = ""
 
-        # 1. TAKE PROFIT - highest priority (lock in gains)
-        if pnl_pct >= self.take_profit_pct:
+        # 0. LIQUIDATION CHECK - forced exit at max loss
+        if pnl_pct <= -self.liquidation_pct:
             should_exit = True
-            exit_reason = f"Take profit triggered ({pnl_pct:.2%})"
+            roe = pnl_pct * self.leverage * 100
+            exit_reason = f"💀 LIQUIDATED ({pnl_pct:.2%} = {roe:.0f}% ROE)"
+            logger.warning(f"⚠️ Position liquidated! Lost margin on {symbol}")
+
+        # 1. TAKE PROFIT - lock in gains
+        elif pnl_pct >= self.take_profit_pct:
+            should_exit = True
+            roe = pnl_pct * self.leverage * 100
+            exit_reason = f"Take profit ({pnl_pct:.2%} = +{roe:.0f}% ROE)"
 
         # 2. TRAILING STOP - protect accumulated profits
         elif position.get("trailing_stop_active", False):
@@ -516,12 +529,13 @@ class SimplePaperTrader:
             trailing_stop_level = peak_pnl - self.trailing_stop_distance_pct
             if pnl_pct <= trailing_stop_level:
                 should_exit = True
-                exit_reason = f"Trailing stop triggered (peak: {peak_pnl:.2%}, current: {pnl_pct:.2%})"
+                exit_reason = f"Trailing stop (peak: {peak_pnl:.2%}, current: {pnl_pct:.2%})"
 
         # 3. STOP LOSS - limit losses
         elif pnl_pct <= -self.stop_loss_pct:
             should_exit = True
-            exit_reason = f"Stop loss triggered ({pnl_pct:.2%})"
+            roe = pnl_pct * self.leverage * 100
+            exit_reason = f"Stop loss ({pnl_pct:.2%} = {roe:.0f}% ROE)"
 
         # 4. TIME-BASED EXIT - exit stale positions with minimal profit
         elif self._is_stale_position(position, pnl_pct):
@@ -646,23 +660,30 @@ class SimplePaperTrader:
             return (entry_price - current_price) / entry_price
 
     async def _open_position(self, symbol: str, side: str, price: float, signal: dict):
-        """Open a position."""
-        position_value = self.capital * self.max_position_pct
+        """Open a leveraged position."""
+        # Margin = capital allocated to this position
+        margin = self.capital * self.max_position_pct
+        # Position value = margin * leverage
+        position_value = margin * self.leverage
         quantity = position_value / price
 
-        # Calculate stop loss and take profit prices for logging
+        # Calculate stop loss, take profit, and liquidation prices
         if side == "long":
             stop_price = price * (1 - self.stop_loss_pct)
             take_profit_price = price * (1 + self.take_profit_pct)
+            liquidation_price = price * (1 - self.liquidation_pct)
         else:
             stop_price = price * (1 + self.stop_loss_pct)
             take_profit_price = price * (1 - self.take_profit_pct)
+            liquidation_price = price * (1 + self.liquidation_pct)
 
         self.positions[symbol] = {
             "position_id": str(uuid.uuid4()),
             "side": side,
             "entry_price": price,
             "quantity": quantity,
+            "margin": margin,  # Actual capital at risk
+            "leverage": self.leverage,
             "entry_time": datetime.now(timezone.utc),
             "signal": signal,
             # Trailing stop fields
@@ -671,17 +692,18 @@ class SimplePaperTrader:
             # Reference prices
             "stop_loss_price": stop_price,
             "take_profit_price": take_profit_price,
+            "liquidation_price": liquidation_price,
         }
 
         logger.info(
             f"📈 OPEN {side.upper()} {symbol} @ ${price:,.2f} | "
-            f"Qty: {quantity:.6f} | Value: ${position_value:,.2f} | "
-            f"Confidence: {signal['confidence']:.0%}"
+            f"Margin: ${margin:,.2f} | Size: ${position_value:,.2f} ({self.leverage}x) | "
+            f"Conf: {signal['confidence']:.0%}"
         )
         logger.info(
             f"   └─ SL: ${stop_price:,.2f} ({self.stop_loss_pct:.1%}) | "
             f"TP: ${take_profit_price:,.2f} ({self.take_profit_pct:.1%}) | "
-            f"Trailing activates at {self.trailing_stop_activation_pct:.1%}"
+            f"Liq: ${liquidation_price:,.2f}"
         )
 
         # Log to Supabase
@@ -704,18 +726,23 @@ class SimplePaperTrader:
             logger.error(f"Failed to log trade: {e}")
 
     async def _close_position(self, symbol: str, price: float, reason: str):
-        """Close a position."""
+        """Close a leveraged position."""
         position = self.positions.pop(symbol, None)
         if not position:
             return
 
-        # Calculate PnL
+        # Calculate PnL on the leveraged position
         if position["side"] == "long":
             pnl = (price - position["entry_price"]) * position["quantity"]
         else:
             pnl = (position["entry_price"] - price) * position["quantity"]
 
         pnl_pct = self._calculate_pnl_pct(position, price)
+        margin = position.get("margin", position["quantity"] * position["entry_price"] / self.leverage)
+        leverage = position.get("leverage", self.leverage)
+
+        # ROE (Return on Equity) = actual return on margin
+        roe = (pnl / margin) * 100 if margin > 0 else 0
 
         self.capital += pnl
         self.total_pnl += pnl
@@ -728,8 +755,8 @@ class SimplePaperTrader:
         emoji = "✅" if pnl > 0 else "❌"
         logger.info(
             f"{emoji} CLOSE {symbol} @ ${price:,.2f} | "
-            f"PnL: ${pnl:,.2f} ({pnl_pct:+.2%}) | "
-            f"Reason: {reason} | Duration: {duration/60:.1f}min"
+            f"PnL: ${pnl:,.2f} (ROE: {roe:+.1f}%) | "
+            f"Reason: {reason} | {duration/60:.1f}min"
         )
 
         # Update trade in Supabase
@@ -862,51 +889,55 @@ async def main():
     """Main function."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Simple Paper Trading")
+    parser = argparse.ArgumentParser(description="Leveraged Paper Trading")
     parser.add_argument(
         "--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT"],
         help="Symbols to trade"
     )
     parser.add_argument(
-        "--capital", type=float, default=10000.0,
-        help="Initial capital"
+        "--capital", type=float, default=1000.0,
+        help="Initial capital (default: $1000)"
+    )
+    parser.add_argument(
+        "--leverage", type=int, default=10,
+        help="Leverage multiplier (default: 10x)"
     )
     parser.add_argument(
         "--interval", type=int, default=60,
         help="Check interval in seconds"
     )
-    # Exit configuration arguments
+    # Exit configuration arguments (adjusted for leverage)
     parser.add_argument(
-        "--stop-loss", type=float, default=0.02,
-        help="Stop loss percentage (default: 0.02 = 2%%)"
+        "--stop-loss", type=float, default=0.015,
+        help="Stop loss percentage (default: 0.015 = 1.5%%)"
     )
     parser.add_argument(
-        "--take-profit", type=float, default=0.025,
-        help="Take profit percentage (default: 0.025 = 2.5%%)"
+        "--take-profit", type=float, default=0.02,
+        help="Take profit percentage (default: 0.02 = 2%%)"
     )
     parser.add_argument(
-        "--trailing-activation", type=float, default=0.012,
-        help="Trailing stop activation percentage (default: 0.012 = 1.2%%)"
+        "--trailing-activation", type=float, default=0.01,
+        help="Trailing stop activation percentage (default: 0.01 = 1%%)"
     )
     parser.add_argument(
-        "--trailing-distance", type=float, default=0.008,
-        help="Trailing stop distance percentage (default: 0.008 = 0.8%%)"
+        "--trailing-distance", type=float, default=0.006,
+        help="Trailing stop distance percentage (default: 0.006 = 0.6%%)"
     )
     parser.add_argument(
         "--signal-confidence", type=float, default=0.60,
         help="Minimum confidence for signal-based exits (default: 0.60 = 60%%)"
     )
     parser.add_argument(
-        "--signal-profit-threshold", type=float, default=0.01,
-        help="Profit threshold requiring strong signal to exit (default: 0.01 = 1%%)"
+        "--signal-profit-threshold", type=float, default=0.008,
+        help="Profit threshold requiring strong signal to exit (default: 0.008 = 0.8%%)"
     )
     parser.add_argument(
-        "--max-position-hours", type=float, default=8.0,
-        help="Maximum hours to hold a stale position (default: 8.0)"
+        "--max-position-hours", type=float, default=6.0,
+        help="Maximum hours to hold a stale position (default: 6.0)"
     )
     parser.add_argument(
-        "--stale-profit-threshold", type=float, default=0.005,
-        help="Min profit to keep stale position (default: 0.005 = 0.5%%)"
+        "--stale-profit-threshold", type=float, default=0.003,
+        help="Min profit to keep stale position (default: 0.003 = 0.3%%)"
     )
     args = parser.parse_args()
 
@@ -922,10 +953,11 @@ async def main():
         rotation="10 MB",
     )
 
-    # Create trader with exit configuration
+    # Create trader with leverage configuration
     trader = SimplePaperTrader(
         symbols=args.symbols,
         initial_capital=args.capital,
+        leverage=args.leverage,
         check_interval=args.interval,
         stop_loss_pct=args.stop_loss,
         take_profit_pct=args.take_profit,
