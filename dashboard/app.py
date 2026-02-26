@@ -454,12 +454,27 @@ def main():
     st.header("⚡ Recent Signals (Every Minute Decisions)")
 
     if signals:
+        # Build a price lookup from signals (future prices for validation)
+        # signals[0] is most recent, signals[-1] is oldest
+        price_lookup = {}  # symbol -> list of (timestamp, price)
+        for sig in signals:
+            symbol = sig.get('symbol', '')
+            price = float(sig.get('entry_price') or 0)
+            ts = sig.get('timestamp', '')
+            if symbol and price > 0 and ts:
+                if symbol not in price_lookup:
+                    price_lookup[symbol] = []
+                price_lookup[symbol].append((ts, price))
+
         # Format display with KST timezone
         display_data = []
-        for sig in signals[:30]:
+        signal_results = {'correct': 0, 'incorrect': 0, 'pending': 0}
+
+        for i, sig in enumerate(signals[:30]):
             signal_type = sig.get('signal_type', 'hold') or 'hold'
             confidence = float(sig.get('confidence') or 0) * 100
-            risk_score = float(sig.get('risk_score') or 0)
+            sig_price = float(sig.get('entry_price') or 0)
+            symbol = sig.get('symbol', 'N/A')
             timestamp_kst = to_kst(sig.get('timestamp', ''))
 
             # Signal emoji
@@ -474,19 +489,121 @@ def main():
             else:
                 signal_emoji = "⚪"
 
+            # Determine signal result by comparing to price ~60 signals later (~1 hour)
+            # For the most recent signals (i < 60), we don't have enough future data
+            result = "⏳"  # Pending
+            result_text = "Pending"
+
+            if signal_type != 'hold' and sig_price > 0:
+                # Get price approximately 60 minutes later (60 signals back in our list = future)
+                # Note: signals[0] is newest, so we need to look at signals before this one
+                # But actually we want FUTURE price, so we look at MORE RECENT signals (lower index)
+                future_idx = max(0, i - 60)  # 60 signals more recent
+
+                if i >= 60 and future_idx < len(signals):
+                    future_sig = signals[future_idx]
+                    if future_sig.get('symbol') == symbol:
+                        future_price = float(future_sig.get('entry_price') or 0)
+                        if future_price > 0:
+                            price_change = (future_price - sig_price) / sig_price * 100
+
+                            if 'buy' in signal_type.lower():
+                                is_correct = price_change > 0.1  # Need >0.1% move to count
+                            elif 'sell' in signal_type.lower():
+                                is_correct = price_change < -0.1
+                            else:
+                                is_correct = None
+
+                            if is_correct is True:
+                                result = "✅"
+                                result_text = f"+{abs(price_change):.2f}%"
+                                signal_results['correct'] += 1
+                            elif is_correct is False:
+                                result = "❌"
+                                result_text = f"{price_change:+.2f}%"
+                                signal_results['incorrect'] += 1
+                else:
+                    signal_results['pending'] += 1
+            else:
+                if signal_type == 'hold':
+                    result = "➖"
+                    result_text = "Hold"
+
             display_data.append({
                 'Time (KST)': timestamp_kst,
-                'Symbol': sig.get('symbol', 'N/A'),
+                'Symbol': symbol,
                 'Signal': f"{signal_emoji} {signal_type}",
                 'Confidence': f"{confidence:.0f}%",
-                'Risk': f"{risk_score:.2f}",
+                'Price': f"${sig_price:,.2f}" if sig_price > 0 else "—",
+                'Result': f"{result} {result_text}",
             })
+
+        # Show signal accuracy summary
+        total_evaluated = signal_results['correct'] + signal_results['incorrect']
+        if total_evaluated > 0:
+            accuracy = signal_results['correct'] / total_evaluated * 100
+            acc_color = "🟢" if accuracy >= 55 else "🔴" if accuracy < 45 else "🟡"
+            st.markdown(f"**Signal Accuracy (1h later):** {acc_color} {accuracy:.1f}% ({signal_results['correct']}/{total_evaluated} correct) | ⏳ {signal_results['pending']} pending")
 
         st.dataframe(
             pd.DataFrame(display_data),
             use_container_width=True,
             hide_index=True,
         )
+
+        # Signal diagnostics expander
+        with st.expander("🔍 Signal Quality Diagnostics"):
+            # Count signal flips (buy→sell or sell→buy)
+            flips = 0
+            last_direction = {}
+            signal_by_symbol = {'BTCUSDT': [], 'ETHUSDT': []}
+
+            for sig in signals:
+                symbol = sig.get('symbol', '')
+                sig_type = sig.get('signal_type', 'hold')
+
+                if symbol in signal_by_symbol:
+                    signal_by_symbol[symbol].append(sig_type)
+
+                # Determine direction
+                if 'buy' in sig_type:
+                    direction = 'buy'
+                elif 'sell' in sig_type:
+                    direction = 'sell'
+                else:
+                    continue
+
+                if symbol in last_direction and last_direction[symbol] != direction:
+                    flips += 1
+                last_direction[symbol] = direction
+
+            # Calculate metrics
+            total_actionable = sum(1 for s in signals if s.get('signal_type', 'hold') != 'hold')
+            flip_rate = (flips / total_actionable * 100) if total_actionable > 0 else 0
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                flip_color = "🔴" if flip_rate > 40 else "🟡" if flip_rate > 25 else "🟢"
+                st.metric("Signal Flip Rate", f"{flip_color} {flip_rate:.1f}%", help="How often signal changes direction (lower is better)")
+            with col2:
+                st.metric("Direction Changes", f"{flips}", help="Total buy↔sell flips in recent signals")
+            with col3:
+                hold_count = sum(1 for s in signals if s.get('signal_type') == 'hold')
+                hold_pct = hold_count / len(signals) * 100 if signals else 0
+                st.metric("Hold Signals", f"{hold_pct:.1f}%", help="Percentage of hold (no action) signals")
+
+            st.markdown("""
+            **Why signals may be inaccurate:**
+            - 🔴 **High flip rate (>40%)**: System is indecisive, constantly changing direction
+            - 🔴 **Low hold rate (<20%)**: System is overtrading, not waiting for clear setups
+            - 🔴 **~50% accuracy**: Signals are essentially random
+
+            **Potential fixes:**
+            - Increase signal thresholds to reduce noise
+            - Add trend confirmation (only trade with trend)
+            - Require multiple timeframe agreement
+            - Add cooldown between opposite signals
+            """)
     else:
         st.info("No signals found")
 
