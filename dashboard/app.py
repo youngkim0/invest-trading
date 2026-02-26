@@ -1,6 +1,8 @@
 """Simplified AI Trading Dashboard - Focus on Signals, Trades, Performance"""
 
 import os
+import json
+import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -8,6 +10,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import google.generativeai as genai
 
 # Korea Standard Time (UTC+9)
 try:
@@ -205,6 +208,117 @@ def fetch_klines(symbol: str, interval: str = "1h", limit: int = 48):
         pass
 
     return pd.DataFrame()
+
+
+def get_gemini_client():
+    """Initialize Gemini client."""
+    if hasattr(st, 'secrets') and 'GEMINI_API_KEY' in st.secrets:
+        api_key = st.secrets['GEMINI_API_KEY']
+    else:
+        api_key = os.environ.get('GEMINI_API_KEY', '')
+
+    if not api_key:
+        return None
+
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel('gemini-2.0-flash')
+
+
+def get_analysis_cache_key(trades, signals):
+    """Generate cache key based on data hash."""
+    data_str = json.dumps({
+        'trades': [t.get('position_id', '') for t in trades[-20:]],
+        'signals': len(signals),
+        'hour_bucket': datetime.now(timezone.utc).hour // 6  # Changes every 6 hours
+    }, sort_keys=True)
+    return hashlib.md5(data_str.encode()).hexdigest()
+
+
+@st.cache_data(ttl=21600)  # Cache for 6 hours (21600 seconds)
+def generate_ai_insights(trades_json: str, signals_json: str, prices_json: str, cache_key: str):
+    """Generate AI insights about trading performance using Gemini."""
+    try:
+        model = get_gemini_client()
+        if not model:
+            return None
+
+        trades = json.loads(trades_json)
+        signals = json.loads(signals_json)
+        prices = json.loads(prices_json)
+
+        # Prepare analysis data
+        closed_trades = [t for t in trades if t.get('exit_time')]
+        open_trades = [t for t in trades if not t.get('exit_time')]
+
+        # Calculate signal accuracy
+        signal_analysis = []
+        for sig in signals[-50:]:  # Last 50 signals
+            symbol = sig.get('symbol', '')
+            signal_type = sig.get('signal_type', '')
+            sig_price = float(sig.get('entry_price', 0) or 0)
+            current_price = prices.get(symbol, sig_price)
+
+            if sig_price > 0 and current_price > 0:
+                price_change = (current_price - sig_price) / sig_price * 100
+
+                # Was the signal correct?
+                if 'buy' in signal_type.lower():
+                    correct = price_change > 0
+                elif 'sell' in signal_type.lower():
+                    correct = price_change < 0
+                else:
+                    correct = None
+
+                signal_analysis.append({
+                    'signal': signal_type,
+                    'price_at_signal': sig_price,
+                    'current_price': current_price,
+                    'price_change_pct': price_change,
+                    'correct': correct
+                })
+
+        # Count correct signals
+        correct_signals = sum(1 for s in signal_analysis if s.get('correct') is True)
+        total_actionable = sum(1 for s in signal_analysis if s.get('correct') is not None)
+        signal_accuracy = (correct_signals / total_actionable * 100) if total_actionable > 0 else 0
+
+        # Build prompt
+        prompt = f"""You are a trading analyst reviewing an AI trading system's recent performance.
+Analyze the following data and provide:
+1. **Signal Accuracy Assessment**: Were the signals correct? (Signal accuracy: {signal_accuracy:.1f}% based on {total_actionable} actionable signals)
+2. **Trade Performance Review**: Analysis of recent closed trades
+3. **Concerns**: Any red flags or issues you see
+4. **Suggestions**: Specific improvements for better performance
+
+## Recent Trades (Last 10)
+{json.dumps(closed_trades[-10:], indent=2, default=str)}
+
+## Open Positions
+{json.dumps(open_trades, indent=2, default=str)}
+
+## Signal Accuracy Details (sample)
+{json.dumps(signal_analysis[-10:], indent=2, default=str)}
+
+## Current Prices
+BTC: ${prices.get('BTCUSDT', 0):,.2f}
+ETH: ${prices.get('ETHUSDT', 0):,.2f}
+
+Provide your analysis in a clear, concise format using markdown. Be specific and actionable.
+Focus on patterns you see in the data, not generic advice.
+Keep response under 500 words."""
+
+        response = model.generate_content(prompt)
+
+        return {
+            'analysis': response.text,
+            'signal_accuracy': signal_accuracy,
+            'total_signals_analyzed': total_actionable,
+            'correct_signals': correct_signals,
+            'generated_at': datetime.now(timezone.utc).isoformat()
+        }
+
+    except Exception as e:
+        return {'error': str(e), 'generated_at': datetime.now(timezone.utc).isoformat()}
 
 
 def main():
@@ -662,6 +776,69 @@ def main():
         st.warning(f"⏳ {passed_checks}/{len(checks)} criteria met. Keep paper trading.")
     else:
         st.info(f"📊 {passed_checks}/{len(checks)} criteria met. More data needed.")
+
+    # ============================================
+    # SECTION 7: AI INSIGHTS (Every 6 Hours)
+    # ============================================
+    st.markdown("---")
+    st.header("🤖 AI Trading Analyst")
+
+    # Calculate when next analysis will be generated
+    current_hour = datetime.now(timezone.utc).hour
+    next_analysis_hour = ((current_hour // 6) + 1) * 6 % 24
+    hours_until_next = (next_analysis_hour - current_hour) % 6
+    if hours_until_next == 0:
+        hours_until_next = 6
+
+    st.caption(f"Analysis updates every 6 hours | Next update in ~{hours_until_next}h")
+
+    # Generate cache key and get AI insights
+    try:
+        cache_key = get_analysis_cache_key(trades, signals)
+
+        # Convert data to JSON for caching (Streamlit cache requires hashable args)
+        trades_json = json.dumps(trades, default=str)
+        signals_json = json.dumps(signals[-100:], default=str)  # Last 100 signals
+        prices_json = json.dumps(prices)
+
+        with st.spinner("🧠 AI is analyzing your trading performance..."):
+            insights = generate_ai_insights(trades_json, signals_json, prices_json, cache_key)
+
+        if insights:
+            if 'error' in insights:
+                st.error(f"AI Analysis Error: {insights['error']}")
+            else:
+                # Signal Accuracy Metric
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    accuracy = insights.get('signal_accuracy', 0)
+                    accuracy_color = "🟢" if accuracy >= 50 else "🔴"
+                    st.metric(
+                        "Signal Accuracy",
+                        f"{accuracy:.1f}%",
+                        delta=f"{insights.get('correct_signals', 0)}/{insights.get('total_signals_analyzed', 0)} correct"
+                    )
+                with col2:
+                    generated_at = insights.get('generated_at', '')
+                    if generated_at:
+                        try:
+                            gen_time = datetime.fromisoformat(generated_at.replace('Z', '+00:00'))
+                            gen_time_kst = gen_time.astimezone(KST)
+                            st.metric("Last Analysis", gen_time_kst.strftime('%m/%d %H:%M KST'))
+                        except:
+                            st.metric("Last Analysis", "Just now")
+                with col3:
+                    st.metric("Analysis Period", "Last 6 hours")
+
+                # AI Analysis Content
+                st.markdown("### 📋 Analysis & Recommendations")
+                st.markdown(insights.get('analysis', 'No analysis available'))
+
+        else:
+            st.warning("AI analysis not available. Check if GEMINI_API_KEY is configured.")
+
+    except Exception as e:
+        st.error(f"Error generating AI insights: {e}")
 
     # ============================================
     # FOOTER
