@@ -17,15 +17,15 @@ import streamlit as st
 # Gemini API via REST (no package needed)
 GEMINI_AVAILABLE = True  # Always available via REST API
 
-# Korea Standard Time (UTC+9)
+# Korea Standard Time (UTC+9) - Define fallbacks first, then try to upgrade
+KST = timezone(timedelta(hours=9))
+UTC = timezone.utc
 try:
     from zoneinfo import ZoneInfo
     KST = ZoneInfo("Asia/Seoul")
     UTC = ZoneInfo("UTC")
 except Exception:
-    # Fallback for older Python or missing tzdata
-    KST = timezone(timedelta(hours=9))
-    UTC = timezone.utc
+    pass  # Keep the fallback values defined above
 NEW_SYSTEM_DATE = "2026-02-20T00:00:00Z"
 
 
@@ -344,7 +344,7 @@ Keep response under 500 words."""
 
 def main():
     st.title("📈 AI Trading Dashboard")
-    st.caption(f"Last updated: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')} | System started: Feb 20, 2026 | v2.2")
+    st.caption(f"Last updated: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')} | System started: Feb 20, 2026 | v2.3")
 
     # Auto refresh
     col1, col2 = st.columns([4, 1])
