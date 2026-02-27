@@ -514,9 +514,24 @@ class SimplePaperTrader:
 
     async def _check_entry(self, symbol: str, signal: dict, price: float):
         """Check if should enter a position."""
-        # Double-check no position exists (safety guard)
+        # Double-check no position exists in memory
         if symbol in self.positions:
             return
+
+        # Also check database for any open position (prevents duplicates across restarts)
+        try:
+            existing = await asyncio.to_thread(
+                lambda: self.trade_repo.table.select("id")
+                .eq("symbol", symbol)
+                .is_("exit_time", "null")
+                .limit(1)
+                .execute()
+            )
+            if existing.data:
+                logger.debug(f"Skipping {symbol} entry - position exists in DB")
+                return
+        except Exception as e:
+            logger.warning(f"Could not check DB for existing position: {e}")
 
         if signal["confidence"] < 0.65:
             return
