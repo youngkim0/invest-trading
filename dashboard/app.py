@@ -350,7 +350,7 @@ def main():
             st.rerun()
 
     # Fetch data
-    signals = fetch_signals(100)
+    signals = fetch_signals(500)  # More signals for pagination
     trades = fetch_trades(50)
     prices = fetch_current_prices()
 
@@ -478,9 +478,40 @@ def main():
     # SECTION 3: RECENT SIGNALS (Every Minute Decisions)
     # ============================================
     st.markdown("---")
-    st.header("⚡ Recent Signals (Every Minute Decisions)")
+    st.header("⚡ Recent Signals")
 
     if signals:
+        # Pagination controls
+        signals_per_page = 30
+        total_signals = len(signals)
+        total_pages = max(1, (total_signals + signals_per_page - 1) // signals_per_page)
+
+        nav_col1, nav_col2, nav_col3, nav_col4 = st.columns([1, 2, 2, 1])
+        with nav_col1:
+            st.write(f"**{total_signals}** signals")
+        with nav_col2:
+            page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, key="signal_page")
+        with nav_col3:
+            st.write(f"of {total_pages} pages")
+        with nav_col4:
+            show_holds = st.checkbox("Show holds", value=False, key="show_holds")
+
+        # Filter signals if needed
+        if not show_holds:
+            filtered_signals = [s for s in signals if s.get('signal_type', 'hold') != 'hold']
+        else:
+            filtered_signals = signals
+
+        # Recalculate pagination after filter
+        total_filtered = len(filtered_signals)
+        total_pages = max(1, (total_filtered + signals_per_page - 1) // signals_per_page)
+        page = min(page, total_pages)
+
+        # Get signals for current page
+        start_idx = (page - 1) * signals_per_page
+        end_idx = start_idx + signals_per_page
+        page_signals = filtered_signals[start_idx:end_idx]
+
         # Format display with KST timezone
         display_data = []
         signal_results = {'correct': 0, 'incorrect': 0, 'pending': 0}
@@ -488,7 +519,7 @@ def main():
         # Get current prices for comparison
         current_prices = prices  # From fetch_current_prices()
 
-        for i, sig in enumerate(signals[:30]):
+        for i, sig in enumerate(page_signals):
             signal_type = sig.get('signal_type', 'hold') or 'hold'
             confidence = float(sig.get('confidence') or 0) * 100
             sig_price = float(sig.get('entry_price') or 0)
