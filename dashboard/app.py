@@ -454,21 +454,12 @@ def main():
     st.header("⚡ Recent Signals (Every Minute Decisions)")
 
     if signals:
-        # Build a price lookup from signals (future prices for validation)
-        # signals[0] is most recent, signals[-1] is oldest
-        price_lookup = {}  # symbol -> list of (timestamp, price)
-        for sig in signals:
-            symbol = sig.get('symbol', '')
-            price = float(sig.get('entry_price') or 0)
-            ts = sig.get('timestamp', '')
-            if symbol and price > 0 and ts:
-                if symbol not in price_lookup:
-                    price_lookup[symbol] = []
-                price_lookup[symbol].append((ts, price))
-
         # Format display with KST timezone
         display_data = []
         signal_results = {'correct': 0, 'incorrect': 0, 'pending': 0}
+
+        # Get current prices for comparison
+        current_prices = prices  # From fetch_current_prices()
 
         for i, sig in enumerate(signals[:30]):
             signal_type = sig.get('signal_type', 'hold') or 'hold'
@@ -489,39 +480,49 @@ def main():
             else:
                 signal_emoji = "⚪"
 
-            # Determine signal result by comparing to price ~60 signals later (~1 hour)
-            # For the most recent signals (i < 60), we don't have enough future data
-            result = "⏳"  # Pending
+            # Determine signal result by comparing to current price
+            # Recent signals (< 10 min) are "Pending", older ones get evaluated
+            result = "⏳"
             result_text = "Pending"
 
             if signal_type != 'hold' and sig_price > 0:
-                # Get price approximately 60 minutes later (60 signals back in our list = future)
-                # Note: signals[0] is newest, so we need to look at signals before this one
-                # But actually we want FUTURE price, so we look at MORE RECENT signals (lower index)
-                future_idx = max(0, i - 60)  # 60 signals more recent
+                current_price = current_prices.get(symbol, 0)
 
-                if i >= 60 and future_idx < len(signals):
-                    future_sig = signals[future_idx]
-                    if future_sig.get('symbol') == symbol:
-                        future_price = float(future_sig.get('entry_price') or 0)
-                        if future_price > 0:
-                            price_change = (future_price - sig_price) / sig_price * 100
+                # Check if signal is old enough (at least 10 minutes)
+                sig_time = sig.get('timestamp', '')
+                is_old_enough = False
+                if sig_time:
+                    try:
+                        from datetime import datetime, timezone, timedelta
+                        if '+' in sig_time or 'Z' in sig_time:
+                            sig_dt = datetime.fromisoformat(sig_time.replace('Z', '+00:00'))
+                        else:
+                            sig_dt = datetime.fromisoformat(sig_time).replace(tzinfo=timezone.utc)
+                        age_minutes = (datetime.now(timezone.utc) - sig_dt).total_seconds() / 60
+                        is_old_enough = age_minutes >= 10  # At least 10 min old
+                    except:
+                        is_old_enough = i >= 10  # Fallback: assume 1 signal/min
 
-                            if 'buy' in signal_type.lower():
-                                is_correct = price_change > 0.1  # Need >0.1% move to count
-                            elif 'sell' in signal_type.lower():
-                                is_correct = price_change < -0.1
-                            else:
-                                is_correct = None
+                if is_old_enough and current_price > 0:
+                    price_change = (current_price - sig_price) / sig_price * 100
 
-                            if is_correct is True:
-                                result = "✅"
-                                result_text = f"+{abs(price_change):.2f}%"
-                                signal_results['correct'] += 1
-                            elif is_correct is False:
-                                result = "❌"
-                                result_text = f"{price_change:+.2f}%"
-                                signal_results['incorrect'] += 1
+                    if 'buy' in signal_type.lower():
+                        is_correct = price_change > 0.1  # Need >0.1% move to count
+                    elif 'sell' in signal_type.lower():
+                        is_correct = price_change < -0.1
+                    else:
+                        is_correct = None
+
+                    if is_correct is True:
+                        result = "✅"
+                        result_text = f"+{abs(price_change):.2f}%"
+                        signal_results['correct'] += 1
+                    elif is_correct is False:
+                        result = "❌"
+                        result_text = f"{price_change:+.2f}%"
+                        signal_results['incorrect'] += 1
+                    else:
+                        signal_results['pending'] += 1
                 else:
                     signal_results['pending'] += 1
             else:
