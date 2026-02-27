@@ -350,11 +350,10 @@ class SimplePaperTrader:
     async def _load_existing_positions(self):
         """Load existing open positions from database on startup."""
         try:
-            # Query for open positions (no exit_price)
+            # Query for open positions (no exit_time = still open)
             result = await asyncio.to_thread(
                 lambda: self.trade_repo.table.select("*")
-                .is_("exit_price", "null")
-                .eq("strategy_name", "paper_technical")
+                .is_("exit_time", "null")
                 .execute()
             )
 
@@ -498,6 +497,10 @@ class SimplePaperTrader:
 
     async def _check_entry(self, symbol: str, signal: dict, price: float):
         """Check if should enter a position."""
+        # Double-check no position exists (safety guard)
+        if symbol in self.positions:
+            return
+
         if signal["confidence"] < 0.65:
             return
 
