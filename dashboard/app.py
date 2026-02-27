@@ -355,20 +355,65 @@ def main():
     prices = fetch_current_prices()
 
     # ============================================
-    # SECTION 1: OVERALL PERFORMANCE (Since Feb 20)
+    # PORTFOLIO VALUE BANNER (at the top)
+    # ============================================
+    STARTING_CAPITAL = 1000.0
+
+    # Calculate realized P&L from closed trades
+    closed_trades = [t for t in trades if t.get('exit_time')]
+    realized_pnl = sum(t.get('net_pnl') or 0 for t in closed_trades)
+
+    # Calculate unrealized P&L from open positions
+    open_trades = [t for t in trades if not t.get('exit_time')]
+    unrealized_pnl = 0.0
+    for t in open_trades:
+        symbol = t.get('symbol', '')
+        side = t.get('side', '')
+        entry_price = float(t.get('entry_price') or 0)
+        quantity = float(t.get('quantity') or 0)
+        current_price = prices.get(symbol, entry_price)
+
+        if entry_price > 0 and quantity > 0:
+            if side == 'buy':
+                unrealized_pnl += (current_price - entry_price) * quantity
+            else:
+                unrealized_pnl += (entry_price - current_price) * quantity
+
+    # Total portfolio value
+    portfolio_value = STARTING_CAPITAL + realized_pnl + unrealized_pnl
+    total_return = ((portfolio_value - STARTING_CAPITAL) / STARTING_CAPITAL) * 100
+
+    # Display prominent portfolio banner
+    st.markdown("---")
+    port_col1, port_col2, port_col3, port_col4 = st.columns([2, 1.5, 1.5, 1.5])
+
+    with port_col1:
+        if portfolio_value >= STARTING_CAPITAL:
+            st.markdown(f"### 💰 Portfolio: <span style='color: #00ff88; font-size: 32px;'>${portfolio_value:,.2f}</span>", unsafe_allow_html=True)
+        else:
+            st.markdown(f"### 💰 Portfolio: <span style='color: #ff4444; font-size: 32px;'>${portfolio_value:,.2f}</span>", unsafe_allow_html=True)
+
+    with port_col2:
+        delta_color = "normal" if total_return >= 0 else "inverse"
+        st.metric("Total Return", f"{total_return:+.2f}%", delta=f"${portfolio_value - STARTING_CAPITAL:+,.2f}")
+
+    with port_col3:
+        st.metric("Realized", f"${realized_pnl:+,.2f}", delta=f"{len(closed_trades)} trades")
+
+    with port_col4:
+        st.metric("Unrealized", f"${unrealized_pnl:+,.2f}", delta=f"{len(open_trades)} open")
+
+    # ============================================
+    # SECTION 1: TRADE STATISTICS
     # ============================================
     st.markdown("---")
-    st.header("📊 Performance Since Update (Feb 20)")
+    st.header("📊 Trade Statistics")
 
-    # Calculate stats
-    closed_trades = [t for t in trades if t.get('exit_time')]
-    open_trades = [t for t in trades if not t.get('exit_time')]
-
+    # Calculate stats (reuse closed_trades and open_trades from above)
     total_trades = len(closed_trades)
     winners = [t for t in closed_trades if (t.get('net_pnl') or 0) > 0]
     losers = [t for t in closed_trades if (t.get('net_pnl') or 0) < 0]
 
-    total_pnl = sum(t.get('net_pnl') or 0 for t in closed_trades)
     gross_profit = sum(t.get('net_pnl') or 0 for t in winners)
     gross_loss = abs(sum(t.get('net_pnl') or 0 for t in losers))
 
@@ -377,38 +422,20 @@ def main():
     avg_win = (gross_profit / len(winners)) if winners else 0
     avg_loss = (gross_loss / len(losers)) if losers else 0
 
-    # Calculate unrealized P&L for open positions
-    unrealized_pnl = 0
-    for t in open_trades:
-        symbol = t.get('symbol', '')
-        side = t.get('side', '')
-        entry_price = float(t.get('entry_price') or 0)
-        current_price = prices.get(symbol, entry_price)
-
-        if side == 'buy':
-            unrealized_pnl += (current_price - entry_price) / entry_price * 1000  # Approx position value
-        else:
-            unrealized_pnl += (entry_price - current_price) / entry_price * 1000
-
     # Display metrics
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        color = "positive" if total_pnl >= 0 else "negative"
-        st.metric("Realized P&L", f"${total_pnl:+,.2f}", delta=f"{total_trades} trades")
-
-    with col2:
-        color = "positive" if unrealized_pnl >= 0 else "negative"
-        st.metric("Unrealized P&L", f"${unrealized_pnl:+,.2f}", delta=f"{len(open_trades)} open")
-
-    with col3:
         st.metric("Win Rate", f"{win_rate:.1f}%", delta=f"{len(winners)}W / {len(losers)}L")
 
-    with col4:
+    with col2:
         st.metric("Profit Factor", f"{profit_factor:.2f}")
 
-    with col5:
-        st.metric("Avg Win/Loss", f"${avg_win:.2f} / ${avg_loss:.2f}")
+    with col3:
+        st.metric("Avg Win", f"${avg_win:.2f}")
+
+    with col4:
+        st.metric("Avg Loss", f"${avg_loss:.2f}")
 
     # ============================================
     # SECTION 2: OPEN POSITIONS
