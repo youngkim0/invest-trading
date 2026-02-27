@@ -343,7 +343,7 @@ Keep response under 500 words."""
 
 def main():
     st.title("📈 AI Trading Dashboard")
-    st.caption(f"Last updated: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')} | System started: Feb 20, 2026")
+    st.caption(f"Last updated: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')} | System started: Feb 20, 2026 | v2.1")
 
     # Auto refresh
     col1, col2 = st.columns([4, 1])
