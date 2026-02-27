@@ -345,7 +345,7 @@ Keep response under 500 words."""
 def main():
     st.title("📈 AI Trading Dashboard")
     kst_now = datetime.now(timezone.utc) + timedelta(hours=9)
-    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | System started: Feb 20, 2026 | v2.4")
+    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | System started: Feb 20, 2026 | v2.5")
 
     # Auto refresh
     col1, col2 = st.columns([4, 1])
@@ -556,7 +556,6 @@ def main():
                 is_old_enough = False
                 if sig_time:
                     try:
-                        from datetime import datetime, timezone, timedelta
                         if '+' in sig_time or 'Z' in sig_time:
                             sig_dt = datetime.fromisoformat(sig_time.replace('Z', '+00:00'))
                         else:
