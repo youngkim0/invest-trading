@@ -113,11 +113,12 @@ class TechnicalSignalGenerator:
         }
 
     def generate_signal(self, df: pd.DataFrame) -> dict:
-        """Generate trading signal based on technical indicators + SMC.
+        """Generate trading signal requiring SMC + Technical AGREEMENT.
 
-        Combined scoring system:
-        - Technical indicators (RSI, MACD, SMA, momentum): 60% weight
-        - SMC confluence (Order Blocks, FVG, market structure): 40% weight
+        Key rules:
+        1. SMC and technical indicators MUST agree on direction
+        2. If they conflict, return HOLD (no trade)
+        3. Higher confidence when both strongly agree
         """
         if len(df) < 60:
             return {"signal": "hold", "confidence": 0.5, "reasoning": "Insufficient data"}
@@ -132,129 +133,146 @@ class TechnicalSignalGenerator:
         momentum = self.calculate_price_momentum(prices)
 
         # === SMC Analysis ===
-        smc_result = None
-        smc_score = 0
         smc_direction = None
+        smc_score = 0
         smc_reasons = []
+        market_trend = None
 
         try:
             smc_analysis = self.smc_detector.analyze(df)
             if smc_analysis:
+                # Get market structure trend (most important)
+                market_structure = smc_analysis.get("market_structure")
+                if market_structure:
+                    market_trend = market_structure.trend
+                    if market_trend == ZoneDirection.BULLISH:
+                        smc_reasons.append("Bullish structure")
+                    elif market_trend == ZoneDirection.BEARISH:
+                        smc_reasons.append("Bearish structure")
+
+                # Get confluence result
                 smc_result = self.confluence_engine.analyze(
                     current_price=current_price,
                     order_blocks=smc_analysis.get("order_blocks", []),
                     fair_value_gaps=smc_analysis.get("fair_value_gaps", []),
                     liquidity_sweeps=smc_analysis.get("liquidity_sweeps", []),
                     channels=smc_analysis.get("channels", []),
-                    market_structure=smc_analysis.get("market_structure"),
+                    market_structure=market_structure,
                     atr=smc_analysis.get("atr", 0.0),
                 )
 
-                if smc_result:
+                if smc_result and smc_result.score >= 0.55:
                     smc_score = smc_result.score
                     smc_direction = smc_result.direction
-                    smc_reasons.append(f"SMC confluence {smc_score:.0%}")
+                    smc_reasons.append(f"SMC {smc_score:.0%}")
 
-                    # Add specific SMC factors
                     if smc_result.factors.get("zone_confluence", 0) > 0.15:
-                        smc_reasons.append("OB+FVG overlap")
-                    if smc_result.factors.get("htf_alignment", 0) > 0.1:
-                        smc_reasons.append("HTF aligned")
-
-                # Check market structure trend
-                market_structure = smc_analysis.get("market_structure")
-                if market_structure:
-                    if market_structure.trend == ZoneDirection.BULLISH:
-                        smc_reasons.append("Bullish structure")
-                    elif market_structure.trend == ZoneDirection.BEARISH:
-                        smc_reasons.append("Bearish structure")
+                        smc_reasons.append("OB+FVG")
         except Exception as e:
             logger.debug(f"SMC analysis failed: {e}")
 
         # === Technical Scoring ===
-        buy_score = 0
-        sell_score = 0
+        tech_buy_score = 0
+        tech_sell_score = 0
         reasons = []
 
-        # RSI signals (with reversal detection)
+        # RSI signals
         if rsi["value"] < self.rsi_oversold:
-            buy_score += 2
-            reasons.append(f"RSI oversold ({rsi['value']:.1f})")
+            tech_buy_score += 2
+            reasons.append(f"RSI oversold ({rsi['value']:.0f})")
         elif rsi["value"] > self.rsi_overbought:
-            sell_score += 2
-            reasons.append(f"RSI overbought ({rsi['value']:.1f})")
+            tech_sell_score += 2
+            reasons.append(f"RSI overbought ({rsi['value']:.0f})")
         elif rsi["value"] < 40:
-            buy_score += 1
+            tech_buy_score += 1
         elif rsi["value"] > 60:
-            sell_score += 1
+            tech_sell_score += 1
 
-        # RSI momentum reversal
+        # RSI momentum
         if rsi["value"] > 65 and rsi["falling"]:
-            sell_score += 1
-            reasons.append(f"RSI reversing {rsi['prev']:.0f}→{rsi['value']:.0f}")
+            tech_sell_score += 1
         elif rsi["value"] < 35 and rsi["rising"]:
-            buy_score += 1
-            reasons.append(f"RSI recovering {rsi['prev']:.0f}→{rsi['value']:.0f}")
+            tech_buy_score += 1
 
         # MACD signals
         if macd["histogram"] > 0 and macd["macd"] > macd["signal"]:
+            tech_buy_score += 1.5 if macd["hist_rising"] else 0.5
             if macd["hist_rising"]:
-                buy_score += 1.5
                 reasons.append("MACD bullish+")
-            else:
-                buy_score += 0.5
         elif macd["histogram"] < 0 and macd["macd"] < macd["signal"]:
+            tech_sell_score += 1.5 if macd["hist_falling"] else 0.5
             if macd["hist_falling"]:
-                sell_score += 1.5
                 reasons.append("MACD bearish+")
-            else:
-                sell_score += 0.5
 
-        # MACD histogram reversal
-        if macd["histogram"] > 0 and macd["hist_falling"]:
-            sell_score += 0.5
-        elif macd["histogram"] < 0 and macd["hist_rising"]:
-            buy_score += 0.5
-
-        # SMA crossover
+        # SMA crossover (strong signal)
         if sma["bullish_cross"]:
-            buy_score += 2
+            tech_buy_score += 2.5
             reasons.append("SMA bullish cross")
         elif sma["bearish_cross"]:
-            sell_score += 2
+            tech_sell_score += 2.5
             reasons.append("SMA bearish cross")
 
-        # Price momentum
-        if momentum["strong_up"]:
-            buy_score += 1
-            reasons.append(f"Momentum +{momentum['momentum_5']:.1f}%")
-        elif momentum["strong_down"]:
-            sell_score += 1
-            reasons.append(f"Momentum {momentum['momentum_5']:.1f}%")
+        # Strong momentum only
+        if momentum["strong_up"] and momentum["momentum_5"] > 2.0:
+            tech_buy_score += 1.5
+            reasons.append(f"Strong +{momentum['momentum_5']:.1f}%")
+        elif momentum["strong_down"] and momentum["momentum_5"] < -2.0:
+            tech_sell_score += 1.5
+            reasons.append(f"Strong {momentum['momentum_5']:.1f}%")
 
-        # === SMC Integration (40% weight) ===
-        if smc_result and smc_score >= 0.55:
-            if smc_direction == ZoneDirection.BULLISH:
-                buy_score += smc_score * 3  # Up to 3 points from SMC
-                reasons.extend(smc_reasons)
-            elif smc_direction == ZoneDirection.BEARISH:
-                sell_score += smc_score * 3
-                reasons.extend(smc_reasons)
+        # === DETERMINE TECHNICAL DIRECTION ===
+        tech_score = tech_buy_score - tech_sell_score
+        if tech_score >= 2.0:
+            tech_direction = "bullish"
+        elif tech_score <= -2.0:
+            tech_direction = "bearish"
+        else:
+            tech_direction = "neutral"
 
-        # === Final Signal Determination ===
-        total_score = buy_score - sell_score
-        max_score = 9.0  # Increased for SMC contribution
+        # === AGREEMENT CHECK - CRITICAL ===
+        # Both SMC and technicals must agree, otherwise HOLD
+        signal = "hold"
+        confidence = 0.5
 
-        # Higher thresholds with SMC (requires more confluence)
-        if total_score >= 2.5:
-            signal = "strong_buy" if total_score >= 4.5 else "buy"
-            confidence = min(0.9, 0.55 + (total_score / max_score) * 0.35)
-        elif total_score <= -2.5:
-            signal = "strong_sell" if total_score <= -4.5 else "sell"
-            confidence = min(0.9, 0.55 + (abs(total_score) / max_score) * 0.35)
+        smc_bullish = (smc_direction == ZoneDirection.BULLISH) or (market_trend == ZoneDirection.BULLISH and smc_score > 0)
+        smc_bearish = (smc_direction == ZoneDirection.BEARISH) or (market_trend == ZoneDirection.BEARISH and smc_score > 0)
+
+        # BULLISH: Both SMC and technicals agree bullish
+        if tech_direction == "bullish" and smc_bullish:
+            combined_score = abs(tech_score) + smc_score * 3
+            if combined_score >= 5.0:
+                signal = "strong_buy"
+                confidence = min(0.85, 0.60 + combined_score * 0.03)
+            elif combined_score >= 3.5:
+                signal = "buy"
+                confidence = min(0.75, 0.55 + combined_score * 0.03)
+            reasons.extend(smc_reasons)
+            reasons.append("SMC+Tech aligned")
+
+        # BEARISH: Both SMC and technicals agree bearish
+        elif tech_direction == "bearish" and smc_bearish:
+            combined_score = abs(tech_score) + smc_score * 3
+            if combined_score >= 5.0:
+                signal = "strong_sell"
+                confidence = min(0.85, 0.60 + combined_score * 0.03)
+            elif combined_score >= 3.5:
+                signal = "sell"
+                confidence = min(0.75, 0.55 + combined_score * 0.03)
+            reasons.extend(smc_reasons)
+            reasons.append("SMC+Tech aligned")
+
+        # CONFLICT: SMC and technicals disagree - NO TRADE
+        elif (tech_direction == "bullish" and smc_bearish) or (tech_direction == "bearish" and smc_bullish):
+            signal = "hold"
+            confidence = 0.5
+            reasons = ["SMC↔Tech conflict - no trade"]
+
+        # WEAK: Not enough conviction from either
         else:
             signal = "hold"
             confidence = 0.5
+            if not reasons:
+                reasons = ["Waiting for confluence"]
 
         return {
             "signal": signal,
@@ -280,19 +298,20 @@ class SimplePaperTrader:
         self,
         symbols: list[str] = ["BTCUSDT"],
         initial_capital: float = 1000.0,  # Realistic starting capital
-        max_position_pct: float = 0.25,  # 25% per position (can have 2-4 positions)
+        max_position_pct: float = 0.20,  # 20% per position (more conservative)
         leverage: int = 10,  # 10x leverage (realistic for crypto futures)
         check_interval: int = 60,  # seconds
-        # Exit configuration - tighter for leveraged trading
-        stop_loss_pct: float = 0.015,  # 1.5% stop loss (with 10x = 15% account risk)
-        take_profit_pct: float = 0.02,  # 2% take profit (with 10x = 20% gain)
-        trailing_stop_activation_pct: float = 0.01,  # Activate trailing at 1%
-        trailing_stop_distance_pct: float = 0.006,  # Trail 0.6% behind peak
-        signal_exit_min_confidence: float = 0.60,
-        signal_exit_min_profit_pct: float = 0.008,  # 0.8% profit threshold
+        # Exit configuration - IMPROVED R:R RATIO (1:2 minimum)
+        stop_loss_pct: float = 0.012,  # 1.2% stop loss (tighter = smaller losses)
+        take_profit_pct: float = 0.025,  # 2.5% take profit (bigger wins)
+        # R:R ratio = 2.5/1.2 = 2.08:1 (need 33% win rate to break even)
+        trailing_stop_activation_pct: float = 0.015,  # Activate trailing at 1.5%
+        trailing_stop_distance_pct: float = 0.008,  # Trail 0.8% behind peak
+        signal_exit_min_confidence: float = 0.70,  # Higher confidence required
+        signal_exit_min_profit_pct: float = 0.01,  # 1% profit threshold
         # Time-based exit
-        max_position_hours: float = 6.0,  # Shorter hold time for leveraged
-        stale_position_min_profit_pct: float = 0.003,  # Exit stale if < 0.3%
+        max_position_hours: float = 4.0,  # Shorter hold = less exposure
+        stale_position_min_profit_pct: float = 0.005,  # Exit stale if < 0.5%
     ):
         self.symbols = symbols
         self.initial_capital = initial_capital
@@ -403,18 +422,19 @@ class SimplePaperTrader:
         # Load existing positions from database
         await self._load_existing_positions()
 
+        rr_ratio = self.take_profit_pct / self.stop_loss_pct
         logger.info("=" * 60)
-        logger.info("🚀 Starting Leveraged Paper Trading")
+        logger.info("🚀 Starting Leveraged Paper Trading (SMC+Tech ALIGNED)")
         logger.info(f"   Symbols: {self.symbols}")
         logger.info(f"   Capital: ${self.initial_capital:,.2f} | Leverage: {self.leverage}x")
         logger.info(f"   Max Position: {self.max_position_pct:.0%} margin → ${self.initial_capital * self.max_position_pct * self.leverage:,.2f} size")
-        logger.info(f"   Liquidation at: {self.liquidation_pct:.1%} against position")
         logger.info("-" * 60)
-        logger.info("📊 Exit Configuration (adjusted for leverage):")
+        logger.info("📊 Risk Management (R:R = {:.1f}:1):".format(rr_ratio))
         logger.info(f"   Stop Loss: {self.stop_loss_pct:.1%} (={self.stop_loss_pct * self.leverage:.0%} ROE)")
         logger.info(f"   Take Profit: {self.take_profit_pct:.1%} (={self.take_profit_pct * self.leverage:.0%} ROE)")
-        logger.info(f"   Trailing Stop: activates at {self.trailing_stop_activation_pct:.1%}, trails {self.trailing_stop_distance_pct:.1%}")
-        logger.info(f"   Stale Position: exit after {self.max_position_hours}h if profit < {self.stale_position_min_profit_pct:.1%}")
+        logger.info(f"   Break-even win rate: {1/(1+rr_ratio)*100:.0f}%")
+        logger.info(f"   Trailing: activates {self.trailing_stop_activation_pct:.1%}, trails {self.trailing_stop_distance_pct:.1%}")
+        logger.info(f"   Max hold: {self.max_position_hours}h | Signal requires SMC+Tech alignment")
         logger.info("=" * 60)
 
         collector = MarketDataCollector()
@@ -906,38 +926,38 @@ async def main():
         "--interval", type=int, default=60,
         help="Check interval in seconds"
     )
-    # Exit configuration arguments (adjusted for leverage)
+    # Exit configuration - IMPROVED R:R RATIO (2:1 minimum)
     parser.add_argument(
-        "--stop-loss", type=float, default=0.015,
-        help="Stop loss percentage (default: 0.015 = 1.5%%)"
+        "--stop-loss", type=float, default=0.012,
+        help="Stop loss percentage (default: 0.012 = 1.2%% for tighter losses)"
     )
     parser.add_argument(
-        "--take-profit", type=float, default=0.02,
-        help="Take profit percentage (default: 0.02 = 2%%)"
+        "--take-profit", type=float, default=0.025,
+        help="Take profit percentage (default: 0.025 = 2.5%% for bigger wins)"
     )
     parser.add_argument(
-        "--trailing-activation", type=float, default=0.01,
-        help="Trailing stop activation percentage (default: 0.01 = 1%%)"
+        "--trailing-activation", type=float, default=0.015,
+        help="Trailing stop activation percentage (default: 0.015 = 1.5%%)"
     )
     parser.add_argument(
-        "--trailing-distance", type=float, default=0.006,
-        help="Trailing stop distance percentage (default: 0.006 = 0.6%%)"
+        "--trailing-distance", type=float, default=0.008,
+        help="Trailing stop distance percentage (default: 0.008 = 0.8%%)"
     )
     parser.add_argument(
-        "--signal-confidence", type=float, default=0.60,
-        help="Minimum confidence for signal-based exits (default: 0.60 = 60%%)"
+        "--signal-confidence", type=float, default=0.70,
+        help="Minimum confidence for signal-based exits (default: 0.70 = 70%%)"
     )
     parser.add_argument(
-        "--signal-profit-threshold", type=float, default=0.008,
-        help="Profit threshold requiring strong signal to exit (default: 0.008 = 0.8%%)"
+        "--signal-profit-threshold", type=float, default=0.01,
+        help="Profit threshold requiring strong signal to exit (default: 0.01 = 1%%)"
     )
     parser.add_argument(
-        "--max-position-hours", type=float, default=6.0,
-        help="Maximum hours to hold a stale position (default: 6.0)"
+        "--max-position-hours", type=float, default=4.0,
+        help="Maximum hours to hold a stale position (default: 4.0)"
     )
     parser.add_argument(
-        "--stale-profit-threshold", type=float, default=0.003,
-        help="Min profit to keep stale position (default: 0.003 = 0.3%%)"
+        "--stale-profit-threshold", type=float, default=0.005,
+        help="Min profit to keep stale position (default: 0.005 = 0.5%%)"
     )
     args = parser.parse_args()
 
