@@ -1,4 +1,7 @@
-"""Simplified AI Trading Dashboard - Focus on Signals, Trades, Performance"""
+"""Simplified AI Trading Dashboard - Focus on Signals, Trades, Performance
+
+Updated: 2026-02-27 - Added portfolio value banner at top
+"""
 
 import os
 import json
