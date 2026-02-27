@@ -21,10 +21,11 @@ GEMINI_AVAILABLE = True  # Always available via REST API
 try:
     from zoneinfo import ZoneInfo
     KST = ZoneInfo("Asia/Seoul")
-except ImportError:
-    # Fallback for older Python versions
-    from datetime import timezone as tz
-    KST = tz(timedelta(hours=9))
+    UTC = ZoneInfo("UTC")
+except Exception:
+    # Fallback for older Python or missing tzdata
+    KST = timezone(timedelta(hours=9))
+    UTC = timezone.utc
 NEW_SYSTEM_DATE = "2026-02-20T00:00:00Z"
 
 
@@ -37,7 +38,7 @@ def to_kst(timestamp_str: str) -> str:
         if '+' in timestamp_str or 'Z' in timestamp_str:
             dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
         else:
-            dt = datetime.fromisoformat(timestamp_str).replace(tzinfo=ZoneInfo("UTC"))
+            dt = datetime.fromisoformat(timestamp_str).replace(tzinfo=UTC)
         # Convert to KST
         dt_kst = dt.astimezone(KST)
         return dt_kst.strftime('%m/%d %H:%M')
@@ -343,7 +344,7 @@ Keep response under 500 words."""
 
 def main():
     st.title("📈 AI Trading Dashboard")
-    st.caption(f"Last updated: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')} | System started: Feb 20, 2026 | v2.1")
+    st.caption(f"Last updated: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')} | System started: Feb 20, 2026 | v2.2")
 
     # Auto refresh
     col1, col2 = st.columns([4, 1])
