@@ -344,7 +344,8 @@ Keep response under 500 words."""
 
 def main():
     st.title("📈 AI Trading Dashboard")
-    st.caption(f"Last updated: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')} | System started: Feb 20, 2026 | v2.3")
+    kst_now = datetime.now(timezone.utc) + timedelta(hours=9)
+    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | System started: Feb 20, 2026 | v2.4")
 
     # Auto refresh
     col1, col2 = st.columns([4, 1])
@@ -1020,7 +1021,7 @@ def main():
                     if generated_at:
                         try:
                             gen_time = datetime.fromisoformat(generated_at.replace('Z', '+00:00'))
-                            gen_time_kst = gen_time.astimezone(KST)
+                            gen_time_kst = gen_time + timedelta(hours=9)
                             st.metric("Last Analysis", gen_time_kst.strftime('%m/%d %H:%M KST'))
                         except:
                             st.metric("Last Analysis", "Just now")
