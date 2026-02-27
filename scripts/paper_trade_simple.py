@@ -47,7 +47,7 @@ class TechnicalSignalGenerator:
         )
         self.confluence_engine = ConfluenceEngine(
             min_confluence_score=0.55,  # Lower threshold for paper trading
-            min_rr_ratio=1.5,
+            min_rr_ratio=0.5,  # Allow low zone R:R, we enforce R:R in exit logic
             atr_stop_multiplier=1.5,
         )
 
@@ -84,14 +84,22 @@ class TechnicalSignalGenerator:
         }
 
     def calculate_sma_crossover(self, prices: pd.Series) -> dict:
-        """Calculate SMA crossover."""
+        """Calculate SMA crossover and price position."""
         sma20 = prices.rolling(20).mean()
         sma50 = prices.rolling(50).mean()
+        current_price = float(prices.iloc[-1])
+        sma20_val = float(sma20.iloc[-1])
+        sma50_val = float(sma50.iloc[-1])
+
         return {
-            "sma20": float(sma20.iloc[-1]),
-            "sma50": float(sma50.iloc[-1]),
+            "sma20": sma20_val,
+            "sma50": sma50_val,
             "bullish_cross": bool(sma20.iloc[-1] > sma50.iloc[-1] and sma20.iloc[-2] <= sma50.iloc[-2]),
             "bearish_cross": bool(sma20.iloc[-1] < sma50.iloc[-1] and sma20.iloc[-2] >= sma50.iloc[-2]),
+            # Price position relative to SMAs (more reliable than crossovers)
+            "price_above_sma20": current_price > sma20_val,
+            "price_above_sma50": current_price > sma50_val,
+            "sma20_above_sma50": sma20_val > sma50_val,
         }
 
     def calculate_price_momentum(self, prices: pd.Series) -> dict:
@@ -204,12 +212,21 @@ class TechnicalSignalGenerator:
             if macd["hist_falling"]:
                 reasons.append("MACD bearish+")
 
-        # SMA crossover (strong signal)
+        # SMA analysis - price position is more reliable than crossovers
+        # Price above both SMAs = bullish trend
+        if sma["price_above_sma20"] and sma["price_above_sma50"]:
+            tech_buy_score += 1.5
+            reasons.append("Price above SMAs")
+        elif not sma["price_above_sma20"] and not sma["price_above_sma50"]:
+            tech_sell_score += 1.5
+            reasons.append("Price below SMAs")
+
+        # Crossovers only as confirmation (reduced weight)
         if sma["bullish_cross"]:
-            tech_buy_score += 2.5
+            tech_buy_score += 1.0
             reasons.append("SMA bullish cross")
         elif sma["bearish_cross"]:
-            tech_sell_score += 2.5
+            tech_sell_score += 1.0
             reasons.append("SMA bearish cross")
 
         # Strong momentum only
@@ -222,9 +239,9 @@ class TechnicalSignalGenerator:
 
         # === DETERMINE TECHNICAL DIRECTION ===
         tech_score = tech_buy_score - tech_sell_score
-        if tech_score >= 2.0:
+        if tech_score >= 1.5:  # Lowered from 2.0 - SMC provides additional confirmation
             tech_direction = "bullish"
-        elif tech_score <= -2.0:
+        elif tech_score <= -1.5:  # Lowered from -2.0
             tech_direction = "bearish"
         else:
             tech_direction = "neutral"
