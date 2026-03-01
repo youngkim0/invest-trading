@@ -246,6 +246,13 @@ class TechnicalSignalGenerator:
         else:
             tech_direction = "neutral"
 
+        # === RSI EXTREME VETO - MOST IMPORTANT ===
+        # RSI oversold/overbought are contrarian signals - they VETO opposite trades
+        rsi_oversold = rsi["value"] < self.rsi_oversold  # < 30
+        rsi_overbought = rsi["value"] > self.rsi_overbought  # > 70
+        rsi_extreme_oversold = rsi["value"] < 25  # Very oversold - strong buy zone
+        rsi_extreme_overbought = rsi["value"] > 75  # Very overbought - strong sell zone
+
         # === AGREEMENT CHECK - CRITICAL ===
         # Both SMC and technicals must agree, otherwise HOLD
         signal = "hold"
@@ -254,8 +261,33 @@ class TechnicalSignalGenerator:
         smc_bullish = (smc_direction == ZoneDirection.BULLISH) or (market_trend == ZoneDirection.BULLISH and smc_score > 0)
         smc_bearish = (smc_direction == ZoneDirection.BEARISH) or (market_trend == ZoneDirection.BEARISH and smc_score > 0)
 
-        # BULLISH: Both SMC and technicals agree bullish
-        if tech_direction == "bullish" and smc_bullish:
+        # === RSI VETO LOGIC ===
+        # NEVER sell when oversold - price likely to bounce UP
+        if rsi_oversold and tech_direction == "bearish":
+            signal = "hold"
+            confidence = 0.5
+            reasons = [f"RSI oversold ({rsi['value']:.0f}) - NO SELL, wait for bounce"]
+
+        # NEVER buy when overbought - price likely to pull back
+        elif rsi_overbought and tech_direction == "bullish":
+            signal = "hold"
+            confidence = 0.5
+            reasons = [f"RSI overbought ({rsi['value']:.0f}) - NO BUY, wait for pullback"]
+
+        # RSI EXTREME OVERSOLD + Rising = Strong BUY opportunity
+        elif rsi_extreme_oversold and rsi["rising"]:
+            signal = "buy"
+            confidence = 0.70
+            reasons = [f"RSI extreme oversold ({rsi['value']:.0f}) + rising - reversal BUY"]
+
+        # RSI EXTREME OVERBOUGHT + Falling = Strong SELL opportunity
+        elif rsi_extreme_overbought and rsi["falling"]:
+            signal = "sell"
+            confidence = 0.70
+            reasons = [f"RSI extreme overbought ({rsi['value']:.0f}) + falling - reversal SELL"]
+
+        # BULLISH: Both SMC and technicals agree bullish (and not overbought)
+        elif tech_direction == "bullish" and smc_bullish:
             combined_score = abs(tech_score) + smc_score * 3
             if combined_score >= 5.0:
                 signal = "strong_buy"
@@ -266,7 +298,7 @@ class TechnicalSignalGenerator:
             reasons.extend(smc_reasons)
             reasons.append("SMC+Tech aligned")
 
-        # BEARISH: Both SMC and technicals agree bearish
+        # BEARISH: Both SMC and technicals agree bearish (and not oversold)
         elif tech_direction == "bearish" and smc_bearish:
             combined_score = abs(tech_score) + smc_score * 3
             if combined_score >= 5.0:
