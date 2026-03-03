@@ -1,0 +1,10 @@
+# Slim deps for paper_trade_simple.py only (no torch/streamlit/langchain)
+pandas
+numpy
+loguru
+httpx
+python-dotenv
+supabase
+pydantic
+pydantic-settings
+tzdata

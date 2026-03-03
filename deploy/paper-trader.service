@@ -1,0 +1,26 @@
+[Unit]
+Description=Paper Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=paper
+Group=paper
+WorkingDirectory=/opt/paper-trader
+EnvironmentFile=/opt/paper-trader/.env
+ExecStart=/opt/paper-trader/venv/bin/python -u scripts/paper_trade_simple.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=paper-trader
+
+# Security hardening
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+ReadWritePaths=/opt/paper-trader/logs
+
+[Install]
+WantedBy=multi-user.target
