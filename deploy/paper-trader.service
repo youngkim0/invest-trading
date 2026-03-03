@@ -20,7 +20,7 @@ SyslogIdentifier=paper-trader
 ProtectSystem=strict
 ProtectHome=yes
 NoNewPrivileges=yes
-ReadWritePaths=/opt/paper-trader/logs /opt/paper-trader/data_files
+ReadWritePaths=/opt/paper-trader
 
 [Install]
 WantedBy=multi-user.target
