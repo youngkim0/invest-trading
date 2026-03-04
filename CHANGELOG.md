@@ -1,5 +1,20 @@
 # Paper Trader Changelog
 
+## v3.3 — Fix dashboard accuracy evaluation (2026-03-04)
+
+**Problem**: Dashboard evaluated signal accuracy by comparing signal entry price to **current price** at render time. This meant all signals appeared wrong during a dip, and all appeared correct during a rally — regardless of actual signal quality.
+
+**Changes**:
+- Signal accuracy now evaluated against price **10 minutes after** signal was generated
+- Fetches historical 1m candles from Binance to look up the actual price at evaluation time
+- Signals younger than 10 minutes shown as "Pending"
+- Same fix applied to AI insights accuracy calculation fed to Gemini
+- Added `fetch_price_at_time()` and `lookup_price_after()` helper functions
+
+**Impact**: Accuracy metric now reflects actual short-term predictive quality of signals, independent of current market direction.
+
+---
+
 ## v3.2 — Sell signals require bearish HTF (2026-03-04)
 
 **Problem**: Sell signals had 0% accuracy (0/54) because RSI extreme overbought reversal sells fired constantly on 1m candles during a 5-6% rally. 49 of 54 sells had HTF=neutral, meaning no trend confirmation.

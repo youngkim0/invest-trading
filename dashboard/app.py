@@ -216,6 +216,49 @@ def fetch_klines(symbol: str, interval: str = "1h", limit: int = 48):
     return pd.DataFrame()
 
 
+@st.cache_data(ttl=60)
+def fetch_price_at_time(symbol: str, limit: int = 500):
+    """Fetch recent 1m candles and return a dict of minute_timestamp -> close price.
+
+    Used to evaluate signal accuracy by looking up price N minutes after signal.
+    """
+    price_map = {}
+    urls = [
+        f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval=1m&limit={limit}",
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit={limit}",
+        f"https://api1.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit={limit}",
+    ]
+
+    for url in urls:
+        try:
+            resp = requests.get(url, timeout=15)
+            if resp.status_code == 200:
+                for candle in resp.json():
+                    # candle[0] = open time in ms, candle[4] = close price
+                    ts = int(candle[0]) // 60000  # minute-level key
+                    price_map[ts] = float(candle[4])
+                return price_map
+        except:
+            continue
+    return price_map
+
+
+def lookup_price_after(price_map: dict, signal_dt: datetime, minutes_after: int = 10):
+    """Look up price N minutes after a signal timestamp.
+
+    Returns (price, found) tuple. If exact minute not found, tries nearby minutes.
+    """
+    sig_epoch_min = int(signal_dt.timestamp()) // 60
+    target_min = sig_epoch_min + minutes_after
+
+    # Try exact minute, then +/- 1 minute
+    for offset in [0, 1, -1, 2, -2]:
+        price = price_map.get(target_min + offset)
+        if price is not None:
+            return price, True
+    return 0, False
+
+
 def get_gemini_api_key():
     """Get Gemini API key from secrets or environment."""
     if hasattr(st, 'secrets') and 'GEMINI_API_KEY' in st.secrets:
@@ -271,32 +314,58 @@ def generate_ai_insights(trades_json: str, signals_json: str, prices_json: str, 
         closed_trades = [t for t in trades if t.get('exit_time')]
         open_trades = [t for t in trades if not t.get('exit_time')]
 
-        # Calculate signal accuracy
+        # Calculate signal accuracy using price 10 min after signal
         signal_analysis = []
+        eval_minutes = 10
+        ai_price_maps = {}
+        for sym in ["BTCUSDT", "ETHUSDT"]:
+            ai_price_maps[sym] = fetch_price_at_time(sym, 500)
+
         for sig in signals[-50:]:  # Last 50 signals
             symbol = sig.get('symbol', '')
             signal_type = sig.get('signal_type', '')
             sig_price = float(sig.get('entry_price', 0) or 0)
-            current_price = prices.get(symbol, sig_price)
 
-            if sig_price > 0 and current_price > 0:
-                price_change = (current_price - sig_price) / sig_price * 100
+            if sig_price > 0 and signal_type and signal_type != 'hold':
+                # Parse signal timestamp and look up price 10 min later
+                sig_time = sig.get('timestamp', '')
+                eval_price = 0
+                sig_dt = None
+                if sig_time:
+                    try:
+                        if '+' in sig_time or 'Z' in sig_time:
+                            sig_dt = datetime.fromisoformat(sig_time.replace('Z', '+00:00'))
+                        else:
+                            sig_dt = datetime.fromisoformat(sig_time).replace(tzinfo=timezone.utc)
+                    except:
+                        pass
 
-                # Was the signal correct?
-                if 'buy' in signal_type.lower():
-                    correct = price_change > 0
-                elif 'sell' in signal_type.lower():
-                    correct = price_change < 0
-                else:
-                    correct = None
+                if sig_dt:
+                    age_minutes = (datetime.now(timezone.utc) - sig_dt).total_seconds() / 60
+                    if age_minutes >= eval_minutes:
+                        eval_price, found = lookup_price_after(
+                            ai_price_maps.get(symbol, {}), sig_dt, eval_minutes
+                        )
+                        if not found:
+                            eval_price = 0
 
-                signal_analysis.append({
-                    'signal': signal_type,
-                    'price_at_signal': sig_price,
-                    'current_price': current_price,
-                    'price_change_pct': price_change,
-                    'correct': correct
-                })
+                if eval_price > 0:
+                    price_change = (eval_price - sig_price) / sig_price * 100
+
+                    if 'buy' in signal_type.lower():
+                        correct = price_change > 0
+                    elif 'sell' in signal_type.lower():
+                        correct = price_change < 0
+                    else:
+                        correct = None
+
+                    signal_analysis.append({
+                        'signal': signal_type,
+                        'price_at_signal': sig_price,
+                        'price_10min_later': eval_price,
+                        'price_change_pct': price_change,
+                        'correct': correct
+                    })
 
         # Count correct signals
         correct_signals = sum(1 for s in signal_analysis if s.get('correct') is True)
@@ -345,7 +414,7 @@ Keep response under 500 words."""
 def main():
     st.title("📈 AI Trading Dashboard")
     kst_now = datetime.now(timezone.utc) + timedelta(hours=9)
-    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | System started: Feb 20, 2026 | v3.2 (bearish-only sells)")
+    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | System started: Feb 20, 2026 | v3.3 (fixed accuracy eval)")
 
     # Auto refresh
     col1, col2 = st.columns([4, 1])
@@ -521,8 +590,11 @@ def main():
         display_data = []
         signal_results = {'correct': 0, 'incorrect': 0, 'pending': 0}
 
-        # Get current prices for comparison
-        current_prices = prices  # From fetch_current_prices()
+        # Fetch historical 1m candles for price-at-time lookups
+        eval_minutes = 10  # Evaluate signal accuracy 10 minutes after
+        price_maps = {}
+        for sym in ["BTCUSDT", "ETHUSDT"]:
+            price_maps[sym] = fetch_price_at_time(sym, 500)
 
         for i, sig in enumerate(page_signals):
             signal_type = sig.get('signal_type', 'hold') or 'hold'
@@ -543,16 +615,15 @@ def main():
             else:
                 signal_emoji = "⚪"
 
-            # Determine signal result by comparing to current price
-            # Recent signals (< 10 min) are "Pending", older ones get evaluated
+            # Evaluate signal accuracy using price 10 min after signal
+            # Recent signals (< 10 min) are "Pending"
             result = "⏳"
             result_text = "Pending"
 
             if signal_type != 'hold' and sig_price > 0:
-                current_price = current_prices.get(symbol, 0)
-
-                # Check if signal is old enough (at least 10 minutes)
+                # Parse signal timestamp
                 sig_time = sig.get('timestamp', '')
+                sig_dt = None
                 is_old_enough = False
                 if sig_time:
                     try:
@@ -561,29 +632,38 @@ def main():
                         else:
                             sig_dt = datetime.fromisoformat(sig_time).replace(tzinfo=timezone.utc)
                         age_minutes = (datetime.now(timezone.utc) - sig_dt).total_seconds() / 60
-                        is_old_enough = age_minutes >= 10  # At least 10 min old
+                        is_old_enough = age_minutes >= eval_minutes
                     except:
-                        is_old_enough = i >= 10  # Fallback: assume 1 signal/min
+                        is_old_enough = i >= 10
 
-                if is_old_enough and current_price > 0:
-                    price_change = (current_price - sig_price) / sig_price * 100
+                if is_old_enough and sig_dt:
+                    # Look up price 10 min after signal
+                    eval_price, found = lookup_price_after(
+                        price_maps.get(symbol, {}), sig_dt, eval_minutes
+                    )
 
-                    if 'buy' in signal_type.lower():
-                        is_correct = price_change > 0.1  # Need >0.1% move to count
-                    elif 'sell' in signal_type.lower():
-                        is_correct = price_change < -0.1
+                    if found and eval_price > 0:
+                        price_change = (eval_price - sig_price) / sig_price * 100
+
+                        if 'buy' in signal_type.lower():
+                            is_correct = price_change > 0.1
+                        elif 'sell' in signal_type.lower():
+                            is_correct = price_change < -0.1
+                        else:
+                            is_correct = None
+
+                        if is_correct is True:
+                            result = "✅"
+                            result_text = f"+{abs(price_change):.2f}%"
+                            signal_results['correct'] += 1
+                        elif is_correct is False:
+                            result = "❌"
+                            result_text = f"{price_change:+.2f}%"
+                            signal_results['incorrect'] += 1
+                        else:
+                            signal_results['pending'] += 1
                     else:
-                        is_correct = None
-
-                    if is_correct is True:
-                        result = "✅"
-                        result_text = f"+{abs(price_change):.2f}%"
-                        signal_results['correct'] += 1
-                    elif is_correct is False:
-                        result = "❌"
-                        result_text = f"{price_change:+.2f}%"
-                        signal_results['incorrect'] += 1
-                    else:
+                        # Price data not available for this time window
                         signal_results['pending'] += 1
                 else:
                     signal_results['pending'] += 1
@@ -606,7 +686,7 @@ def main():
         if total_evaluated > 0:
             accuracy = signal_results['correct'] / total_evaluated * 100
             acc_color = "🟢" if accuracy >= 55 else "🔴" if accuracy < 45 else "🟡"
-            st.markdown(f"**Signal Accuracy:** {acc_color} {accuracy:.1f}% ({signal_results['correct']}/{total_evaluated} correct) | ⏳ {signal_results['pending']} pending")
+            st.markdown(f"**Signal Accuracy (10min):** {acc_color} {accuracy:.1f}% ({signal_results['correct']}/{total_evaluated} correct) | ⏳ {signal_results['pending']} pending")
 
         st.dataframe(
             pd.DataFrame(display_data),
