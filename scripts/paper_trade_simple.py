@@ -347,16 +347,16 @@ class TechnicalSignalGenerator:
                 reasons = ["Waiting for confluence"]
 
         # === HTF TREND HARD FILTER ===
-        # Never buy in 1h downtrend, never sell in 1h uptrend
+        # Only buy in bullish/neutral 1h trend, only sell in bearish 1h trend
         if htf_trend == "bearish" and signal in ("buy", "strong_buy"):
             reasons = [f"HTF bearish - blocked {signal}"] + reasons
             signal = "hold"
             confidence = 0.5
-        elif htf_trend == "bullish" and signal in ("sell", "strong_sell"):
-            reasons = [f"HTF bullish - blocked {signal}"] + reasons
+        elif htf_trend != "bearish" and signal in ("sell", "strong_sell"):
+            reasons = [f"HTF {htf_trend} - blocked {signal} (need bearish)"] + reasons
             signal = "hold"
             confidence = 0.5
-        elif htf_trend == "neutral" and signal != "hold":
+        elif htf_trend == "neutral" and signal in ("buy", "strong_buy"):
             confidence = max(0.5, confidence - 0.10)
             reasons.append("HTF neutral (-10% conf)")
 
