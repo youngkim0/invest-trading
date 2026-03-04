@@ -701,8 +701,13 @@ class SimplePaperTrader:
         return False
 
     def _should_exit_on_rsi(self, position: dict, signal: dict, pnl_pct: float) -> bool:
-        """Exit profitable positions when RSI indicates overbought/oversold reversal."""
-        if pnl_pct < 0.005:  # Need at least 0.5% profit
+        """Exit profitable positions when RSI indicates overbought/oversold reversal.
+
+        Only fires after trailing stop has activated (1.5% profit) so it doesn't
+        cut winners short before the designed R:R ratio can play out.
+        RSI thresholds set high (80/20) for 1m candles where RSI extremes are frequent.
+        """
+        if pnl_pct < self.trailing_stop_activation_pct:  # Need 1.5% profit (trailing stop level)
             return False
 
         indicators = signal.get("indicators", {})
@@ -710,12 +715,12 @@ class SimplePaperTrader:
         rsi_momentum = indicators.get("rsi_momentum", "")
         side = position.get("side")
 
-        # Long position + RSI overbought and falling = exit
-        if side == "long" and rsi > 68 and rsi_momentum == "falling":
+        # Long position + RSI extreme overbought and falling = exit
+        if side == "long" and rsi > 80 and rsi_momentum == "falling":
             return True
 
-        # Short position + RSI oversold and rising = exit
-        if side == "short" and rsi < 32 and rsi_momentum == "rising":
+        # Short position + RSI extreme oversold and rising = exit
+        if side == "short" and rsi < 20 and rsi_momentum == "rising":
             return True
 
         return False
