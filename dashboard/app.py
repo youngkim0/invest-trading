@@ -293,12 +293,12 @@ def get_analysis_cache_key(trades, signals):
     data_str = json.dumps({
         'trades': [t.get('position_id', '') for t in trades[-20:]],
         'signals': len(signals),
-        'hour_bucket': datetime.now(timezone.utc).hour // 6  # Changes every 6 hours
+        'hour_bucket': datetime.now(timezone.utc).hour // 4  # Changes every 4 hours
     }, sort_keys=True)
     return hashlib.md5(data_str.encode()).hexdigest()
 
 
-@st.cache_data(ttl=21600)  # Cache for 6 hours (21600 seconds)
+@st.cache_data(ttl=14400)  # Cache for 4 hours (14400 seconds)
 def generate_ai_insights(trades_json: str, signals_json: str, prices_json: str, cache_key: str):
     """Generate AI insights about trading performance using Gemini REST API."""
     try:
@@ -1062,12 +1062,12 @@ def main():
 
     # Calculate when next analysis will be generated
     current_hour = datetime.now(timezone.utc).hour
-    next_analysis_hour = ((current_hour // 6) + 1) * 6 % 24
-    hours_until_next = (next_analysis_hour - current_hour) % 6
+    next_analysis_hour = ((current_hour // 4) + 1) * 4 % 24
+    hours_until_next = (next_analysis_hour - current_hour) % 4
     if hours_until_next == 0:
-        hours_until_next = 6
+        hours_until_next = 4
 
-    st.caption(f"Analysis updates every 6 hours | Next update in ~{hours_until_next}h")
+    st.caption(f"Analysis updates every 4 hours | Next update in ~{hours_until_next}h")
 
     # Generate cache key and get AI insights
     try:
@@ -1105,7 +1105,7 @@ def main():
                         except:
                             st.metric("Last Analysis", "Just now")
                 with col3:
-                    st.metric("Analysis Period", "Last 6 hours")
+                    st.metric("Analysis Period", "Last 4 hours")
 
                 # AI Analysis Content
                 st.markdown("### 📋 Analysis & Recommendations")
