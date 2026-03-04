@@ -606,7 +606,7 @@ def main():
         if total_evaluated > 0:
             accuracy = signal_results['correct'] / total_evaluated * 100
             acc_color = "🟢" if accuracy >= 55 else "🔴" if accuracy < 45 else "🟡"
-            st.markdown(f"**Signal Accuracy (1h later):** {acc_color} {accuracy:.1f}% ({signal_results['correct']}/{total_evaluated} correct) | ⏳ {signal_results['pending']} pending")
+            st.markdown(f"**Signal Accuracy:** {acc_color} {accuracy:.1f}% ({signal_results['correct']}/{total_evaluated} correct) | ⏳ {signal_results['pending']} pending")
 
         st.dataframe(
             pd.DataFrame(display_data),

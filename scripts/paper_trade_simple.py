@@ -120,13 +120,35 @@ class TechnicalSignalGenerator:
             "weakening_down": momentum_5 < 0 and momentum_5 > momentum_10 / 2,  # Slowing downtrend
         }
 
-    def generate_signal(self, df: pd.DataFrame) -> dict:
+    def determine_htf_trend(self, df_1h: pd.DataFrame) -> str:
+        """Determine higher-timeframe trend from 1h candles.
+
+        Returns 'bullish', 'bearish', or 'neutral'.
+        """
+        if len(df_1h) < 50:
+            return "neutral"
+
+        prices = df_1h["close"]
+        sma20 = prices.rolling(20).mean()
+        sma50 = prices.rolling(50).mean()
+        current_price = float(prices.iloc[-1])
+        sma20_val = float(sma20.iloc[-1])
+        sma50_val = float(sma50.iloc[-1])
+
+        if sma20_val > sma50_val and current_price > sma20_val:
+            return "bullish"
+        elif sma20_val < sma50_val and current_price < sma20_val:
+            return "bearish"
+        return "neutral"
+
+    def generate_signal(self, df: pd.DataFrame, htf_trend: str = "neutral") -> dict:
         """Generate trading signal requiring SMC + Technical AGREEMENT.
 
         Key rules:
         1. SMC and technical indicators MUST agree on direction
         2. If they conflict, return HOLD (no trade)
         3. Higher confidence when both strongly agree
+        4. HTF trend acts as hard filter - no buying in downtrends, no selling in uptrends
         """
         if len(df) < 60:
             return {"signal": "hold", "confidence": 0.5, "reasoning": "Insufficient data"}
@@ -144,6 +166,7 @@ class TechnicalSignalGenerator:
         smc_direction = None
         smc_score = 0
         smc_reasons = []
+        smc_result = None
         market_trend = None
 
         try:
@@ -258,8 +281,8 @@ class TechnicalSignalGenerator:
         signal = "hold"
         confidence = 0.5
 
-        smc_bullish = (smc_direction == ZoneDirection.BULLISH) or (market_trend == ZoneDirection.BULLISH and smc_score > 0)
-        smc_bearish = (smc_direction == ZoneDirection.BEARISH) or (market_trend == ZoneDirection.BEARISH and smc_score > 0)
+        smc_bullish = smc_direction == ZoneDirection.BULLISH
+        smc_bearish = smc_direction == ZoneDirection.BEARISH
 
         # === RSI VETO LOGIC ===
         # NEVER sell when oversold - price likely to bounce UP
@@ -289,10 +312,10 @@ class TechnicalSignalGenerator:
         # BULLISH: Both SMC and technicals agree bullish (and not overbought)
         elif tech_direction == "bullish" and smc_bullish:
             combined_score = abs(tech_score) + smc_score * 3
-            if combined_score >= 5.0:
+            if combined_score >= 6.0:
                 signal = "strong_buy"
                 confidence = min(0.85, 0.60 + combined_score * 0.03)
-            elif combined_score >= 3.5:
+            elif combined_score >= 4.5:
                 signal = "buy"
                 confidence = min(0.75, 0.55 + combined_score * 0.03)
             reasons.extend(smc_reasons)
@@ -301,10 +324,10 @@ class TechnicalSignalGenerator:
         # BEARISH: Both SMC and technicals agree bearish (and not oversold)
         elif tech_direction == "bearish" and smc_bearish:
             combined_score = abs(tech_score) + smc_score * 3
-            if combined_score >= 5.0:
+            if combined_score >= 6.0:
                 signal = "strong_sell"
                 confidence = min(0.85, 0.60 + combined_score * 0.03)
-            elif combined_score >= 3.5:
+            elif combined_score >= 4.5:
                 signal = "sell"
                 confidence = min(0.75, 0.55 + combined_score * 0.03)
             reasons.extend(smc_reasons)
@@ -323,6 +346,20 @@ class TechnicalSignalGenerator:
             if not reasons:
                 reasons = ["Waiting for confluence"]
 
+        # === HTF TREND HARD FILTER ===
+        # Never buy in 1h downtrend, never sell in 1h uptrend
+        if htf_trend == "bearish" and signal in ("buy", "strong_buy"):
+            reasons = [f"HTF bearish - blocked {signal}"] + reasons
+            signal = "hold"
+            confidence = 0.5
+        elif htf_trend == "bullish" and signal in ("sell", "strong_sell"):
+            reasons = [f"HTF bullish - blocked {signal}"] + reasons
+            signal = "hold"
+            confidence = 0.5
+        elif htf_trend == "neutral" and signal != "hold":
+            confidence = max(0.5, confidence - 0.10)
+            reasons.append("HTF neutral (-10% conf)")
+
         return {
             "signal": signal,
             "confidence": confidence,
@@ -336,6 +373,7 @@ class TechnicalSignalGenerator:
                 "price": current_price,
                 "smc_score": smc_score if smc_result else 0,
                 "smc_direction": smc_direction.value if smc_direction else None,
+                "htf_trend": htf_trend,
             },
         }
 
@@ -515,9 +553,10 @@ class SimplePaperTrader:
     async def _process_symbol(self, symbol: str, collector: MarketDataCollector):
         """Process a single symbol."""
         try:
-            # Fetch market data
-            df = await collector.get_binance_klines(symbol, "1h", 100)
-            if df.empty:
+            # Fetch market data - 1h for trend, 1m for entry signals
+            df_1h = await collector.get_binance_klines(symbol, "1h", 100)
+            df_1m = await collector.get_binance_klines(symbol, "1m", 100)
+            if df_1m.empty:
                 return
 
             # Get current price
@@ -527,8 +566,13 @@ class SimplePaperTrader:
             if current_price <= 0:
                 return
 
-            # Generate signal
-            signal_result = self.signal_generator.generate_signal(df)
+            # Determine higher-timeframe trend from 1h candles
+            htf_trend = "neutral"
+            if not df_1h.empty:
+                htf_trend = self.signal_generator.determine_htf_trend(df_1h)
+
+            # Generate signal from 1m candles, filtered by 1h trend
+            signal_result = self.signal_generator.generate_signal(df_1m, htf_trend=htf_trend)
 
             # Log signal to Supabase
             await self._save_signal(symbol, signal_result, current_price)
@@ -889,7 +933,7 @@ class SimplePaperTrader:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "symbol": symbol,
                 "exchange": "binance",
-                "timeframe": "1h",
+                "timeframe": "1m",
                 "signal_type": signal["signal"],
                 "source": "technical",
                 "confidence": signal["confidence"],
