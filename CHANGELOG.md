@@ -1,5 +1,24 @@
 # Paper Trader Changelog
 
+## v3.4 — Signal quality + stop loss protection (2026-03-05)
+
+**Problem**: 3-trade losing streak at end of day (-$88). Root cause analysis:
+- 2 of 3 losses were RSI oversold reversal buys during a pullback. RSI=16 and RSI=8 triggered buy signals even though MACD, SMA20, SMA50 all said bearish. The RSI override bypassed the agreement check.
+- 1 loss had MACD histogram at 0.02 (near-zero) — no real momentum behind the signal.
+- System immediately re-entered after each stop loss, compounding losses.
+
+**Signal quality fixes**:
+- RSI oversold reversal buy now **requires 1m SMA20 > SMA50**. Won't catch falling knives when short-term trend is bearish.
+- MACD histogram minimum threshold: buy signals require meaningfully positive MACD (>0.001% of price), sell signals require meaningfully negative. Filters out zero-momentum entries.
+
+**Risk management fixes**:
+- **Stop loss cooldown**: 60-minute block on re-entry after a stop loss on the same symbol.
+- **Max 2 stop losses per symbol per day**: After 2 SL hits, stop trading that symbol for the rest of the day.
+
+**Analysis**: RSI reversal wins (RSI=27, RSI=20) happened when 1m SMA20>SMA50 (short-term trend was up). RSI reversal losses (RSI=16, RSI=8) happened when SMA20<SMA50 (short-term trend was down). Same signal type, opposite context — the SMA filter distinguishes them.
+
+---
+
 ## v3.3 — Fix dashboard accuracy evaluation (2026-03-04)
 
 **Problem**: Dashboard evaluated signal accuracy by comparing signal entry price to **current price** at render time. This meant all signals appeared wrong during a dip, and all appeared correct during a rally — regardless of actual signal quality.

@@ -298,10 +298,18 @@ class TechnicalSignalGenerator:
             reasons = [f"RSI overbought ({rsi['value']:.0f}) - NO BUY, wait for pullback"]
 
         # RSI EXTREME OVERSOLD + Rising = Strong BUY opportunity
-        elif rsi_extreme_oversold and rsi["rising"]:
+        # BUT only when 1m short-term trend confirms (SMA20 > SMA50)
+        # Prevents catching falling knives during pullbacks
+        elif rsi_extreme_oversold and rsi["rising"] and sma["sma20_above_sma50"]:
             signal = "buy"
             confidence = 0.70
             reasons = [f"RSI extreme oversold ({rsi['value']:.0f}) + rising - reversal BUY"]
+
+        # RSI oversold but short-term trend is down — don't catch the knife
+        elif rsi_extreme_oversold and rsi["rising"] and not sma["sma20_above_sma50"]:
+            signal = "hold"
+            confidence = 0.5
+            reasons = [f"RSI oversold ({rsi['value']:.0f}) but 1m SMA20<SMA50 - falling knife, no entry"]
 
         # RSI EXTREME OVERBOUGHT + Falling = Strong SELL opportunity
         elif rsi_extreme_overbought and rsi["falling"]:
@@ -311,27 +319,41 @@ class TechnicalSignalGenerator:
 
         # BULLISH: Both SMC and technicals agree bullish (and not overbought)
         elif tech_direction == "bullish" and smc_bullish:
-            combined_score = abs(tech_score) + smc_score * 3
-            if combined_score >= 6.0:
-                signal = "strong_buy"
-                confidence = min(0.85, 0.60 + combined_score * 0.03)
-            elif combined_score >= 4.5:
-                signal = "buy"
-                confidence = min(0.75, 0.55 + combined_score * 0.03)
-            reasons.extend(smc_reasons)
-            reasons.append("SMC+Tech aligned")
+            # Require MACD histogram confirms direction (not near-zero)
+            macd_pct = abs(macd["histogram"]) / current_price * 100 if current_price > 0 else 0
+            if macd["histogram"] <= 0 or macd_pct < 0.001:
+                signal = "hold"
+                confidence = 0.5
+                reasons.append(f"MACD too weak ({macd['histogram']:.4f}) - no momentum")
+            else:
+                combined_score = abs(tech_score) + smc_score * 3
+                if combined_score >= 6.0:
+                    signal = "strong_buy"
+                    confidence = min(0.85, 0.60 + combined_score * 0.03)
+                elif combined_score >= 4.5:
+                    signal = "buy"
+                    confidence = min(0.75, 0.55 + combined_score * 0.03)
+                reasons.extend(smc_reasons)
+                reasons.append("SMC+Tech aligned")
 
         # BEARISH: Both SMC and technicals agree bearish (and not oversold)
         elif tech_direction == "bearish" and smc_bearish:
-            combined_score = abs(tech_score) + smc_score * 3
-            if combined_score >= 6.0:
-                signal = "strong_sell"
-                confidence = min(0.85, 0.60 + combined_score * 0.03)
-            elif combined_score >= 4.5:
-                signal = "sell"
-                confidence = min(0.75, 0.55 + combined_score * 0.03)
-            reasons.extend(smc_reasons)
-            reasons.append("SMC+Tech aligned")
+            # Require MACD histogram confirms direction (not near-zero)
+            macd_pct = abs(macd["histogram"]) / current_price * 100 if current_price > 0 else 0
+            if macd["histogram"] >= 0 or macd_pct < 0.001:
+                signal = "hold"
+                confidence = 0.5
+                reasons.append(f"MACD too weak ({macd['histogram']:.4f}) - no momentum")
+            else:
+                combined_score = abs(tech_score) + smc_score * 3
+                if combined_score >= 6.0:
+                    signal = "strong_sell"
+                    confidence = min(0.85, 0.60 + combined_score * 0.03)
+                elif combined_score >= 4.5:
+                    signal = "sell"
+                    confidence = min(0.75, 0.55 + combined_score * 0.03)
+                reasons.extend(smc_reasons)
+                reasons.append("SMC+Tech aligned")
 
         # CONFLICT: SMC and technicals disagree - NO TRADE
         elif (tech_direction == "bullish" and smc_bearish) or (tech_direction == "bearish" and smc_bullish):
@@ -434,6 +456,14 @@ class SimplePaperTrader:
         self.winning_trades = 0
         self.total_pnl = 0.0
 
+        # Cooldown after stop loss: {symbol: datetime_of_stop_loss}
+        self.stop_loss_cooldowns: dict[str, datetime] = {}
+        self.stop_loss_cooldown_minutes = 60  # Block re-entry for 60 min after SL
+        # Max consecutive stop losses per symbol per day
+        self.daily_stop_losses: dict[str, int] = {}
+        self.max_daily_stop_losses = 2
+        self.last_reset_date: str = ""
+
     async def _load_existing_positions(self):
         """Load existing open positions from database on startup."""
         try:
@@ -521,6 +551,8 @@ class SimplePaperTrader:
         logger.info(f"   Break-even win rate: {1/(1+rr_ratio)*100:.0f}%")
         logger.info(f"   Trailing: activates {self.trailing_stop_activation_pct:.1%}, trails {self.trailing_stop_distance_pct:.1%}")
         logger.info(f"   Max hold: {self.max_position_hours}h | Signal requires SMC+Tech alignment")
+        logger.info(f"   SL cooldown: {self.stop_loss_cooldown_minutes}min | Max SL/day/symbol: {self.max_daily_stop_losses}")
+        logger.info(f"   RSI reversal requires SMA20>SMA50 | MACD min threshold active")
         logger.info("=" * 60)
 
         collector = MarketDataCollector()
@@ -612,6 +644,27 @@ class SimplePaperTrader:
         if signal["confidence"] < 0.65:
             return
 
+        # Reset daily stop loss counter at midnight UTC
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if today != self.last_reset_date:
+            self.daily_stop_losses = {}
+            self.last_reset_date = today
+
+        # Check stop loss cooldown (block re-entry for 60 min after SL)
+        if symbol in self.stop_loss_cooldowns:
+            cooldown_until = self.stop_loss_cooldowns[symbol]
+            remaining = (cooldown_until - datetime.now(timezone.utc)).total_seconds() / 60
+            if remaining > 0:
+                logger.info(f"   {symbol}: SL cooldown active ({remaining:.0f}min left) - skipping entry")
+                return
+            else:
+                del self.stop_loss_cooldowns[symbol]
+
+        # Check max daily stop losses (max 2 per symbol per day)
+        if self.daily_stop_losses.get(symbol, 0) >= self.max_daily_stop_losses:
+            logger.info(f"   {symbol}: Max daily stop losses ({self.max_daily_stop_losses}) reached - no more trades today")
+            return
+
         if signal["signal"] in ["buy", "strong_buy"]:
             await self._open_position(symbol, "long", price, signal)
         elif signal["signal"] in ["sell", "strong_sell"]:
@@ -667,6 +720,10 @@ class SimplePaperTrader:
             should_exit = True
             roe = pnl_pct * self.leverage * 100
             exit_reason = f"Stop loss ({pnl_pct:.2%} = {roe:.0f}% ROE)"
+            # Activate cooldown and track daily count
+            self.stop_loss_cooldowns[symbol] = datetime.now(timezone.utc) + timedelta(minutes=self.stop_loss_cooldown_minutes)
+            self.daily_stop_losses[symbol] = self.daily_stop_losses.get(symbol, 0) + 1
+            logger.info(f"   {symbol}: SL cooldown activated ({self.stop_loss_cooldown_minutes}min). Daily SL count: {self.daily_stop_losses[symbol]}/{self.max_daily_stop_losses}")
 
         # 4. TIME-BASED EXIT - exit stale positions with minimal profit
         elif self._is_stale_position(position, pnl_pct):
