@@ -425,7 +425,7 @@ def main():
 
     # Fetch data
     signals = fetch_signals(500)  # More signals for pagination
-    trades = fetch_trades(50)
+    trades = fetch_trades(200)
     prices = fetch_current_prices()
 
     # ============================================
@@ -921,15 +921,12 @@ def main():
             st.warning("Could not load ETH data")
 
     # ============================================
-    # SECTION 6: PERFORMANCE REPORTS
+    # SECTION 6: P&L BREAKDOWN (Daily / Weekly / Monthly)
     # ============================================
     st.markdown("---")
-    st.header("📊 Performance Reports")
+    st.header("📊 P&L Breakdown")
 
-    # Calculate daily and weekly stats
     now_utc = datetime.now(timezone.utc)
-    today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = today_start - timedelta(days=7)
 
     def parse_time(ts):
         if not ts:
@@ -940,17 +937,6 @@ def main():
             return datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
         except:
             return None
-
-    # Filter trades by period
-    today_trades = []
-    week_trades = []
-    for t in closed_trades:
-        exit_time = parse_time(t.get('exit_time'))
-        if exit_time:
-            if exit_time >= today_start:
-                today_trades.append(t)
-            if exit_time >= week_start:
-                week_trades.append(t)
 
     def calc_stats(trade_list):
         if not trade_list:
@@ -967,51 +953,137 @@ def main():
             'avg_pnl': pnl / len(trade_list) if trade_list else 0
         }
 
+    # Parse exit times for all closed trades
+    trades_with_time = []
+    for t in closed_trades:
+        exit_time = parse_time(t.get('exit_time'))
+        if exit_time:
+            trades_with_time.append({**t, '_exit_dt': exit_time})
+
+    # --- Group trades by day ---
+    daily_groups = {}
+    for t in trades_with_time:
+        day_key = t['_exit_dt'].strftime('%Y-%m-%d')
+        daily_groups.setdefault(day_key, []).append(t)
+
+    # --- Group trades by week (Monday start) ---
+    weekly_groups = {}
+    for t in trades_with_time:
+        week_start = t['_exit_dt'] - timedelta(days=t['_exit_dt'].weekday())
+        week_key = week_start.strftime('%Y-%m-%d')
+        weekly_groups.setdefault(week_key, []).append(t)
+
+    # --- Group trades by month ---
+    monthly_groups = {}
+    for t in trades_with_time:
+        month_key = t['_exit_dt'].strftime('%Y-%m')
+        monthly_groups.setdefault(month_key, []).append(t)
+
+    # --- Tab view: Daily | Weekly | Monthly ---
+    pnl_tab1, pnl_tab2, pnl_tab3 = st.tabs(["📅 Daily", "📆 Weekly", "📈 Monthly"])
+
+    def render_pnl_table(groups, date_label="Date"):
+        """Render a P&L summary table and bar chart for grouped trades."""
+        if not groups:
+            st.info("No closed trades yet")
+            return
+
+        rows = []
+        for key in sorted(groups.keys()):
+            stats = calc_stats(groups[key])
+            rows.append({
+                date_label: key,
+                'Trades': stats['trades'],
+                'W/L': f"{stats['wins']}W/{stats['losses']}L",
+                'Win Rate': f"{stats['win_rate']:.0f}%",
+                'P&L': stats['pnl'],
+                'Avg P&L': stats['avg_pnl'],
+            })
+
+        df = pd.DataFrame(rows)
+
+        # P&L bar chart
+        colors = ['#00ff88' if v >= 0 else '#ff4444' for v in df['P&L']]
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=df[date_label],
+            y=df['P&L'],
+            marker_color=colors,
+            text=[f"${v:+.2f}" for v in df['P&L']],
+            textposition='outside',
+            textfont=dict(size=11),
+        ))
+
+        # Cumulative P&L line
+        cumulative = df['P&L'].cumsum()
+        fig.add_trace(go.Scatter(
+            x=df[date_label],
+            y=cumulative,
+            mode='lines+markers',
+            name='Cumulative',
+            line=dict(color='#00bfff', width=2),
+            marker=dict(size=6),
+            yaxis='y2',
+        ))
+
+        fig.update_layout(
+            title=f"P&L by {date_label}",
+            yaxis=dict(title="Period P&L ($)", zeroline=True, zerolinecolor='rgba(255,255,255,0.3)'),
+            yaxis2=dict(title="Cumulative P&L ($)", overlaying='y', side='right', zeroline=True, zerolinecolor='rgba(0,191,255,0.3)'),
+            template="plotly_dark",
+            height=350,
+            margin=dict(t=40, b=40, l=50, r=50),
+            showlegend=False,
+            bargap=0.3,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Summary table
+        display_df = df.copy()
+        display_df['P&L'] = display_df['P&L'].apply(lambda x: f"${x:+.2f}")
+        display_df['Avg P&L'] = display_df['Avg P&L'].apply(lambda x: f"${x:+.2f}")
+        # Show most recent first
+        display_df = display_df.iloc[::-1].reset_index(drop=True)
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    with pnl_tab1:
+        render_pnl_table(daily_groups, "Date")
+
+    with pnl_tab2:
+        render_pnl_table(weekly_groups, "Week")
+
+    with pnl_tab3:
+        render_pnl_table(monthly_groups, "Month")
+
+    # --- Summary row: Today / This Week / This Month / All Time ---
+    today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    this_week_start = today_start - timedelta(days=now_utc.weekday())
+    this_month_start = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    today_trades = [t for t in trades_with_time if t['_exit_dt'] >= today_start]
+    week_trades = [t for t in trades_with_time if t['_exit_dt'] >= this_week_start]
+    month_trades = [t for t in trades_with_time if t['_exit_dt'] >= this_month_start]
+
     today_stats = calc_stats(today_trades)
     week_stats = calc_stats(week_trades)
+    month_stats = calc_stats(month_trades)
     all_stats = calc_stats(closed_trades)
 
-    # Display reports in columns
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.subheader("📅 Today")
-        if today_stats['trades'] > 0:
-            pnl_color = "🟢" if today_stats['pnl'] >= 0 else "🔴"
-            st.markdown(f"""
-            - **Trades:** {today_stats['trades']}
-            - **Win Rate:** {today_stats['win_rate']:.1f}% ({today_stats['wins']}W/{today_stats['losses']}L)
-            - **P&L:** {pnl_color} ${today_stats['pnl']:+.2f}
-            - **Avg P&L:** ${today_stats['avg_pnl']:+.2f}/trade
-            """)
-        else:
-            st.info("No closed trades today")
-
-    with col2:
-        st.subheader("📆 Last 7 Days")
-        if week_stats['trades'] > 0:
-            pnl_color = "🟢" if week_stats['pnl'] >= 0 else "🔴"
-            st.markdown(f"""
-            - **Trades:** {week_stats['trades']}
-            - **Win Rate:** {week_stats['win_rate']:.1f}% ({week_stats['wins']}W/{week_stats['losses']}L)
-            - **P&L:** {pnl_color} ${week_stats['pnl']:+.2f}
-            - **Avg P&L:** ${week_stats['avg_pnl']:+.2f}/trade
-            """)
-        else:
-            st.info("No closed trades this week")
-
-    with col3:
-        st.subheader("📈 All Time")
-        if all_stats['trades'] > 0:
-            pnl_color = "🟢" if all_stats['pnl'] >= 0 else "🔴"
-            st.markdown(f"""
-            - **Trades:** {all_stats['trades']}
-            - **Win Rate:** {all_stats['win_rate']:.1f}% ({all_stats['wins']}W/{all_stats['losses']}L)
-            - **P&L:** {pnl_color} ${all_stats['pnl']:+.2f}
-            - **Avg P&L:** ${all_stats['avg_pnl']:+.2f}/trade
-            """)
-        else:
-            st.info("No closed trades yet")
+    st.markdown("#### Summary")
+    s1, s2, s3, s4 = st.columns(4)
+    for col, label, stats in [
+        (s1, "Today", today_stats),
+        (s2, "This Week", week_stats),
+        (s3, "This Month", month_stats),
+        (s4, "All Time", all_stats),
+    ]:
+        with col:
+            pnl = stats['pnl']
+            color = "#00ff88" if pnl >= 0 else "#ff4444"
+            st.markdown(f"**{label}**")
+            st.markdown(f"<span style='color:{color}; font-size:20px;'>${pnl:+.2f}</span>", unsafe_allow_html=True)
+            if stats['trades'] > 0:
+                st.caption(f"{stats['trades']} trades | {stats['win_rate']:.0f}% WR | {stats['wins']}W/{stats['losses']}L")
 
     # Progress tracker towards 100 trades
     st.markdown("---")
