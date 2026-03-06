@@ -1,5 +1,20 @@
 # Paper Trader Changelog
 
+## v3.6 — Remove RSI reversal entries (2026-03-06)
+
+**Problem**: RSI reversal entries (buy when RSI <25 + rising) had **25% win rate** and lost **$65.24** over 8 trades. Despite 3 rounds of tightening (v3.4, v3.5), the strategy kept catching falling knives. RSI extremes on 1m candles indicate strong trend momentum, not imminent reversal.
+
+Meanwhile, agreement-based entries (SMC+Tech aligned) had **53% win rate** and made **+$138.57** over 17 trades.
+
+**Changes**:
+- **Removed RSI reversal as entry trigger** entirely (both oversold buy and overbought sell)
+- **Kept RSI as VETO** — oversold still blocks sells, overbought still blocks buys (this part works)
+- Only entry path is now agreement-check: MACD + SMC + SMA must all align
+
+**History**: RSI reversal was introduced in v3.0 (commit 93d4560, Mar 1) alongside the RSI VETO fix. The VETO was the right fix; the reversal entry was a bonus that never worked on 1m timeframe.
+
+---
+
 ## v3.5 — Tighten entry filters across all buy paths (2026-03-06)
 
 **Problem**: Worst day since launch — 5L/2W, -$53.12. Market dropped (BTC -2.3%, ETH -1.8%) and the system kept entering longs through two leaky paths:

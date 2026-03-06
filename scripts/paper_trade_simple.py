@@ -273,8 +273,7 @@ class TechnicalSignalGenerator:
         # RSI oversold/overbought are contrarian signals - they VETO opposite trades
         rsi_oversold = rsi["value"] < self.rsi_oversold  # < 30
         rsi_overbought = rsi["value"] > self.rsi_overbought  # > 70
-        rsi_extreme_oversold = rsi["value"] < 25  # Very oversold - strong buy zone
-        rsi_extreme_overbought = rsi["value"] > 75  # Very overbought - strong sell zone
+        # rsi_extreme thresholds removed in v3.6 — RSI reversal entries disabled
 
         # === AGREEMENT CHECK - CRITICAL ===
         # Both SMC and technicals must agree, otherwise HOLD
@@ -297,32 +296,9 @@ class TechnicalSignalGenerator:
             confidence = 0.5
             reasons = [f"RSI overbought ({rsi['value']:.0f}) - NO BUY, wait for pullback"]
 
-        # RSI EXTREME OVERSOLD + Rising = Strong BUY opportunity
-        # Requires: SMA20 > SMA50, price above SMA20, and positive MACD
-        # All three confirm short-term trend supports the reversal
-        elif rsi_extreme_oversold and rsi["rising"] and sma["sma20_above_sma50"] and sma["price_above_sma20"] and macd["histogram"] > 0:
-            signal = "buy"
-            confidence = 0.70
-            reasons = [f"RSI extreme oversold ({rsi['value']:.0f}) + rising - reversal BUY"]
-
-        # RSI oversold but missing confirmations — don't catch the knife
-        elif rsi_extreme_oversold and rsi["rising"]:
-            signal = "hold"
-            confidence = 0.5
-            missing = []
-            if not sma["sma20_above_sma50"]:
-                missing.append("SMA20<SMA50")
-            if not sma["price_above_sma20"]:
-                missing.append("price<SMA20")
-            if macd["histogram"] <= 0:
-                missing.append("MACD negative")
-            reasons = [f"RSI oversold ({rsi['value']:.0f}) but {', '.join(missing)} - falling knife, no entry"]
-
-        # RSI EXTREME OVERBOUGHT + Falling = Strong SELL opportunity
-        elif rsi_extreme_overbought and rsi["falling"]:
-            signal = "sell"
-            confidence = 0.70
-            reasons = [f"RSI extreme overbought ({rsi['value']:.0f}) + falling - reversal SELL"]
+        # NOTE: RSI reversal entries removed in v3.6. Data showed 25% WR, -$65 over 8 trades.
+        # RSI extremes on 1m candles indicate strong trend, not reversal.
+        # RSI VETO (above) is kept — only the entry trigger is removed.
 
         # BULLISH: Both SMC and technicals agree bullish (and not overbought)
         elif tech_direction == "bullish" and smc_bullish:
