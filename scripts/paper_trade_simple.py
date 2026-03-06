@@ -1095,7 +1095,7 @@ async def main():
 
     parser = argparse.ArgumentParser(description="Leveraged Paper Trading")
     parser.add_argument(
-        "--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT"],
+        "--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT", "XRPUSDT"],
         help="Symbols to trade"
     )
     parser.add_argument(

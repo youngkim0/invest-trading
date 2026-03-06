@@ -123,9 +123,9 @@ def fetch_trades(limit: int = 100):
 
 @st.cache_data(ttl=10)
 def fetch_current_prices():
-    """Fetch current BTC and ETH prices from multiple sources."""
+    """Fetch current BTC, ETH, and XRP prices from multiple sources."""
     prices = {}
-    symbols = ["BTCUSDT", "ETHUSDT"]
+    symbols = ["BTCUSDT", "ETHUSDT", "XRPUSDT"]
 
     # Try multiple Binance endpoints
     binance_urls = [
@@ -150,17 +150,16 @@ def fetch_current_prices():
     # Fallback to CoinGecko if any symbol missing
     if len(prices) < len(symbols):
         try:
-            coin_map = {"BTCUSDT": "bitcoin", "ETHUSDT": "ethereum"}
+            coin_map = {"BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "XRPUSDT": "ripple"}
             resp = requests.get(
-                "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd",
+                "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,ripple&vs_currencies=usd",
                 timeout=5
             )
             if resp.status_code == 200:
                 data = resp.json()
-                if "BTCUSDT" not in prices and "bitcoin" in data:
-                    prices["BTCUSDT"] = float(data["bitcoin"]["usd"])
-                if "ETHUSDT" not in prices and "ethereum" in data:
-                    prices["ETHUSDT"] = float(data["ethereum"]["usd"])
+                for sym, coin_id in coin_map.items():
+                    if sym not in prices and coin_id in data:
+                        prices[sym] = float(data[coin_id]["usd"])
         except:
             pass
 
@@ -200,7 +199,7 @@ def fetch_klines(symbol: str, interval: str = "1h", limit: int = 48):
 
     # Fallback to CoinGecko OHLC
     try:
-        coin_map = {"BTCUSDT": "bitcoin", "ETHUSDT": "ethereum"}
+        coin_map = {"BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "XRPUSDT": "ripple"}
         coin_id = coin_map.get(symbol, "bitcoin")
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc?vs_currency=usd&days=2"
         resp = requests.get(url, timeout=15)
@@ -318,7 +317,7 @@ def generate_ai_insights(trades_json: str, signals_json: str, prices_json: str, 
         signal_analysis = []
         eval_minutes = 10
         ai_price_maps = {}
-        for sym in ["BTCUSDT", "ETHUSDT"]:
+        for sym in ["BTCUSDT", "ETHUSDT", "XRPUSDT"]:
             ai_price_maps[sym] = fetch_price_at_time(sym, 500)
 
         for sig in signals[-50:]:  # Last 50 signals
@@ -392,6 +391,7 @@ Analyze the following data and provide:
 ## Current Prices
 BTC: ${prices.get('BTCUSDT', 0):,.2f}
 ETH: ${prices.get('ETHUSDT', 0):,.2f}
+XRP: ${prices.get('XRPUSDT', 0):,.4f}
 
 Provide your analysis in a clear, concise format using markdown. Be specific and actionable.
 Focus on patterns you see in the data, not generic advice.
@@ -593,7 +593,7 @@ def main():
         # Fetch historical 1m candles for price-at-time lookups
         eval_minutes = 10  # Evaluate signal accuracy 10 minutes after
         price_maps = {}
-        for sym in ["BTCUSDT", "ETHUSDT"]:
+        for sym in ["BTCUSDT", "ETHUSDT", "XRPUSDT"]:
             price_maps[sym] = fetch_price_at_time(sym, 500)
 
         for i, sig in enumerate(page_signals):
@@ -699,7 +699,7 @@ def main():
             # Count signal flips (buy→sell or sell→buy)
             flips = 0
             last_direction = {}
-            signal_by_symbol = {'BTCUSDT': [], 'ETHUSDT': []}
+            signal_by_symbol = {'BTCUSDT': [], 'ETHUSDT': [], 'XRPUSDT': []}
 
             for sig in signals:
                 symbol = sig.get('symbol', '')
@@ -852,73 +852,45 @@ def main():
 
     interval, limit = timeframe_options[selected_tf]
 
-    col1, col2 = st.columns(2)
+    chart_symbols = [
+        ("BTCUSDT", "Bitcoin (BTC)"),
+        ("ETHUSDT", "Ethereum (ETH)"),
+        ("XRPUSDT", "Ripple (XRP)"),
+    ]
+    chart_cols = st.columns(len(chart_symbols))
 
-    # BTC Chart
-    with col1:
-        st.subheader("Bitcoin (BTC)")
-        btc_df = fetch_klines("BTCUSDT", interval, limit)
-        if not btc_df.empty:
-            fig_btc = go.Figure(data=[go.Candlestick(
-                x=btc_df['timestamp'],
-                open=btc_df['open'],
-                high=btc_df['high'],
-                low=btc_df['low'],
-                close=btc_df['close'],
-                increasing_line_color='#00ff88',
-                decreasing_line_color='#ff4444'
-            )])
-            fig_btc.update_layout(
-                height=400,
-                template="plotly_dark",
-                xaxis_title="Time (KST)",
-                yaxis_title="Price (USDT)",
-                xaxis_rangeslider_visible=False,
-                margin=dict(l=0, r=0, t=0, b=0),
-            )
-            st.plotly_chart(fig_btc, use_container_width=True)
+    for col, (sym, label) in zip(chart_cols, chart_symbols):
+        with col:
+            st.subheader(label)
+            df_chart = fetch_klines(sym, interval, limit)
+            if not df_chart.empty:
+                fig = go.Figure(data=[go.Candlestick(
+                    x=df_chart['timestamp'],
+                    open=df_chart['open'],
+                    high=df_chart['high'],
+                    low=df_chart['low'],
+                    close=df_chart['close'],
+                    increasing_line_color='#00ff88',
+                    decreasing_line_color='#ff4444'
+                )])
+                fig.update_layout(
+                    height=400,
+                    template="plotly_dark",
+                    xaxis_title="Time (KST)",
+                    yaxis_title="Price (USDT)",
+                    xaxis_rangeslider_visible=False,
+                    margin=dict(l=0, r=0, t=0, b=0),
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
-            # Show current price
-            current_btc = btc_df['close'].iloc[-1]
-            prev_btc = btc_df['close'].iloc[-2]
-            change_btc = ((current_btc - prev_btc) / prev_btc) * 100
-            color = "🟢" if change_btc >= 0 else "🔴"
-            st.markdown(f"**Current: ${current_btc:,.2f}** {color} ({change_btc:+.2f}%)")
-        else:
-            st.warning("Could not load BTC data")
-
-    # ETH Chart
-    with col2:
-        st.subheader("Ethereum (ETH)")
-        eth_df = fetch_klines("ETHUSDT", interval, limit)
-        if not eth_df.empty:
-            fig_eth = go.Figure(data=[go.Candlestick(
-                x=eth_df['timestamp'],
-                open=eth_df['open'],
-                high=eth_df['high'],
-                low=eth_df['low'],
-                close=eth_df['close'],
-                increasing_line_color='#00ff88',
-                decreasing_line_color='#ff4444'
-            )])
-            fig_eth.update_layout(
-                height=400,
-                template="plotly_dark",
-                xaxis_title="Time (KST)",
-                yaxis_title="Price (USDT)",
-                xaxis_rangeslider_visible=False,
-                margin=dict(l=0, r=0, t=0, b=0),
-            )
-            st.plotly_chart(fig_eth, use_container_width=True)
-
-            # Show current price
-            current_eth = eth_df['close'].iloc[-1]
-            prev_eth = eth_df['close'].iloc[-2]
-            change_eth = ((current_eth - prev_eth) / prev_eth) * 100
-            color = "🟢" if change_eth >= 0 else "🔴"
-            st.markdown(f"**Current: ${current_eth:,.2f}** {color} ({change_eth:+.2f}%)")
-        else:
-            st.warning("Could not load ETH data")
+                current_p = df_chart['close'].iloc[-1]
+                prev_p = df_chart['close'].iloc[-2]
+                change_p = ((current_p - prev_p) / prev_p) * 100
+                color = "🟢" if change_p >= 0 else "🔴"
+                fmt = f"${current_p:,.4f}" if current_p < 10 else f"${current_p:,.2f}"
+                st.markdown(f"**Current: {fmt}** {color} ({change_p:+.2f}%)")
+            else:
+                st.warning(f"Could not load {label} data")
 
     # ============================================
     # SECTION 6: P&L BREAKDOWN (Daily / Weekly / Monthly)
