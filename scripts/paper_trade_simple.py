@@ -298,18 +298,25 @@ class TechnicalSignalGenerator:
             reasons = [f"RSI overbought ({rsi['value']:.0f}) - NO BUY, wait for pullback"]
 
         # RSI EXTREME OVERSOLD + Rising = Strong BUY opportunity
-        # BUT only when 1m short-term trend confirms (SMA20 > SMA50)
-        # Prevents catching falling knives during pullbacks
-        elif rsi_extreme_oversold and rsi["rising"] and sma["sma20_above_sma50"]:
+        # Requires: SMA20 > SMA50, price above SMA20, and positive MACD
+        # All three confirm short-term trend supports the reversal
+        elif rsi_extreme_oversold and rsi["rising"] and sma["sma20_above_sma50"] and sma["price_above_sma20"] and macd["histogram"] > 0:
             signal = "buy"
             confidence = 0.70
             reasons = [f"RSI extreme oversold ({rsi['value']:.0f}) + rising - reversal BUY"]
 
-        # RSI oversold but short-term trend is down — don't catch the knife
-        elif rsi_extreme_oversold and rsi["rising"] and not sma["sma20_above_sma50"]:
+        # RSI oversold but missing confirmations — don't catch the knife
+        elif rsi_extreme_oversold and rsi["rising"]:
             signal = "hold"
             confidence = 0.5
-            reasons = [f"RSI oversold ({rsi['value']:.0f}) but 1m SMA20<SMA50 - falling knife, no entry"]
+            missing = []
+            if not sma["sma20_above_sma50"]:
+                missing.append("SMA20<SMA50")
+            if not sma["price_above_sma20"]:
+                missing.append("price<SMA20")
+            if macd["histogram"] <= 0:
+                missing.append("MACD negative")
+            reasons = [f"RSI oversold ({rsi['value']:.0f}) but {', '.join(missing)} - falling knife, no entry"]
 
         # RSI EXTREME OVERBOUGHT + Falling = Strong SELL opportunity
         elif rsi_extreme_overbought and rsi["falling"]:
@@ -319,9 +326,13 @@ class TechnicalSignalGenerator:
 
         # BULLISH: Both SMC and technicals agree bullish (and not overbought)
         elif tech_direction == "bullish" and smc_bullish:
+            # Require 1m SMA20 > SMA50 (short-term trend must be up)
+            if not sma["sma20_above_sma50"]:
+                signal = "hold"
+                confidence = 0.5
+                reasons.append(f"SMA20 crossed below SMA50 - short-term trend bearish, no buy")
             # Require MACD histogram confirms direction (not near-zero)
-            macd_pct = abs(macd["histogram"]) / current_price * 100 if current_price > 0 else 0
-            if macd["histogram"] <= 0 or macd_pct < 0.001:
+            elif macd["histogram"] <= 0 or (abs(macd["histogram"]) / current_price * 100 if current_price > 0 else 0) < 0.001:
                 signal = "hold"
                 confidence = 0.5
                 reasons.append(f"MACD too weak ({macd['histogram']:.4f}) - no momentum")

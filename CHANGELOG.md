@@ -1,5 +1,21 @@
 # Paper Trader Changelog
 
+## v3.5 — Tighten entry filters across all buy paths (2026-03-06)
+
+**Problem**: Worst day since launch — 5L/2W, -$53.12. Market dropped (BTC -2.3%, ETH -1.8%) and the system kept entering longs through two leaky paths:
+
+1. **RSI reversal still catching knives**: Trade #5 (ETH -$23.75) — RSI=24 oversold reversal fired because SMA20>SMA50=True (v3.4 check passed). But price was BELOW SMA20 and MACD was deeply negative (-1.72). The reversal bought into active selling.
+2. **Agreement-check ignoring SMA cross**: Trade #6 (BTC -$24.94) — MACD+SMC agreed bullish, but SMA20 had already crossed below SMA50 (short-term trend turned bearish). Agreement path had no SMA cross check.
+
+**Changes**:
+- **RSI reversal buy now requires ALL THREE**: SMA20>SMA50, price above SMA20, and positive MACD histogram. Previously only checked SMA20>SMA50. Blocks entries where price is falling through the moving average.
+- **Agreement-check buy now requires SMA20>SMA50**: Prevents entering longs when the 1m short-term trend has crossed bearish, even if MACD+SMC agree.
+- **Better diagnostics**: Falling knife block now reports which specific conditions failed (SMA20<SMA50, price<SMA20, MACD negative).
+
+**Analysis**: Of the 16 RSI oversold signals that passed v3.4 yesterday, most had price below SMA20 and/or negative MACD. These new filters would have blocked all the losing RSI entries while still allowing legitimate reversals where price is above the short-term average with positive momentum.
+
+---
+
 ## v3.4 — Signal quality + stop loss protection (2026-03-05)
 
 **Problem**: 3-trade losing streak at end of day (-$88). Root cause analysis:
