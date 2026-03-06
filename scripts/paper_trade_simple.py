@@ -1443,7 +1443,7 @@ async def main():
     )
     parser.add_argument(
         "--capital", type=float, default=1000.0,
-        help="Total initial capital (split equally across strategies)"
+        help="Capital per strategy (each strategy gets this amount)"
     )
     parser.add_argument(
         "--leverage", type=int, default=10,
@@ -1482,7 +1482,7 @@ async def main():
 
     # Build strategy configs
     selected = args.strategies
-    capital_per_strategy = args.capital / len(selected)
+    capital_per_strategy = args.capital  # Each strategy gets full capital amount
 
     strategy_configs = []
     for name in selected:
