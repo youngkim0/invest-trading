@@ -1,5 +1,34 @@
 # Paper Trader Changelog
 
+## v4.0 — Multi-Strategy Architecture (2026-03-06)
+
+**Goal**: Compare multiple signal generation strategies side-by-side with independent capital allocation and tracking. Determines which approach works best in different market conditions.
+
+**3 Strategies**:
+1. **Agreement Classic** (1m+1h) — existing strategy, unchanged logic. MACD+SMC+SMA must agree on 1m, filtered by 1h HTF trend.
+2. **Agreement MTF** (1m+5m+30m+1h) — same agreement logic on 1m, plus 5m/30m confluence scoring. 5m confirms: +1.0 pts, disagrees: -0.5 pts. 30m confirms: +1.5 pts, disagrees: -1.0 pts. MTF disagreement (bonus ≤ -1.5) downgrades to hold. Strong confirmation (bonus ≥ 2.0) upgrades signal strength.
+3. **Momentum/Breakout** (1m+1h) — new strategy. Breakout above 20-bar high (2.0 pts) + volume spike ≥2x avg (2.0 pts) + RSI 40-70 (1.0 pt) + MACD rising (1.5 pts) + SMA20>SMA50 (1.5 pts). Threshold ≥5.0 for entry, ≥7.0 for strong. Tighter exits: SL 0.8%, TP 1.8%, max hold 2h.
+
+**Architecture changes**:
+- `StrategyConfig` dataclass holds per-strategy parameters (SL, TP, trailing, max hold, capital)
+- `MTFSignalGenerator` inherits from `TechnicalSignalGenerator`, adds 5m/30m confluence
+- `MomentumBreakoutGenerator` inherits from `TechnicalSignalGenerator`, overrides signal logic
+- `SimplePaperTrader` accepts list of strategies, tracks positions/PnL/capital independently per strategy
+- Positions keyed by `strategy_name:symbol` (same symbol can have positions from different strategies)
+- Candles fetched once per symbol, shared across all strategies (efficient)
+- CLI `--strategies` flag to select which strategies to run
+
+**Capital allocation**: Total capital split equally across selected strategies ($333.33 each with $1000).
+
+**Dashboard changes**:
+- Strategy selector dropdown: view all or filter by individual strategy
+- Strategy comparison table when viewing "All Strategies"
+- All existing views (trades, signals, P&L) filtered by selected strategy
+
+**DB compatibility**: No schema changes needed. `strategy_name` and `source` fields already exist. Legacy "paper_technical" trades map to "agreement_classic".
+
+---
+
 ## v3.6 — Remove RSI reversal entries (2026-03-06)
 
 **Problem**: RSI reversal entries (buy when RSI <25 + rising) had **25% win rate** and lost **$65.24** over 8 trades. Despite 3 rounds of tightening (v3.4, v3.5), the strategy kept catching falling knives. RSI extremes on 1m candles indicate strong trend momentum, not imminent reversal.

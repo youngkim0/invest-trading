@@ -121,6 +121,41 @@ def fetch_trades(limit: int = 100):
         return []
 
 
+# Strategy name → signal source mapping
+STRATEGY_SOURCE_MAP = {
+    "agreement_classic": "agreement",
+    "agreement_mtf": "agreement_mtf",
+    "momentum": "momentum",
+    "paper_technical": "technical",  # Legacy
+}
+
+# All known strategy names (for filtering)
+ALL_STRATEGY_NAMES = ["agreement_classic", "agreement_mtf", "momentum", "paper_technical"]
+
+
+def filter_trades_by_strategy(trades, strategy_name):
+    """Filter trades by strategy_name. None = all."""
+    if strategy_name is None:
+        return trades
+    # Include legacy "paper_technical" when viewing "agreement_classic"
+    names = [strategy_name]
+    if strategy_name == "agreement_classic":
+        names.append("paper_technical")
+    return [t for t in trades if t.get("strategy_name", "paper_technical") in names]
+
+
+def filter_signals_by_strategy(signals, strategy_name):
+    """Filter signals by source matching strategy. None = all."""
+    if strategy_name is None:
+        return signals
+    source = STRATEGY_SOURCE_MAP.get(strategy_name, strategy_name)
+    # Include legacy "technical" when viewing "agreement_classic"
+    sources = [source]
+    if strategy_name == "agreement_classic":
+        sources.append("technical")
+    return [s for s in signals if s.get("source", "technical") in sources]
+
+
 @st.cache_data(ttl=10)
 def fetch_current_prices():
     """Fetch current BTC, ETH, and XRP prices from multiple sources."""
@@ -414,19 +449,56 @@ Keep response under 500 words."""
 def main():
     st.title("📈 AI Trading Dashboard")
     kst_now = datetime.now(timezone.utc) + timedelta(hours=9)
-    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | System started: Feb 20, 2026 | v3.6 (agreement-only entries)")
+    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | System started: Feb 20, 2026 | v4.0 (multi-strategy)")
 
-    # Auto refresh
-    col1, col2 = st.columns([4, 1])
+    # Auto refresh + strategy selector
+    col1, col2, col3 = st.columns([2.5, 1.5, 1])
     with col2:
+        strategy_options = {
+            "All Strategies": None,
+            "📈 Agreement Classic (1m+1h)": "agreement_classic",
+            "📈 Agreement MTF (1m+5m+30m+1h)": "agreement_mtf",
+            "🚀 Momentum": "momentum",
+        }
+        selected_label = st.selectbox("Strategy", list(strategy_options.keys()), key="strategy_select")
+        strategy_filter = strategy_options[selected_label]
+    with col3:
         if st.button("🔄 Refresh"):
             st.cache_data.clear()
             st.rerun()
 
-    # Fetch data
-    signals = fetch_signals(500)  # More signals for pagination
-    trades = fetch_trades(200)
+    # Fetch all data, then filter by strategy
+    all_signals = fetch_signals(500)
+    all_trades = fetch_trades(200)
     prices = fetch_current_prices()
+
+    signals = filter_signals_by_strategy(all_signals, strategy_filter)
+    trades = filter_trades_by_strategy(all_trades, strategy_filter)
+
+    # ============================================
+    # STRATEGY COMPARISON (only when "All Strategies" selected)
+    # ============================================
+    if strategy_filter is None:
+        st.markdown("---")
+        st.header("⚖️ Strategy Comparison")
+
+        strat_names = ["agreement_classic", "agreement_mtf", "momentum"]
+        strat_labels = ["Agreement Classic", "Agreement MTF", "Momentum"]
+        comp_cols = st.columns(len(strat_names))
+
+        for col, sname, slabel in zip(comp_cols, strat_names, strat_labels):
+            with col:
+                s_trades = filter_trades_by_strategy(all_trades, sname)
+                s_closed = [t for t in s_trades if t.get('exit_time')]
+                s_open = [t for t in s_trades if not t.get('exit_time')]
+                s_wins = [t for t in s_closed if (t.get('net_pnl') or 0) > 0]
+                s_pnl = sum(t.get('net_pnl') or 0 for t in s_closed)
+                s_wr = len(s_wins) / len(s_closed) * 100 if s_closed else 0
+
+                pnl_color = "#00ff88" if s_pnl >= 0 else "#ff4444"
+                st.markdown(f"**{slabel}**")
+                st.markdown(f"<span style='color:{pnl_color}; font-size:22px;'>${s_pnl:+.2f}</span>", unsafe_allow_html=True)
+                st.caption(f"{len(s_closed)} trades | {s_wr:.0f}% WR | {len(s_wins)}W/{len(s_closed)-len(s_wins)}L | {len(s_open)} open")
 
     # ============================================
     # PORTFOLIO VALUE BANNER (at the top)
@@ -1157,7 +1229,7 @@ def main():
     # FOOTER
     # ============================================
     st.markdown("---")
-    st.caption("🤖 AI Trading System | Signals every minute | Gemini 2.5 Flash AI | 🇰🇷 All times in KST (UTC+9)")
+    st.caption("🤖 AI Trading System v4.0 | Multi-Strategy | Signals every minute | Gemini 2.5 Flash AI | 🇰🇷 KST (UTC+9)")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,16 @@
 #!/usr/bin/env python
-"""Simple paper trading script using Binance real-time data and Supabase."""
+"""Multi-strategy paper trading script using Binance real-time data and Supabase.
+
+Supports 3 strategies:
+- agreement_classic: Original MACD+SMC+SMA agreement on 1m+1h
+- agreement_mtf: Multi-timeframe agreement (1m+5m+30m+1h)
+- momentum: Momentum/Breakout strategy with volume confirmation
+"""
 
 import asyncio
 import signal
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -141,7 +148,7 @@ class TechnicalSignalGenerator:
             return "bearish"
         return "neutral"
 
-    def generate_signal(self, df: pd.DataFrame, htf_trend: str = "neutral") -> dict:
+    def generate_signal(self, df: pd.DataFrame, htf_trend: str = "neutral", **kwargs) -> dict:
         """Generate trading signal requiring SMC + Technical AGREEMENT.
 
         Key rules:
@@ -387,51 +394,339 @@ class TechnicalSignalGenerator:
         }
 
 
+class MTFSignalGenerator(TechnicalSignalGenerator):
+    """Multi-timeframe agreement signal generator (1m+5m+30m+1h).
+
+    Uses the same agreement logic as TechnicalSignalGenerator on 1m candles,
+    then adds confluence scoring from 5m and 30m timeframes.
+    If MTF strongly disagrees, downgrades to hold.
+    If MTF strongly confirms, upgrades signal strength.
+    """
+
+    def generate_signal(self, df: pd.DataFrame, htf_trend: str = "neutral",
+                        df_5m: pd.DataFrame = None, df_30m: pd.DataFrame = None, **kwargs) -> dict:
+        """Generate signal with multi-timeframe confluence."""
+        # Get base signal from 1m (parent class)
+        base_result = super().generate_signal(df, htf_trend)
+
+        # If base is hold, no point adding MTF confluence
+        if base_result["signal"] == "hold":
+            return base_result
+
+        is_buy = base_result["signal"] in ("buy", "strong_buy")
+        mtf_bonus = 0.0
+        mtf_reasons = []
+
+        # === 5m confluence (+1.0 confirm / -0.5 disagree) ===
+        if df_5m is not None and len(df_5m) >= 50:
+            prices_5m = df_5m["close"]
+            macd_5m = self.calculate_macd(prices_5m)
+            sma_5m = self.calculate_sma_crossover(prices_5m)
+
+            if is_buy:
+                if macd_5m["histogram"] > 0 and sma_5m["sma20_above_sma50"]:
+                    mtf_bonus += 1.0
+                    mtf_reasons.append("5m confirms↑")
+                elif macd_5m["histogram"] < 0 and not sma_5m["sma20_above_sma50"]:
+                    mtf_bonus -= 0.5
+                    mtf_reasons.append("5m disagrees")
+            else:  # sell
+                if macd_5m["histogram"] < 0 and not sma_5m["sma20_above_sma50"]:
+                    mtf_bonus += 1.0
+                    mtf_reasons.append("5m confirms↓")
+                elif macd_5m["histogram"] > 0 and sma_5m["sma20_above_sma50"]:
+                    mtf_bonus -= 0.5
+                    mtf_reasons.append("5m disagrees")
+
+        # === 30m confluence (+1.5 confirm / -1.0 disagree) ===
+        if df_30m is not None and len(df_30m) >= 50:
+            prices_30m = df_30m["close"]
+            macd_30m = self.calculate_macd(prices_30m)
+            sma_30m = self.calculate_sma_crossover(prices_30m)
+
+            if is_buy:
+                if macd_30m["histogram"] > 0 and sma_30m["sma20_above_sma50"]:
+                    mtf_bonus += 1.5
+                    mtf_reasons.append("30m confirms↑")
+                elif macd_30m["histogram"] < 0 and not sma_30m["sma20_above_sma50"]:
+                    mtf_bonus -= 1.0
+                    mtf_reasons.append("30m disagrees")
+            else:  # sell
+                if macd_30m["histogram"] < 0 and not sma_30m["sma20_above_sma50"]:
+                    mtf_bonus += 1.5
+                    mtf_reasons.append("30m confirms↓")
+                elif macd_30m["histogram"] > 0 and sma_30m["sma20_above_sma50"]:
+                    mtf_bonus -= 1.0
+                    mtf_reasons.append("30m disagrees")
+
+        # If MTF strongly disagrees, downgrade to hold
+        if mtf_bonus <= -1.5:
+            return {
+                **base_result,
+                "signal": "hold",
+                "confidence": 0.5,
+                "reasoning": f"MTF disagreement ({', '.join(mtf_reasons)}), " + base_result["reasoning"],
+            }
+
+        # Adjust confidence based on MTF
+        conf_adj = mtf_bonus * 0.03
+        new_confidence = min(0.95, max(0.5, base_result["confidence"] + conf_adj))
+
+        # If MTF strongly confirms, upgrade signal strength
+        new_signal = base_result["signal"]
+        if mtf_bonus >= 2.0:
+            if new_signal == "buy":
+                new_signal = "strong_buy"
+            elif new_signal == "sell":
+                new_signal = "strong_sell"
+
+        reasoning = base_result["reasoning"]
+        if mtf_reasons:
+            reasoning += ", " + ", ".join(mtf_reasons)
+
+        return {
+            **base_result,
+            "signal": new_signal,
+            "confidence": new_confidence,
+            "reasoning": reasoning,
+        }
+
+
+class MomentumBreakoutGenerator(TechnicalSignalGenerator):
+    """Momentum/Breakout signal generator for aggressive entries.
+
+    Entry rules:
+    - Breakout: Price breaks 20-bar high (buy) or 20-bar low (sell) → 2.0 pts
+    - Volume spike: Current volume >= 2x 20-bar average → 2.0 pts
+    - RSI confirmation: 40-70 for buy, 30-60 for sell → 1.0 pt
+    - MACD direction: Histogram positive+rising / negative+falling → 1.5 pts
+    - SMA trend: SMA20 > SMA50 (buy) or SMA20 < SMA50 (sell) → 1.5 pts
+    - Buy threshold >= 5.0, strong >= 7.0
+
+    Reuses RSI/MACD/SMA from parent class. HTF filter same as agreement.
+    """
+
+    def generate_signal(self, df: pd.DataFrame, htf_trend: str = "neutral", **kwargs) -> dict:
+        """Generate momentum/breakout signal."""
+        if len(df) < 60:
+            return {"signal": "hold", "confidence": 0.5, "reasoning": "Insufficient data"}
+
+        prices = df["close"]
+        volumes = df["volume"]
+        current_price = float(prices.iloc[-1])
+
+        # Calculate base indicators (reuse parent methods)
+        rsi = self.calculate_rsi(prices)
+        macd = self.calculate_macd(prices)
+        sma = self.calculate_sma_crossover(prices)
+
+        # Breakout detection (20-bar high/low, excluding current bar)
+        lookback = min(20, len(prices) - 1)
+        high_20 = float(prices.iloc[-lookback - 1:-1].max())
+        low_20 = float(prices.iloc[-lookback - 1:-1].min())
+        breakout_up = current_price > high_20
+        breakout_down = current_price < low_20
+
+        # Volume spike detection
+        avg_volume_20 = float(volumes.iloc[-lookback - 1:-1].mean()) if len(volumes) > lookback else 0
+        current_volume = float(volumes.iloc[-1])
+        volume_ratio = current_volume / avg_volume_20 if avg_volume_20 > 0 else 0
+        volume_spike = volume_ratio >= 2.0
+
+        # Scoring
+        buy_score = 0.0
+        sell_score = 0.0
+        reasons = []
+
+        # Breakout (2.0 pts)
+        if breakout_up:
+            buy_score += 2.0
+            reasons.append(f"Breakout above ${high_20:,.2f}")
+        if breakout_down:
+            sell_score += 2.0
+            reasons.append(f"Breakdown below ${low_20:,.2f}")
+
+        # Volume spike (2.0 pts) - only counts if breakout confirms direction
+        if volume_spike:
+            if breakout_up:
+                buy_score += 2.0
+                reasons.append(f"Vol spike {volume_ratio:.1f}x")
+            elif breakout_down:
+                sell_score += 2.0
+                reasons.append(f"Vol spike {volume_ratio:.1f}x")
+
+        # RSI confirmation (1.0 pt)
+        # Buy: 40-70 (not overbought), Sell: 30-60 (not oversold)
+        if 40 <= rsi["value"] <= 70:
+            buy_score += 1.0
+        if 30 <= rsi["value"] <= 60:
+            sell_score += 1.0
+
+        # MACD direction (1.5 pts)
+        if macd["histogram"] > 0 and macd["hist_rising"]:
+            buy_score += 1.5
+            reasons.append("MACD rising+")
+        elif macd["histogram"] < 0 and macd["hist_falling"]:
+            sell_score += 1.5
+            reasons.append("MACD falling-")
+
+        # SMA trend (1.5 pts)
+        if sma["sma20_above_sma50"]:
+            buy_score += 1.5
+        else:
+            sell_score += 1.5
+
+        # Determine signal
+        signal_type = "hold"
+        confidence = 0.5
+
+        if buy_score >= 7.0:
+            signal_type = "strong_buy"
+            confidence = min(0.85, 0.60 + buy_score * 0.03)
+        elif buy_score >= 5.0:
+            signal_type = "buy"
+            confidence = min(0.75, 0.55 + buy_score * 0.03)
+        elif sell_score >= 7.0:
+            signal_type = "strong_sell"
+            confidence = min(0.85, 0.60 + sell_score * 0.03)
+        elif sell_score >= 5.0:
+            signal_type = "sell"
+            confidence = min(0.75, 0.55 + sell_score * 0.03)
+
+        # RSI Veto (same as agreement)
+        if rsi["value"] < self.rsi_oversold and signal_type in ("sell", "strong_sell"):
+            signal_type = "hold"
+            confidence = 0.5
+            reasons = [f"RSI oversold ({rsi['value']:.0f}) - veto sell"]
+        elif rsi["value"] > self.rsi_overbought and signal_type in ("buy", "strong_buy"):
+            signal_type = "hold"
+            confidence = 0.5
+            reasons = [f"RSI overbought ({rsi['value']:.0f}) - veto buy"]
+
+        # HTF filter (same as agreement)
+        if htf_trend == "bearish" and signal_type in ("buy", "strong_buy"):
+            reasons = [f"HTF bearish - blocked {signal_type}"] + reasons
+            signal_type = "hold"
+            confidence = 0.5
+        elif htf_trend != "bearish" and signal_type in ("sell", "strong_sell"):
+            reasons = [f"HTF {htf_trend} - blocked sell"] + reasons
+            signal_type = "hold"
+            confidence = 0.5
+        elif htf_trend == "neutral" and signal_type in ("buy", "strong_buy"):
+            confidence = max(0.5, confidence - 0.10)
+            reasons.append("HTF neutral (-10% conf)")
+
+        if not reasons:
+            reasons = ["No breakout signals"]
+
+        return {
+            "signal": signal_type,
+            "confidence": confidence,
+            "reasoning": ", ".join(reasons),
+            "indicators": {
+                "rsi": rsi["value"],
+                "rsi_momentum": "rising" if rsi["rising"] else "falling",
+                "macd": macd,
+                "sma": sma,
+                "price": current_price,
+                "breakout_up": breakout_up,
+                "breakout_down": breakout_down,
+                "volume_spike": volume_spike,
+                "volume_ratio": volume_ratio,
+                "htf_trend": htf_trend,
+            },
+        }
+
+
+@dataclass
+class StrategyConfig:
+    """Configuration for a trading strategy."""
+    name: str                        # "agreement_classic", "agreement_mtf", "momentum"
+    strategy_type: str               # "agreement", "agreement_mtf", "momentum"
+    generator: object                # Signal generator instance
+    stop_loss_pct: float             # e.g., 0.012
+    take_profit_pct: float           # e.g., 0.025
+    trailing_activation_pct: float   # e.g., 0.015
+    trailing_distance_pct: float     # e.g., 0.008
+    max_position_hours: float        # e.g., 4.0
+    capital: float                   # Allocated capital
+
+    @property
+    def rr_ratio(self) -> float:
+        return self.take_profit_pct / self.stop_loss_pct if self.stop_loss_pct > 0 else 0
+
+    @property
+    def source_label(self) -> str:
+        """Signal source label for DB."""
+        return self.strategy_type  # "agreement", "agreement_mtf", "momentum"
+
+
+# Strategy name mapping for backward compat with old "paper_technical" trades
+LEGACY_STRATEGY_MAP = {
+    "paper_technical": "agreement_classic",
+}
+
+
 class SimplePaperTrader:
-    """Simple paper trading engine."""
+    """Multi-strategy paper trading engine."""
 
     def __init__(
         self,
         symbols: list[str] = ["BTCUSDT"],
-        initial_capital: float = 1000.0,  # Realistic starting capital
-        max_position_pct: float = 0.20,  # 20% per position (more conservative)
-        leverage: int = 10,  # 10x leverage (realistic for crypto futures)
-        check_interval: int = 60,  # seconds
-        # Exit configuration - IMPROVED R:R RATIO (1:2 minimum)
-        stop_loss_pct: float = 0.012,  # 1.2% stop loss (tighter = smaller losses)
-        take_profit_pct: float = 0.025,  # 2.5% take profit (bigger wins)
-        # R:R ratio = 2.5/1.2 = 2.08:1 (need 33% win rate to break even)
-        trailing_stop_activation_pct: float = 0.015,  # Activate trailing at 1.5%
-        trailing_stop_distance_pct: float = 0.008,  # Trail 0.8% behind peak
-        signal_exit_min_confidence: float = 0.70,  # Higher confidence required
-        signal_exit_min_profit_pct: float = 0.01,  # 1% profit threshold
-        # Time-based exit
-        max_position_hours: float = 4.0,  # Shorter hold = less exposure
-        stale_position_min_profit_pct: float = 0.005,  # Exit stale if < 0.5%
+        strategies: list[StrategyConfig] = None,
+        initial_capital: float = 1000.0,
+        max_position_pct: float = 0.20,
+        leverage: int = 10,
+        check_interval: int = 60,
+        signal_exit_min_confidence: float = 0.70,
+        signal_exit_min_profit_pct: float = 0.01,
+        stale_position_min_profit_pct: float = 0.005,
     ):
         self.symbols = symbols
-        self.initial_capital = initial_capital
-        self.capital = initial_capital
         self.max_position_pct = max_position_pct
         self.leverage = leverage
         self.check_interval = check_interval
-
-        # Exit parameters (adjusted for leverage)
-        self.stop_loss_pct = stop_loss_pct
-        self.take_profit_pct = take_profit_pct
-        self.trailing_stop_activation_pct = trailing_stop_activation_pct
-        self.trailing_stop_distance_pct = trailing_stop_distance_pct
         self.signal_exit_min_confidence = signal_exit_min_confidence
         self.signal_exit_min_profit_pct = signal_exit_min_profit_pct
-        # Time-based exit
-        self.max_position_hours = max_position_hours
         self.stale_position_min_profit_pct = stale_position_min_profit_pct
 
         # Liquidation tracking
         self.liquidation_pct = 1.0 / leverage * 0.9  # ~9% for 10x (with 10% buffer)
 
+        # Default strategy if none provided (backward compat)
+        if strategies is None:
+            strategies = [
+                StrategyConfig(
+                    name="agreement_classic",
+                    strategy_type="agreement",
+                    generator=TechnicalSignalGenerator(),
+                    stop_loss_pct=0.012,
+                    take_profit_pct=0.025,
+                    trailing_activation_pct=0.015,
+                    trailing_distance_pct=0.008,
+                    max_position_hours=4.0,
+                    capital=initial_capital,
+                ),
+            ]
+
+        self.strategies = strategies
+        self.strategy_map = {s.name: s for s in strategies}
+
+        # Per-strategy tracking
+        self.strategy_stats = {}
+        self.initial_capital = 0.0
+        for s in strategies:
+            self.strategy_stats[s.name] = {
+                "capital": s.capital,
+                "initial_capital": s.capital,
+                "trade_count": 0,
+                "winning_trades": 0,
+                "total_pnl": 0.0,
+            }
+            self.initial_capital += s.capital
+
+        # Positions keyed by "strategy_name:symbol"
         self.positions: dict[str, dict] = {}
-        self.signal_generator = TechnicalSignalGenerator()
 
         # Supabase repositories
         self.trade_repo = TradeLogRepository()
@@ -439,22 +734,41 @@ class SimplePaperTrader:
         self.perf_repo = PerformanceRepository()
 
         self.running = False
-        self.trade_count = 0
-        self.winning_trades = 0
-        self.total_pnl = 0.0
 
-        # Cooldown after stop loss: {symbol: datetime_of_stop_loss}
+        # Cooldown after stop loss: {strategy:symbol: datetime}
         self.stop_loss_cooldowns: dict[str, datetime] = {}
-        self.stop_loss_cooldown_minutes = 60  # Block re-entry for 60 min after SL
-        # Max consecutive stop losses per symbol per day
+        self.stop_loss_cooldown_minutes = 60
+        # Max consecutive stop losses per strategy:symbol per day
         self.daily_stop_losses: dict[str, int] = {}
         self.max_daily_stop_losses = 2
         self.last_reset_date: str = ""
 
+    @property
+    def total_capital(self):
+        return sum(s["capital"] for s in self.strategy_stats.values())
+
+    @property
+    def total_pnl(self):
+        return sum(s["total_pnl"] for s in self.strategy_stats.values())
+
+    @property
+    def total_trades(self):
+        return sum(s["trade_count"] for s in self.strategy_stats.values())
+
+    @property
+    def total_winning(self):
+        return sum(s["winning_trades"] for s in self.strategy_stats.values())
+
+    def _pos_key(self, strategy_name: str, symbol: str) -> str:
+        return f"{strategy_name}:{symbol}"
+
+    def _parse_pos_key(self, pos_key: str) -> tuple[str, str]:
+        parts = pos_key.split(":", 1)
+        return parts[0], parts[1]
+
     async def _load_existing_positions(self):
         """Load existing open positions from database on startup."""
         try:
-            # Query for open positions (no exit_time = still open)
             result = await asyncio.to_thread(
                 lambda: self.trade_repo.table.select("*")
                 .is_("exit_time", "null")
@@ -467,7 +781,16 @@ class SimplePaperTrader:
                     if not symbol:
                         continue
 
-                    # Reconstruct position from trade log
+                    # Map strategy name (handle legacy "paper_technical")
+                    strategy_name = trade.get("strategy_name", "paper_technical")
+                    strategy_name = LEGACY_STRATEGY_MAP.get(strategy_name, strategy_name)
+
+                    # Only load if we have this strategy active
+                    strategy = self.strategy_map.get(strategy_name)
+                    if not strategy:
+                        logger.debug(f"Skipping position for inactive strategy: {strategy_name}")
+                        continue
+
                     entry_price = float(trade.get("entry_price", 0))
                     quantity = float(trade.get("quantity", 0))
                     side = "long" if trade.get("side") == "buy" else "short"
@@ -485,15 +808,16 @@ class SimplePaperTrader:
                     else:
                         entry_time = datetime.now(timezone.utc)
 
-                    # Calculate stop/take profit prices
+                    # Calculate stop/take profit using strategy-specific params
                     if side == "long":
-                        stop_price = entry_price * (1 - self.stop_loss_pct)
-                        take_profit_price = entry_price * (1 + self.take_profit_pct)
+                        stop_price = entry_price * (1 - strategy.stop_loss_pct)
+                        take_profit_price = entry_price * (1 + strategy.take_profit_pct)
                     else:
-                        stop_price = entry_price * (1 + self.stop_loss_pct)
-                        take_profit_price = entry_price * (1 - self.take_profit_pct)
+                        stop_price = entry_price * (1 + strategy.stop_loss_pct)
+                        take_profit_price = entry_price * (1 - strategy.take_profit_pct)
 
-                    self.positions[symbol] = {
+                    pos_key = self._pos_key(strategy_name, symbol)
+                    self.positions[pos_key] = {
                         "position_id": trade.get("position_id", str(uuid.uuid4())),
                         "side": side,
                         "entry_price": entry_price,
@@ -504,16 +828,18 @@ class SimplePaperTrader:
                         "peak_pnl_pct": 0.0,
                         "stop_loss_price": stop_price,
                         "take_profit_price": take_profit_price,
+                        "strategy_name": strategy_name,
                     }
 
                     hours_open = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
                     logger.info(
-                        f"📂 Loaded existing position: {symbol} {side.upper()} @ ${entry_price:,.2f} | "
+                        f"📂 Loaded: [{strategy_name}] {symbol} {side.upper()} @ ${entry_price:,.2f} | "
                         f"Qty: {quantity:.6f} | Open for {hours_open:.1f}h"
                     )
 
-                if self.positions:
-                    logger.info(f"✅ Loaded {len(self.positions)} existing position(s) from database")
+                loaded = len(self.positions)
+                if loaded:
+                    logger.info(f"✅ Loaded {loaded} existing position(s) from database")
 
         except Exception as e:
             logger.warning(f"Could not load existing positions: {e}")
@@ -525,32 +851,33 @@ class SimplePaperTrader:
         # Load existing positions from database
         await self._load_existing_positions()
 
-        rr_ratio = self.take_profit_pct / self.stop_loss_pct
-        logger.info("=" * 60)
-        logger.info("🚀 Starting Leveraged Paper Trading (SMC+Tech ALIGNED)")
+        logger.info("=" * 70)
+        logger.info("🚀 Starting Multi-Strategy Paper Trading")
         logger.info(f"   Symbols: {self.symbols}")
-        logger.info(f"   Capital: ${self.initial_capital:,.2f} | Leverage: {self.leverage}x")
-        logger.info(f"   Max Position: {self.max_position_pct:.0%} margin → ${self.initial_capital * self.max_position_pct * self.leverage:,.2f} size")
-        logger.info("-" * 60)
-        logger.info("📊 Risk Management (R:R = {:.1f}:1):".format(rr_ratio))
-        logger.info(f"   Stop Loss: {self.stop_loss_pct:.1%} (={self.stop_loss_pct * self.leverage:.0%} ROE)")
-        logger.info(f"   Take Profit: {self.take_profit_pct:.1%} (={self.take_profit_pct * self.leverage:.0%} ROE)")
-        logger.info(f"   Break-even win rate: {1/(1+rr_ratio)*100:.0f}%")
-        logger.info(f"   Trailing: activates {self.trailing_stop_activation_pct:.1%}, trails {self.trailing_stop_distance_pct:.1%}")
-        logger.info(f"   Max hold: {self.max_position_hours}h | Signal requires SMC+Tech alignment")
-        logger.info(f"   SL cooldown: {self.stop_loss_cooldown_minutes}min | Max SL/day/symbol: {self.max_daily_stop_losses}")
-        logger.info(f"   RSI reversal requires SMA20>SMA50 | MACD min threshold active")
-        logger.info("=" * 60)
+        logger.info(f"   Total Capital: ${self.initial_capital:,.2f} | Leverage: {self.leverage}x")
+        logger.info("-" * 70)
+        for s in self.strategies:
+            logger.info(f"   📋 {s.name}: ${s.capital:,.2f} | SL={s.stop_loss_pct:.1%} TP={s.take_profit_pct:.1%} R:R={s.rr_ratio:.1f}:1 | Max hold: {s.max_position_hours}h")
+        logger.info("-" * 70)
+        logger.info(f"   Position size: {self.max_position_pct:.0%} margin | SL cooldown: {self.stop_loss_cooldown_minutes}min")
+        logger.info("=" * 70)
 
         collector = MarketDataCollector()
 
         try:
             while self.running:
                 for symbol in self.symbols:
-                    await self._process_symbol(symbol, collector)
+                    # Fetch candles once per symbol (shared across strategies)
+                    candles = await self._fetch_candles(symbol, collector)
+                    if candles is None:
+                        continue
 
-                # Save performance snapshot
-                await self._save_performance_snapshot()
+                    # Run each strategy
+                    for strategy in self.strategies:
+                        await self._process_strategy_symbol(strategy, symbol, candles)
+
+                # Save performance snapshots (one per strategy)
+                await self._save_performance_snapshots()
 
                 # Status update
                 self._print_status()
@@ -561,69 +888,96 @@ class SimplePaperTrader:
         except asyncio.CancelledError:
             logger.info("Paper trading cancelled")
         finally:
-            await collector.close()
             await self._close_all_positions(collector)
+            await collector.close()
             self._print_summary()
 
     async def stop(self):
         """Stop paper trading."""
         self.running = False
 
-    async def _process_symbol(self, symbol: str, collector: MarketDataCollector):
-        """Process a single symbol."""
+    async def _fetch_candles(self, symbol: str, collector: MarketDataCollector) -> dict | None:
+        """Fetch all needed candles for a symbol (shared across strategies)."""
         try:
-            # Fetch market data - 1h for trend, 1m for entry signals
-            df_1h = await collector.get_binance_klines(symbol, "1h", 100)
             df_1m = await collector.get_binance_klines(symbol, "1m", 100)
             if df_1m.empty:
-                return
+                return None
 
-            # Get current price
+            df_1h = await collector.get_binance_klines(symbol, "1h", 100)
+
             ticker = await collector.get_binance_ticker(symbol)
             current_price = ticker.get("price", 0) if ticker else 0
-
             if current_price <= 0:
-                return
+                return None
 
-            # Determine higher-timeframe trend from 1h candles
+            candles = {
+                "1m": df_1m,
+                "1h": df_1h,
+                "current_price": current_price,
+            }
+
+            # Only fetch 5m/30m if any MTF strategy is active
+            if any(s.strategy_type == "agreement_mtf" for s in self.strategies):
+                candles["5m"] = await collector.get_binance_klines(symbol, "5m", 100)
+                candles["30m"] = await collector.get_binance_klines(symbol, "30m", 100)
+
+            return candles
+        except Exception as e:
+            logger.error(f"Error fetching candles for {symbol}: {e}")
+            return None
+
+    async def _process_strategy_symbol(self, strategy: StrategyConfig, symbol: str, candles: dict):
+        """Process a single strategy+symbol combination."""
+        try:
+            df_1m = candles["1m"]
+            df_1h = candles["1h"]
+            current_price = candles["current_price"]
+
+            # Determine HTF trend (shared 1h analysis)
             htf_trend = "neutral"
             if not df_1h.empty:
-                htf_trend = self.signal_generator.determine_htf_trend(df_1h)
+                htf_trend = strategy.generator.determine_htf_trend(df_1h)
 
-            # Generate signal from 1m candles, filtered by 1h trend
-            signal_result = self.signal_generator.generate_signal(df_1m, htf_trend=htf_trend)
+            # Generate signal based on strategy type
+            if strategy.strategy_type == "agreement_mtf":
+                signal_result = strategy.generator.generate_signal(
+                    df_1m, htf_trend,
+                    df_5m=candles.get("5m"),
+                    df_30m=candles.get("30m"),
+                )
+            else:
+                signal_result = strategy.generator.generate_signal(df_1m, htf_trend)
 
-            # Log signal to Supabase
-            await self._save_signal(symbol, signal_result, current_price)
+            # Save signal to DB
+            await self._save_signal(symbol, signal_result, current_price, strategy)
 
             # Trading logic
-            if symbol in self.positions:
-                # Check for exit
-                await self._check_exit(symbol, signal_result, current_price)
+            pos_key = self._pos_key(strategy.name, symbol)
+            if pos_key in self.positions:
+                await self._check_exit(pos_key, signal_result, current_price, strategy)
             else:
-                # Check for entry
-                await self._check_entry(symbol, signal_result, current_price)
+                await self._check_entry(pos_key, symbol, signal_result, current_price, strategy)
 
         except Exception as e:
-            logger.error(f"Error processing {symbol}: {e}")
+            logger.error(f"Error processing [{strategy.name}] {symbol}: {e}")
 
-    async def _check_entry(self, symbol: str, signal: dict, price: float):
-        """Check if should enter a position."""
-        # Double-check no position exists in memory
-        if symbol in self.positions:
+    async def _check_entry(self, pos_key: str, symbol: str, signal: dict, price: float, strategy: StrategyConfig):
+        """Check if should enter a position for a given strategy."""
+        if pos_key in self.positions:
             return
 
-        # Also check database for any open position (prevents duplicates across restarts)
+        # Check DB for existing open position for this strategy+symbol
         try:
             existing = await asyncio.to_thread(
                 lambda: self.trade_repo.table.select("id")
                 .eq("symbol", symbol)
+                .eq("strategy_name", strategy.name)
                 .is_("exit_time", "null")
                 .limit(1)
                 .execute()
             )
             if existing.data:
-                logger.debug(f"Skipping {symbol} entry - position exists in DB")
+                logger.debug(f"Skipping [{strategy.name}] {symbol} entry - position exists in DB")
                 return
         except Exception as e:
             logger.warning(f"Could not check DB for existing position: {e}")
@@ -637,27 +991,28 @@ class SimplePaperTrader:
             self.daily_stop_losses = {}
             self.last_reset_date = today
 
-        # Check stop loss cooldown (block re-entry for 60 min after SL)
-        if symbol in self.stop_loss_cooldowns:
-            cooldown_until = self.stop_loss_cooldowns[symbol]
+        # Check stop loss cooldown
+        cooldown_key = pos_key
+        if cooldown_key in self.stop_loss_cooldowns:
+            cooldown_until = self.stop_loss_cooldowns[cooldown_key]
             remaining = (cooldown_until - datetime.now(timezone.utc)).total_seconds() / 60
             if remaining > 0:
-                logger.info(f"   {symbol}: SL cooldown active ({remaining:.0f}min left) - skipping entry")
+                logger.info(f"   [{strategy.name}] {symbol}: SL cooldown ({remaining:.0f}min left)")
                 return
             else:
-                del self.stop_loss_cooldowns[symbol]
+                del self.stop_loss_cooldowns[cooldown_key]
 
-        # Check max daily stop losses (max 2 per symbol per day)
-        if self.daily_stop_losses.get(symbol, 0) >= self.max_daily_stop_losses:
-            logger.info(f"   {symbol}: Max daily stop losses ({self.max_daily_stop_losses}) reached - no more trades today")
+        # Check max daily stop losses
+        if self.daily_stop_losses.get(cooldown_key, 0) >= self.max_daily_stop_losses:
+            logger.info(f"   [{strategy.name}] {symbol}: Max daily SL reached")
             return
 
         if signal["signal"] in ["buy", "strong_buy"]:
-            await self._open_position(symbol, "long", price, signal)
+            await self._open_position(pos_key, symbol, "long", price, signal, strategy)
         elif signal["signal"] in ["sell", "strong_sell"]:
-            await self._open_position(symbol, "short", price, signal)
+            await self._open_position(pos_key, symbol, "short", price, signal, strategy)
 
-    async def _check_exit(self, symbol: str, signal: dict, price: float):
+    async def _check_exit(self, pos_key: str, signal: dict, price: float, strategy: StrategyConfig):
         """Check if should exit a leveraged position.
 
         Priority order:
@@ -669,89 +1024,82 @@ class SimplePaperTrader:
         5. RSI-based profit taking
         6. Signal-based exit
         """
-        position = self.positions.get(symbol)
+        position = self.positions.get(pos_key)
         if not position:
             return
 
         pnl_pct = self._calculate_pnl_pct(position, price)
 
         # Update peak profit and trailing stop
-        self._update_trailing_stop(symbol, pnl_pct)
+        self._update_trailing_stop(pos_key, pnl_pct, strategy)
 
         should_exit = False
         exit_reason = ""
 
-        # 0. LIQUIDATION CHECK - forced exit at max loss
+        # 0. LIQUIDATION CHECK
         if pnl_pct <= -self.liquidation_pct:
             should_exit = True
             roe = pnl_pct * self.leverage * 100
             exit_reason = f"💀 LIQUIDATED ({pnl_pct:.2%} = {roe:.0f}% ROE)"
-            logger.warning(f"⚠️ Position liquidated! Lost margin on {symbol}")
+            logger.warning(f"⚠️ Position liquidated! [{strategy.name}] {pos_key}")
 
-        # 1. TAKE PROFIT - lock in gains
-        elif pnl_pct >= self.take_profit_pct:
+        # 1. TAKE PROFIT
+        elif pnl_pct >= strategy.take_profit_pct:
             should_exit = True
             roe = pnl_pct * self.leverage * 100
             exit_reason = f"Take profit ({pnl_pct:.2%} = +{roe:.0f}% ROE)"
 
-        # 2. TRAILING STOP - protect accumulated profits
+        # 2. TRAILING STOP
         elif position.get("trailing_stop_active", False):
             peak_pnl = position.get("peak_pnl_pct", 0)
-            trailing_stop_level = peak_pnl - self.trailing_stop_distance_pct
+            trailing_stop_level = peak_pnl - strategy.trailing_distance_pct
             if pnl_pct <= trailing_stop_level:
                 should_exit = True
                 exit_reason = f"Trailing stop (peak: {peak_pnl:.2%}, current: {pnl_pct:.2%})"
 
-        # 3. STOP LOSS - limit losses
-        elif pnl_pct <= -self.stop_loss_pct:
+        # 3. STOP LOSS
+        elif pnl_pct <= -strategy.stop_loss_pct:
             should_exit = True
             roe = pnl_pct * self.leverage * 100
             exit_reason = f"Stop loss ({pnl_pct:.2%} = {roe:.0f}% ROE)"
-            # Activate cooldown and track daily count
-            self.stop_loss_cooldowns[symbol] = datetime.now(timezone.utc) + timedelta(minutes=self.stop_loss_cooldown_minutes)
-            self.daily_stop_losses[symbol] = self.daily_stop_losses.get(symbol, 0) + 1
-            logger.info(f"   {symbol}: SL cooldown activated ({self.stop_loss_cooldown_minutes}min). Daily SL count: {self.daily_stop_losses[symbol]}/{self.max_daily_stop_losses}")
+            # Activate cooldown
+            self.stop_loss_cooldowns[pos_key] = datetime.now(timezone.utc) + timedelta(minutes=self.stop_loss_cooldown_minutes)
+            self.daily_stop_losses[pos_key] = self.daily_stop_losses.get(pos_key, 0) + 1
+            logger.info(f"   [{strategy.name}] SL cooldown activated. Daily: {self.daily_stop_losses[pos_key]}/{self.max_daily_stop_losses}")
 
-        # 4. TIME-BASED EXIT - exit stale positions with minimal profit
-        elif self._is_stale_position(position, pnl_pct):
+        # 4. TIME-BASED EXIT
+        elif self._is_stale_position(position, pnl_pct, strategy):
             should_exit = True
             hours_open = (datetime.now(timezone.utc) - position["entry_time"]).total_seconds() / 3600
             exit_reason = f"Stale position ({hours_open:.1f}h, only {pnl_pct:.2%} profit)"
 
-        # 5. RSI-BASED PROFIT TAKING - exit profitable longs when overbought
-        elif self._should_exit_on_rsi(position, signal, pnl_pct):
+        # 5. RSI-BASED PROFIT TAKING
+        elif self._should_exit_on_rsi(position, signal, pnl_pct, strategy):
             indicators = signal.get("indicators", {})
             rsi = indicators.get("rsi", 50)
             should_exit = True
             exit_reason = f"RSI profit taking (RSI={rsi:.0f}, profit={pnl_pct:.2%})"
 
-        # 6. SIGNAL-BASED EXIT - with conditions met
+        # 6. SIGNAL-BASED EXIT
         elif self._should_exit_on_signal(position, signal, pnl_pct):
             should_exit = True
             confidence = signal.get("confidence", 0)
             exit_reason = f"{signal['signal'].replace('_', ' ').title()} signal (confidence: {confidence:.0%})"
 
         if should_exit:
-            await self._close_position(symbol, price, exit_reason)
+            await self._close_position(pos_key, price, exit_reason, strategy)
 
-    def _is_stale_position(self, position: dict, pnl_pct: float) -> bool:
+    def _is_stale_position(self, position: dict, pnl_pct: float, strategy: StrategyConfig) -> bool:
         """Check if position is stale (old with minimal profit)."""
         hours_open = (datetime.now(timezone.utc) - position["entry_time"]).total_seconds() / 3600
-
-        # Exit if position is older than max_position_hours AND profit is below threshold
-        if hours_open >= self.max_position_hours:
+        if hours_open >= strategy.max_position_hours:
             if pnl_pct < self.stale_position_min_profit_pct:
                 return True
         return False
 
-    def _should_exit_on_rsi(self, position: dict, signal: dict, pnl_pct: float) -> bool:
-        """Exit profitable positions when RSI indicates overbought/oversold reversal.
-
-        Only fires after trailing stop has activated (1.5% profit) so it doesn't
-        cut winners short before the designed R:R ratio can play out.
-        RSI thresholds set high (80/20) for 1m candles where RSI extremes are frequent.
-        """
-        if pnl_pct < self.trailing_stop_activation_pct:  # Need 1.5% profit (trailing stop level)
+    def _should_exit_on_rsi(self, position: dict, signal: dict, pnl_pct: float, strategy: StrategyConfig) -> bool:
+        """Exit profitable positions when RSI indicates overbought/oversold reversal."""
+        if pnl_pct < strategy.trailing_activation_pct:
             return False
 
         indicators = signal.get("indicators", {})
@@ -759,48 +1107,37 @@ class SimplePaperTrader:
         rsi_momentum = indicators.get("rsi_momentum", "")
         side = position.get("side")
 
-        # Long position + RSI extreme overbought and falling = exit
         if side == "long" and rsi > 80 and rsi_momentum == "falling":
             return True
-
-        # Short position + RSI extreme oversold and rising = exit
         if side == "short" and rsi < 20 and rsi_momentum == "rising":
             return True
-
         return False
 
-    def _update_trailing_stop(self, symbol: str, current_pnl_pct: float):
+    def _update_trailing_stop(self, pos_key: str, current_pnl_pct: float, strategy: StrategyConfig):
         """Update trailing stop based on current P&L."""
-        position = self.positions.get(symbol)
+        position = self.positions.get(pos_key)
         if not position:
             return
 
-        # Activate trailing stop when profit threshold is reached
-        if current_pnl_pct >= self.trailing_stop_activation_pct:
+        if current_pnl_pct >= strategy.trailing_activation_pct:
             if not position.get("trailing_stop_active", False):
                 position["trailing_stop_active"] = True
                 position["peak_pnl_pct"] = current_pnl_pct
+                _, symbol = self._parse_pos_key(pos_key)
                 logger.info(
-                    f"🔒 Trailing stop activated for {symbol} at {current_pnl_pct:.2%} profit"
+                    f"🔒 Trailing stop activated [{strategy.name}] {symbol} at {current_pnl_pct:.2%}"
                 )
-            # Update peak if current profit is higher
             elif current_pnl_pct > position.get("peak_pnl_pct", 0):
                 position["peak_pnl_pct"] = current_pnl_pct
-                logger.debug(f"📈 {symbol} new peak profit: {current_pnl_pct:.2%}")
+                _, symbol = self._parse_pos_key(pos_key)
+                logger.debug(f"📈 [{strategy.name}] {symbol} new peak: {current_pnl_pct:.2%}")
 
     def _should_exit_on_signal(self, position: dict, signal: dict, pnl_pct: float) -> bool:
-        """Determine if should exit based on opposite signal with strict conditions.
-
-        Conditions for signal-based exit:
-        1. Must be opposite signal (buy for short, sell for long)
-        2. If profitable (> signal_exit_min_profit_pct), require STRONG signal
-        3. Signal confidence must meet minimum threshold
-        """
+        """Determine if should exit based on opposite signal."""
         signal_type = signal.get("signal", "hold")
         confidence = signal.get("confidence", 0)
         side = position.get("side")
 
-        # Check for opposite signal
         is_opposite_signal = False
         is_strong_signal = False
 
@@ -814,19 +1151,11 @@ class SimplePaperTrader:
         if not is_opposite_signal:
             return False
 
-        # If position is significantly profitable, require strong signal
         if pnl_pct >= self.signal_exit_min_profit_pct:
             if not is_strong_signal:
-                logger.debug(
-                    f"Ignoring weak {signal_type} signal - position is {pnl_pct:.2%} profitable"
-                )
                 return False
 
-        # Check minimum confidence threshold
         if confidence < self.signal_exit_min_confidence:
-            logger.debug(
-                f"Ignoring {signal_type} signal - confidence {confidence:.0%} < {self.signal_exit_min_confidence:.0%}"
-            )
             return False
 
         return True
@@ -839,65 +1168,66 @@ class SimplePaperTrader:
         else:
             return (entry_price - current_price) / entry_price
 
-    async def _open_position(self, symbol: str, side: str, price: float, signal: dict):
+    async def _open_position(self, pos_key: str, symbol: str, side: str, price: float,
+                              signal: dict, strategy: StrategyConfig):
         """Open a leveraged position."""
-        # Margin = capital allocated to this position
-        margin = self.capital * self.max_position_pct
-        # Position value = margin * leverage
+        stats = self.strategy_stats[strategy.name]
+
+        # Margin = strategy capital * position percentage
+        margin = stats["capital"] * self.max_position_pct
         position_value = margin * self.leverage
         quantity = position_value / price
 
         # Calculate stop loss, take profit, and liquidation prices
         if side == "long":
-            stop_price = price * (1 - self.stop_loss_pct)
-            take_profit_price = price * (1 + self.take_profit_pct)
+            stop_price = price * (1 - strategy.stop_loss_pct)
+            take_profit_price = price * (1 + strategy.take_profit_pct)
             liquidation_price = price * (1 - self.liquidation_pct)
         else:
-            stop_price = price * (1 + self.stop_loss_pct)
-            take_profit_price = price * (1 - self.take_profit_pct)
+            stop_price = price * (1 + strategy.stop_loss_pct)
+            take_profit_price = price * (1 - strategy.take_profit_pct)
             liquidation_price = price * (1 + self.liquidation_pct)
 
-        self.positions[symbol] = {
+        self.positions[pos_key] = {
             "position_id": str(uuid.uuid4()),
             "side": side,
             "entry_price": price,
             "quantity": quantity,
-            "margin": margin,  # Actual capital at risk
+            "margin": margin,
             "leverage": self.leverage,
             "entry_time": datetime.now(timezone.utc),
             "signal": signal,
-            # Trailing stop fields
             "trailing_stop_active": False,
             "peak_pnl_pct": 0.0,
-            # Reference prices
             "stop_loss_price": stop_price,
             "take_profit_price": take_profit_price,
             "liquidation_price": liquidation_price,
+            "strategy_name": strategy.name,
         }
 
         logger.info(
-            f"📈 OPEN {side.upper()} {symbol} @ ${price:,.2f} | "
+            f"📈 OPEN [{strategy.name}] {side.upper()} {symbol} @ ${price:,.2f} | "
             f"Margin: ${margin:,.2f} | Size: ${position_value:,.2f} ({self.leverage}x) | "
             f"Conf: {signal['confidence']:.0%}"
         )
         logger.info(
-            f"   └─ SL: ${stop_price:,.2f} ({self.stop_loss_pct:.1%}) | "
-            f"TP: ${take_profit_price:,.2f} ({self.take_profit_pct:.1%}) | "
+            f"   └─ SL: ${stop_price:,.2f} ({strategy.stop_loss_pct:.1%}) | "
+            f"TP: ${take_profit_price:,.2f} ({strategy.take_profit_pct:.1%}) | "
             f"Liq: ${liquidation_price:,.2f}"
         )
 
         # Log to Supabase
         try:
             await self.trade_repo.log_trade({
-                "position_id": self.positions[symbol]["position_id"],
+                "position_id": self.positions[pos_key]["position_id"],
                 "symbol": symbol,
                 "exchange": "binance",
                 "side": "buy" if side == "long" else "sell",
                 "entry_price": price,
                 "entry_time": datetime.now(timezone.utc).isoformat(),
                 "quantity": quantity,
-                "strategy_name": "paper_technical",
-                "signal_source": "technical",
+                "strategy_name": strategy.name,
+                "signal_source": strategy.source_label,
                 "signal_confidence": signal["confidence"],
                 "entry_reasoning": signal["reasoning"],
                 "indicators_at_entry": signal.get("indicators"),
@@ -905,11 +1235,14 @@ class SimplePaperTrader:
         except Exception as e:
             logger.error(f"Failed to log trade: {e}")
 
-    async def _close_position(self, symbol: str, price: float, reason: str):
+    async def _close_position(self, pos_key: str, price: float, reason: str, strategy: StrategyConfig):
         """Close a leveraged position."""
-        position = self.positions.pop(symbol, None)
+        position = self.positions.pop(pos_key, None)
         if not position:
             return
+
+        strategy_name, symbol = self._parse_pos_key(pos_key)
+        stats = self.strategy_stats[strategy.name]
 
         # Calculate PnL on the leveraged position
         if position["side"] == "long":
@@ -919,22 +1252,20 @@ class SimplePaperTrader:
 
         pnl_pct = self._calculate_pnl_pct(position, price)
         margin = position.get("margin", position["quantity"] * position["entry_price"] / self.leverage)
-        leverage = position.get("leverage", self.leverage)
-
-        # ROE (Return on Equity) = actual return on margin
         roe = (pnl / margin) * 100 if margin > 0 else 0
 
-        self.capital += pnl
-        self.total_pnl += pnl
-        self.trade_count += 1
+        # Update per-strategy stats
+        stats["capital"] += pnl
+        stats["total_pnl"] += pnl
+        stats["trade_count"] += 1
         if pnl > 0:
-            self.winning_trades += 1
+            stats["winning_trades"] += 1
 
         duration = (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
 
         emoji = "✅" if pnl > 0 else "❌"
         logger.info(
-            f"{emoji} CLOSE {symbol} @ ${price:,.2f} | "
+            f"{emoji} CLOSE [{strategy.name}] {symbol} @ ${price:,.2f} | "
             f"PnL: ${pnl:,.2f} (ROE: {roe:+.1f}%) | "
             f"Reason: {reason} | {duration/60:.1f}min"
         )
@@ -955,21 +1286,24 @@ class SimplePaperTrader:
 
     async def _close_all_positions(self, collector: MarketDataCollector):
         """Close all open positions."""
-        for symbol in list(self.positions.keys()):
+        for pos_key in list(self.positions.keys()):
             try:
+                strategy_name, symbol = self._parse_pos_key(pos_key)
+                strategy = self.strategy_map.get(strategy_name)
+                if not strategy:
+                    continue
                 ticker = await collector.get_binance_ticker(symbol)
-                price = ticker.get("price", self.positions[symbol]["entry_price"]) if ticker else self.positions[symbol]["entry_price"]
-                await self._close_position(symbol, price, "Session end")
+                price = ticker.get("price", self.positions[pos_key]["entry_price"]) if ticker else self.positions[pos_key]["entry_price"]
+                await self._close_position(pos_key, price, "Session end", strategy)
             except Exception as e:
-                logger.error(f"Error closing {symbol}: {e}")
+                logger.error(f"Error closing {pos_key}: {e}")
 
-    async def _save_signal(self, symbol: str, signal: dict, price: float):
+    async def _save_signal(self, symbol: str, signal: dict, price: float, strategy: StrategyConfig):
         """Save signal to Supabase."""
         try:
             # Convert indicators to JSON-safe format
             indicators = signal.get("indicators", {})
             if indicators:
-                # Convert any numpy/bool types to Python native types
                 indicators = {
                     k: (float(v) if isinstance(v, (int, float, np.floating, np.integer)) else
                         bool(v) if isinstance(v, (bool, np.bool_)) else
@@ -984,7 +1318,7 @@ class SimplePaperTrader:
                 "exchange": "binance",
                 "timeframe": "1m",
                 "signal_type": signal["signal"],
-                "source": "technical",
+                "source": strategy.source_label,
                 "confidence": signal["confidence"],
                 "entry_price": price,
                 "reasoning": signal["reasoning"],
@@ -994,52 +1328,71 @@ class SimplePaperTrader:
         except Exception as e:
             logger.debug(f"Failed to save signal: {e}")
 
-    async def _save_performance_snapshot(self):
-        """Save performance snapshot to Supabase."""
-        try:
-            positions_value = sum(
-                p["quantity"] * p["entry_price"]
-                for p in self.positions.values()
-            )
+    async def _save_performance_snapshots(self):
+        """Save performance snapshot for each strategy."""
+        for strategy in self.strategies:
+            try:
+                stats = self.strategy_stats[strategy.name]
+                positions_value = sum(
+                    p["quantity"] * p["entry_price"]
+                    for pk, p in self.positions.items()
+                    if pk.startswith(f"{strategy.name}:")
+                )
 
-            win_rate = self.winning_trades / self.trade_count if self.trade_count > 0 else 0
+                win_rate = stats["winning_trades"] / stats["trade_count"] if stats["trade_count"] > 0 else 0
 
-            await self.perf_repo.save_snapshot({
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "strategy_name": "paper_technical",
-                "total_equity": self.capital + positions_value,
-                "cash_balance": self.capital,
-                "positions_value": positions_value,
-                "total_pnl": self.total_pnl,
-                "total_trades": self.trade_count,
-                "winning_trades": self.winning_trades,
-                "losing_trades": self.trade_count - self.winning_trades,
-                "win_rate": win_rate,
-                "open_positions": {
-                    s: {"side": p["side"], "entry": p["entry_price"]}
-                    for s, p in self.positions.items()
-                },
-            })
-        except Exception as e:
-            logger.debug(f"Failed to save performance: {e}")
+                await self.perf_repo.save_snapshot({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "strategy_name": strategy.name,
+                    "total_equity": stats["capital"] + positions_value,
+                    "cash_balance": stats["capital"],
+                    "positions_value": positions_value,
+                    "total_pnl": stats["total_pnl"],
+                    "total_trades": stats["trade_count"],
+                    "winning_trades": stats["winning_trades"],
+                    "losing_trades": stats["trade_count"] - stats["winning_trades"],
+                    "win_rate": win_rate,
+                    "open_positions": {
+                        pk.split(":", 1)[1]: {"side": p["side"], "entry": p["entry_price"]}
+                        for pk, p in self.positions.items()
+                        if pk.startswith(f"{strategy.name}:")
+                    },
+                })
+            except Exception as e:
+                logger.debug(f"Failed to save performance for {strategy.name}: {e}")
 
     def _print_status(self):
-        """Print current status with position details."""
-        win_rate = self.winning_trades / self.trade_count * 100 if self.trade_count > 0 else 0
+        """Print current status with per-strategy details."""
+        total_cap = self.total_capital
+        total_trades = self.total_trades
+        total_winning = self.total_winning
+        win_rate = total_winning / total_trades * 100 if total_trades > 0 else 0
 
         logger.info(
-            f"💰 Capital: ${self.capital:,.2f} | "
-            f"Trades: {self.trade_count} | "
-            f"Win Rate: {win_rate:.0f}% | "
+            f"💰 Total: ${total_cap:,.2f} | "
+            f"Trades: {total_trades} | WR: {win_rate:.0f}% | "
             f"Open: {len(self.positions)}"
         )
 
-        # Print detailed position info
-        for symbol, pos in self.positions.items():
+        # Per-strategy summary
+        for s in self.strategies:
+            stats = self.strategy_stats[s.name]
+            s_trades = stats["trade_count"]
+            s_wr = stats["winning_trades"] / s_trades * 100 if s_trades > 0 else 0
+            s_pnl = stats["total_pnl"]
+            pnl_emoji = "🟢" if s_pnl >= 0 else "🔴"
+            logger.info(
+                f"   {pnl_emoji} {s.name}: ${stats['capital']:,.2f} | "
+                f"PnL: ${s_pnl:+,.2f} | {s_trades} trades | WR: {s_wr:.0f}%"
+            )
+
+        # Open positions
+        for pos_key, pos in self.positions.items():
+            strategy_name, symbol = self._parse_pos_key(pos_key)
             trailing = "🔒" if pos.get("trailing_stop_active") else "⏳"
             peak = pos.get("peak_pnl_pct", 0)
             logger.info(
-                f"   {trailing} {symbol}: {pos['side']} @ ${pos['entry_price']:,.2f} | "
+                f"   {trailing} [{strategy_name}] {symbol}: {pos['side']} @ ${pos['entry_price']:,.2f} | "
                 f"Peak: {peak:.2%} | "
                 f"SL: ${pos.get('stop_loss_price', 0):,.2f} | "
                 f"TP: ${pos.get('take_profit_price', 0):,.2f}"
@@ -1047,36 +1400,50 @@ class SimplePaperTrader:
 
     def _print_summary(self):
         """Print trading summary."""
-        total_return = (self.capital / self.initial_capital - 1) * 100
-        win_rate = self.winning_trades / self.trade_count * 100 if self.trade_count > 0 else 0
+        total_cap = self.total_capital
+        total_return = (total_cap / self.initial_capital - 1) * 100 if self.initial_capital > 0 else 0
+        total_trades = self.total_trades
+        total_winning = self.total_winning
+        win_rate = total_winning / total_trades * 100 if total_trades > 0 else 0
 
-        print("\n" + "=" * 60)
-        print("📊 PAPER TRADING SUMMARY")
-        print("=" * 60)
+        print("\n" + "=" * 70)
+        print("📊 MULTI-STRATEGY PAPER TRADING SUMMARY")
+        print("=" * 70)
         print(f"Initial Capital:  ${self.initial_capital:,.2f}")
-        print(f"Final Capital:    ${self.capital:,.2f}")
+        print(f"Final Capital:    ${total_cap:,.2f}")
         print(f"Total Return:     {total_return:+.2f}%")
-        print("-" * 60)
-        print(f"Total Trades:     {self.trade_count}")
-        print(f"Winning Trades:   {self.winning_trades}")
-        print(f"Losing Trades:    {self.trade_count - self.winning_trades}")
+        print("-" * 70)
+
+        for s in self.strategies:
+            stats = self.strategy_stats[s.name]
+            s_return = (stats["capital"] / stats["initial_capital"] - 1) * 100 if stats["initial_capital"] > 0 else 0
+            s_trades = stats["trade_count"]
+            s_wr = stats["winning_trades"] / s_trades * 100 if s_trades > 0 else 0
+            print(f"  {s.name}:")
+            print(f"    Capital: ${stats['initial_capital']:,.2f} → ${stats['capital']:,.2f} ({s_return:+.2f}%)")
+            print(f"    Trades: {s_trades} | WR: {s_wr:.1f}% | PnL: ${stats['total_pnl']:+,.2f}")
+
+        print("-" * 70)
+        print(f"Total Trades:     {total_trades}")
+        print(f"Winning Trades:   {total_winning}")
+        print(f"Losing Trades:    {total_trades - total_winning}")
         print(f"Win Rate:         {win_rate:.1f}%")
         print(f"Total PnL:        ${self.total_pnl:,.2f}")
-        print("=" * 60)
+        print("=" * 70)
 
 
 async def main():
     """Main function."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Leveraged Paper Trading")
+    parser = argparse.ArgumentParser(description="Multi-Strategy Paper Trading")
     parser.add_argument(
         "--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT", "XRPUSDT"],
         help="Symbols to trade"
     )
     parser.add_argument(
         "--capital", type=float, default=1000.0,
-        help="Initial capital (default: $1000)"
+        help="Total initial capital (split equally across strategies)"
     )
     parser.add_argument(
         "--leverage", type=int, default=10,
@@ -1086,39 +1453,19 @@ async def main():
         "--interval", type=int, default=60,
         help="Check interval in seconds"
     )
-    # Exit configuration - IMPROVED R:R RATIO (2:1 minimum)
     parser.add_argument(
-        "--stop-loss", type=float, default=0.012,
-        help="Stop loss percentage (default: 0.012 = 1.2%% for tighter losses)"
+        "--strategies", nargs="+",
+        default=["agreement_classic", "agreement_mtf", "momentum"],
+        choices=["agreement_classic", "agreement_mtf", "momentum"],
+        help="Strategies to run (default: all three)"
     )
-    parser.add_argument(
-        "--take-profit", type=float, default=0.025,
-        help="Take profit percentage (default: 0.025 = 2.5%% for bigger wins)"
-    )
-    parser.add_argument(
-        "--trailing-activation", type=float, default=0.015,
-        help="Trailing stop activation percentage (default: 0.015 = 1.5%%)"
-    )
-    parser.add_argument(
-        "--trailing-distance", type=float, default=0.008,
-        help="Trailing stop distance percentage (default: 0.008 = 0.8%%)"
-    )
-    parser.add_argument(
-        "--signal-confidence", type=float, default=0.70,
-        help="Minimum confidence for signal-based exits (default: 0.70 = 70%%)"
-    )
-    parser.add_argument(
-        "--signal-profit-threshold", type=float, default=0.01,
-        help="Profit threshold requiring strong signal to exit (default: 0.01 = 1%%)"
-    )
-    parser.add_argument(
-        "--max-position-hours", type=float, default=4.0,
-        help="Maximum hours to hold a stale position (default: 4.0)"
-    )
-    parser.add_argument(
-        "--stale-profit-threshold", type=float, default=0.005,
-        help="Min profit to keep stale position (default: 0.005 = 0.5%%)"
-    )
+    # Exit params (applied to agreement strategies; momentum has own defaults)
+    parser.add_argument("--stop-loss", type=float, default=0.012, help="Agreement SL %% (default: 1.2%%)")
+    parser.add_argument("--take-profit", type=float, default=0.025, help="Agreement TP %% (default: 2.5%%)")
+    parser.add_argument("--trailing-activation", type=float, default=0.015, help="Agreement trailing activation (default: 1.5%%)")
+    parser.add_argument("--trailing-distance", type=float, default=0.008, help="Agreement trailing distance (default: 0.8%%)")
+    parser.add_argument("--max-position-hours", type=float, default=4.0, help="Agreement max hold hours (default: 4.0)")
+
     args = parser.parse_args()
 
     # Setup logging
@@ -1133,20 +1480,56 @@ async def main():
         rotation="10 MB",
     )
 
-    # Create trader with leverage configuration
+    # Build strategy configs
+    selected = args.strategies
+    capital_per_strategy = args.capital / len(selected)
+
+    strategy_configs = []
+    for name in selected:
+        if name == "agreement_classic":
+            strategy_configs.append(StrategyConfig(
+                name="agreement_classic",
+                strategy_type="agreement",
+                generator=TechnicalSignalGenerator(),
+                stop_loss_pct=args.stop_loss,
+                take_profit_pct=args.take_profit,
+                trailing_activation_pct=args.trailing_activation,
+                trailing_distance_pct=args.trailing_distance,
+                max_position_hours=args.max_position_hours,
+                capital=capital_per_strategy,
+            ))
+        elif name == "agreement_mtf":
+            strategy_configs.append(StrategyConfig(
+                name="agreement_mtf",
+                strategy_type="agreement_mtf",
+                generator=MTFSignalGenerator(),
+                stop_loss_pct=args.stop_loss,
+                take_profit_pct=args.take_profit,
+                trailing_activation_pct=args.trailing_activation,
+                trailing_distance_pct=args.trailing_distance,
+                max_position_hours=args.max_position_hours,
+                capital=capital_per_strategy,
+            ))
+        elif name == "momentum":
+            strategy_configs.append(StrategyConfig(
+                name="momentum",
+                strategy_type="momentum",
+                generator=MomentumBreakoutGenerator(),
+                stop_loss_pct=0.008,         # Tighter SL for momentum
+                take_profit_pct=0.018,       # Faster TP
+                trailing_activation_pct=0.010,
+                trailing_distance_pct=0.005,
+                max_position_hours=2.0,      # Shorter hold
+                capital=capital_per_strategy,
+            ))
+
+    # Create trader
     trader = SimplePaperTrader(
         symbols=args.symbols,
+        strategies=strategy_configs,
         initial_capital=args.capital,
         leverage=args.leverage,
         check_interval=args.interval,
-        stop_loss_pct=args.stop_loss,
-        take_profit_pct=args.take_profit,
-        trailing_stop_activation_pct=args.trailing_activation,
-        trailing_stop_distance_pct=args.trailing_distance,
-        signal_exit_min_confidence=args.signal_confidence,
-        signal_exit_min_profit_pct=args.signal_profit_threshold,
-        max_position_hours=args.max_position_hours,
-        stale_position_min_profit_pct=args.stale_profit_threshold,
     )
 
     # Handle shutdown
