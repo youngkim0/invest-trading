@@ -495,15 +495,38 @@ def main():
                 s_pnl = sum(t.get('net_pnl') or 0 for t in s_closed)
                 s_wr = len(s_wins) / len(s_closed) * 100 if s_closed else 0
 
-                pnl_color = "#00ff88" if s_pnl >= 0 else "#ff4444"
+                # Unrealized P&L for open positions
+                s_unrealized = 0.0
+                for t in s_open:
+                    sym = t.get('symbol', '')
+                    side = t.get('side', '')
+                    ep = float(t.get('entry_price') or 0)
+                    qty = float(t.get('quantity') or 0)
+                    cp = prices.get(sym, ep)
+                    if ep > 0 and qty > 0:
+                        if side == 'buy':
+                            s_unrealized += (cp - ep) * qty
+                        else:
+                            s_unrealized += (ep - cp) * qty
+
+                s_total = s_pnl + s_unrealized
+                pnl_color = "#00ff88" if s_total >= 0 else "#ff4444"
                 st.markdown(f"**{slabel}**")
-                st.markdown(f"<span style='color:{pnl_color}; font-size:22px;'>${s_pnl:+.2f}</span>", unsafe_allow_html=True)
-                st.caption(f"{len(s_closed)} trades | {s_wr:.0f}% WR | {len(s_wins)}W/{len(s_closed)-len(s_wins)}L | {len(s_open)} open")
+                st.markdown(f"<span style='color:{pnl_color}; font-size:22px;'>${s_total:+.2f}</span>", unsafe_allow_html=True)
+                details = f"{len(s_closed)} closed | {s_wr:.0f}% WR | {len(s_wins)}W/{len(s_closed)-len(s_wins)}L"
+                if s_open:
+                    ur_color = "#00ff88" if s_unrealized >= 0 else "#ff4444"
+                    details += f" | {len(s_open)} open (<span style='color:{ur_color}'>${s_unrealized:+.2f}</span>)"
+                st.markdown(details, unsafe_allow_html=True)
 
     # ============================================
     # PORTFOLIO VALUE BANNER (at the top)
     # ============================================
-    STARTING_CAPITAL = 1000.0
+    # Each strategy gets $1000, total $3000 when viewing all; $1000 per strategy
+    if strategy_filter is None:
+        STARTING_CAPITAL = 3000.0
+    else:
+        STARTING_CAPITAL = 1000.0
 
     # Calculate realized P&L from closed trades
     closed_trades = [t for t in trades if t.get('exit_time')]
@@ -590,12 +613,21 @@ def main():
     st.header("🔥 Open Positions")
 
     if open_trades:
+        # Strategy label mapping
+        strat_badge = {
+            "agreement_classic": "🔵 Classic",
+            "agreement_mtf": "🟣 MTF",
+            "momentum": "🟠 Momentum",
+            "paper_technical": "🔵 Classic",
+        }
         for t in open_trades:
             symbol = t.get('symbol', 'N/A')
             side = t.get('side', 'N/A').upper()
             entry_price = float(t.get('entry_price') or 0)
             entry_time_kst = to_kst(t.get('entry_time', ''))
             current_price = prices.get(symbol, entry_price)
+            strategy = t.get('strategy_name', 'paper_technical')
+            badge = strat_badge.get(strategy, strategy)
 
             # Calculate P&L
             if side == 'BUY':
@@ -606,16 +638,18 @@ def main():
             pnl_color = "🟢" if pnl_pct >= 0 else "🔴"
             side_emoji = "📈" if side == "BUY" else "📉"
 
-            col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 2])
+            col1, col2, col3, col4, col5, col6 = st.columns([1.5, 2, 2, 2, 1.5, 1.5])
             with col1:
-                st.markdown(f"**{side_emoji} {symbol}** {side}")
+                st.markdown(f"**{badge}**")
             with col2:
-                st.markdown(f"Entry: **${entry_price:,.2f}**")
+                st.markdown(f"**{side_emoji} {symbol}** {side}")
             with col3:
-                st.markdown(f"Current: **${current_price:,.2f}**")
+                st.markdown(f"Entry: **${entry_price:,.2f}**")
             with col4:
-                st.markdown(f"{pnl_color} **{pnl_pct:+.2f}%**")
+                st.markdown(f"Current: **${current_price:,.2f}**")
             with col5:
+                st.markdown(f"{pnl_color} **{pnl_pct:+.2f}%**")
+            with col6:
                 st.markdown(f"📅 {entry_time_kst}")
     else:
         st.info("No open positions")
@@ -744,8 +778,19 @@ def main():
                     result = "➖"
                     result_text = "Hold"
 
+            # Strategy source label
+            sig_source = sig.get('source', 'technical')
+            source_labels = {
+                'agreement': '🔵 Classic',
+                'agreement_mtf': '🟣 MTF',
+                'momentum': '🟠 Momentum',
+                'technical': '🔵 Classic',
+            }
+            source_label = source_labels.get(sig_source, sig_source)
+
             display_data.append({
                 'Time (KST)': timestamp_kst,
+                'Strategy': source_label,
                 'Symbol': symbol,
                 'Signal': f"{signal_emoji} {signal_type}",
                 'Confidence': f"{confidence:.0f}%",
@@ -829,6 +874,13 @@ def main():
     st.header("📋 Trade History (Since Feb 20)")
 
     if trades:
+        # Strategy badge mapping for trades
+        trade_strat_badge = {
+            "agreement_classic": "🔵 Classic",
+            "agreement_mtf": "🟣 MTF",
+            "momentum": "🟠 Momentum",
+            "paper_technical": "🔵 Classic",
+        }
         trade_data = []
         for t in trades:
             symbol = t.get('symbol', 'N/A')
@@ -839,6 +891,8 @@ def main():
             exit_time = t.get('exit_time', '')
             net_pnl = float(t.get('net_pnl') or 0)
             return_pct = float(t.get('return_pct') or 0)
+            strategy = t.get('strategy_name', 'paper_technical')
+            badge = trade_strat_badge.get(strategy, strategy)
 
             # Status
             if exit_time:
@@ -854,6 +908,7 @@ def main():
 
             trade_data.append({
                 'Status': status,
+                'Strategy': badge,
                 'Symbol': f"{side_emoji} {symbol}",
                 'Side': side,
                 'Entry': f"${entry_price:,.2f}",
