@@ -6,8 +6,6 @@
 |------|-------|
 | **Paper trader (main bot)** | `scripts/paper_trade_simple.py` |
 | **Dashboard** | `dashboard/app.py` (deployed on Streamlit Cloud) |
-| **Signal generation** | `TechnicalSignalGenerator` class in `paper_trade_simple.py` |
-| **SMC analysis** | `data/features/smc/detector.py`, `confluence.py`, `zones.py` |
 | **Market data fetcher** | `data/collectors/market_data.py` |
 | **Database client** | `data/storage/supabase_client.py` |
 | **GCP deployment** | `deploy/setup-vm.sh`, `deploy/paper-trader.service` |
@@ -19,21 +17,26 @@
 ```
 Binance Public API
     │
-    ├── 1h candles ──► determine_htf_trend() ──► bullish / bearish / neutral
+    ├── 1h candles ──► determine_htf_trend() ──► {direction, strength, slope}
     │
-    └── 1m candles ──► generate_signal()
-                          ├── RSI, MACD, SMA (technical scoring)
-                          ├── SMC detector (order blocks, FVGs, liquidity)
-                          ├── Confluence engine (scoring)
-                          └── Agreement check + HTF hard filter
-                                │
-                                ▼
-                          Signal: buy / sell / hold
-                                │
-                    ┌───────────┼───────────┐
-                    ▼           ▼           ▼
+    ├── 15m candles ──► TrendBreakoutGenerator (10-bar breakout + volume)
+    │
+    ├── 5m candles ──► OIMomentumGenerator (RSI zone + OI + ATR distance)
+    │                  calculate_atr(5m) ──► dynamic SL/TP
+    │
+    ├── 1m candles ──► FundingMeanReversionGenerator (funding + OI + price check)
+    │
+    └── Futures API ──► get_derivatives_data()
+         (funding_rate, oi_history, premium_index, taker ratios, L/S ratio)
+                              │
+                              ▼
+                    3 boolean conditions per strategy
+                    ALL must be true → buy/sell signal
+                              │
+                    ┌─────────┼───────────┐
+                    ▼         ▼           ▼
               _save_signal  _check_entry  _check_exit
-              (Supabase)    (open pos)    (SL/TP/trailing)
+              (Supabase)    (risk sizing) (ATR-based SL/TP)
                                 │
                                 ▼
                           Supabase DB
@@ -45,6 +48,30 @@ Binance Public API
               Streamlit Dashboard (app.py)
               + Gemini AI insights
 ```
+
+## Strategy Overview (v6.0)
+
+### Funding Reversion (LOW freq, 0-2/day)
+- **Thesis**: Extreme funding rates precede reversals (strongest academic evidence)
+- **Conditions**: Extreme funding + OI rising + price not already reversed
+- **ATR timeframe**: 1h | SL: 2.0x ATR | TP: 4.0x ATR | Risk: 2%/trade | Max hold: 12h
+
+### Trend Breakout (MEDIUM freq, 2-5/day)
+- **Thesis**: The 1h trend was our only proven edge — trade breakouts in its direction
+- **Conditions**: HTF trend strength > 0.3 + 15m breakout + volume confirmation
+- **ATR timeframe**: 15m | SL: 1.5x ATR | TP: 3.0x ATR | Risk: 2%/trade | Max hold: 6h
+
+### OI Momentum (HIGH freq, 3-8/day)
+- **Thesis**: OI rising + price momentum = new money entering in one direction
+- **Conditions**: RSI momentum zone + OI rising > 1% + price near SMA20
+- **ATR timeframe**: 5m | SL: 1.5x ATR | TP: 2.5x ATR | Risk: 1.5%/trade | Max hold: 3h
+
+## Key Design Decisions (v6.0)
+
+- **ATR-based stops**: SL/TP computed at entry as multiples of ATR, stored on position as percentages. Automatically adapts per asset (XRP gets wider stops than BTC) and per market condition.
+- **Risk-based sizing**: `calculate_position_size()` risks 1.5-2% of capital per trade. Position size = risk_amount / sl_distance. Capped at 30% margin.
+- **Boolean conditions**: Each strategy checks exactly 3 binary conditions. ALL must be true. No additive scoring = fewer parameters = less overfitting.
+- **HTF returns strength**: `determine_htf_trend()` returns `{direction, strength, slope}`. Strength modulates confidence via `apply_htf_adjustment()` instead of hard-blocking counter-trend trades.
 
 ## Deployment
 
@@ -71,60 +98,39 @@ gcloud compute ssh paper-trader --zone=asia-northeast3-a \
 - Tables: `signals`, `trade_logs`, `performance_snapshots`, `ohlcv`
 - Auth: anon key (dashboard read), service role key (bot write)
 
-## Signal Generation Pipeline
-
-### Entry signal flow (`generate_signal()`)
-1. Calculate technical indicators on **1m candles**: RSI(14), MACD(12,26,9), SMA(20,50), momentum
-2. Run **SMC analysis**: order blocks, FVGs, liquidity sweeps, market structure
-3. Score confluence (min 0.55 to count)
-4. **Technical direction**: buy score vs sell score (threshold: 1.5)
-5. **Agreement check**: SMC direction must match technical direction
-6. RSI extremes can override (< 25 rising = buy, > 75 falling = sell)
-7. **Combined score thresholds**: buy >= 4.5, strong_buy >= 6.0
-8. **HTF hard filter** (1h candles):
-   - Bearish HTF → block buys
-   - Non-bearish HTF → block sells (v3.2)
-   - Neutral HTF + buy → confidence -10%
-
-### Exit logic (`_check_exit()`, priority order)
+## Exit Logic (`_check_exit()`, priority order)
 1. **Liquidation**: forced exit at max loss
-2. **Take profit**: 2.5% price move
-3. **Trailing stop**: activates at 1.5%, trails 0.8% behind peak
-4. **Stop loss**: 1.2% against
-5. **Stale position**: > 4h with < 0.5% profit
-6. **RSI profit taking**: RSI > 80 (long) or < 20 (short), requires 1.5% profit (v3.1)
+2. **Take profit**: ATR-based TP (stored as pct on position at entry)
+3. **Trailing stop**: activates at trailing_act_pct, trails trailing_dist_pct behind peak
+4. **Stop loss**: ATR-based SL (stored as pct on position at entry)
+5. **Stale position**: > max_position_hours with < 0.5% profit
+6. **RSI profit taking**: RSI > 80 (long) or < 20 (short), requires trailing_act_pct profit
 7. **Signal exit**: opposite signal with high confidence
 
-### Position sizing
-- 20% of capital per position (margin)
-- 10x leverage
-- Max 1 position per symbol
-- R:R ratio: 2.08:1 (1.2% SL / 2.5% TP)
-- Break-even win rate: 32%
+## Key Functions
 
-## Key Classes
+### Standalone Functions (paper_trade_simple.py)
+- `calculate_rsi(prices, period)` → RSI with momentum detection
+- `calculate_atr(df, period)` → Average True Range value
+- `determine_htf_trend(df_1h)` → `{direction, strength, slope}` from 1h SMA20/50
+- `hold_signal(reasoning, htf_trend)` → standard hold signal dict
+- `apply_htf_adjustment(signal_type, confidence, htf_trend, reasons)` → adjusted confidence
+- `calculate_position_size(capital, risk_pct, sl_distance_pct, leverage, price)` → (quantity, margin)
 
-### `TechnicalSignalGenerator` (paper_trade_simple.py)
-- `calculate_rsi(prices)` → RSI with momentum
-- `calculate_macd(prices)` → MACD with histogram
-- `calculate_sma_crossover(prices)` → SMA20/50 with price position
-- `calculate_price_momentum(prices)` → 5/10 bar momentum
-- `determine_htf_trend(df_1h)` → bullish/bearish/neutral from 1h SMA20/50
-- `generate_signal(df, htf_trend)` → complete signal with reasoning
+### Strategy Generators
+- `FundingMeanReversionGenerator.generate_signal(df_1m, htf_trend, derivatives)` → signal dict
+- `TrendBreakoutGenerator.generate_signal(df_15m, htf_trend)` → signal dict
+- `OIMomentumGenerator.generate_signal(df_5m, htf_trend, derivatives, atr_5m)` → signal dict
 
 ### `SimplePaperTrader` (paper_trade_simple.py)
-- `run()` → main loop, polls every 60s
-- `_process_symbol(symbol, collector)` → fetch data, generate signal, trade
-- `_check_entry()` → open position if signal + confidence >= 0.65
-- `_check_exit()` → 7-level exit priority chain
+- `start()` → main loop, polls every 60s
+- `_fetch_market_data(symbol, collector)` → 1m, 5m, 15m, 1h candles + ticker + derivatives
+- `_process_strategy_symbol(strategy, symbol, market_data)` → compute ATR, generate signal, trade
+- `_check_entry()` → open position if signal + confidence >= 0.65, risk-based sizing
+- `_check_exit()` → 7-level exit priority chain using position-stored ATR params
+- `_open_position()` → compute ATR-based SL/TP, risk-based sizing, store params on position
 - `_save_signal()` → log to Supabase signals table
-- `_save_performance_snapshot()` → log equity/metrics
-
-### `SMCDetector` (data/features/smc/detector.py)
-- `analyze(df)` → returns order blocks, FVGs, liquidity sweeps, market structure
-
-### `ConfluenceEngine` (data/features/smc/confluence.py)
-- `analyze(price, order_blocks, fvgs, sweeps, channels, structure, atr)` → confluence score + direction
+- `_save_performance_snapshots()` → log equity/metrics per strategy
 
 ### Supabase Repositories (data/storage/supabase_client.py)
 - `SignalRepository` → table: `signals`
@@ -141,12 +147,6 @@ gcloud compute ssh paper-trader --zone=asia-northeast3-a \
 - `generate_ai_insights(signals, trades, prices, api_key)` → Gemini analysis
 - `main()` → Streamlit layout with tabs
 
-### Signal accuracy evaluation
-- Compares each signal's entry price to **current price** at dashboard render time
-- Not a fixed time-window evaluation (known limitation)
-- Buy correct if price went up > 0.1%, sell correct if down > 0.1%
-- Signals < 10 min old shown as "Pending"
-
 ## File Tree (key files only)
 
 ```
@@ -155,17 +155,14 @@ invest/
 ├── CHANGELOG.md             ← version history with results
 ├── .env                     ← secrets (not in git)
 ├── scripts/
-│   └── paper_trade_simple.py  ← MAIN BOT (TechnicalSignalGenerator + SimplePaperTrader)
+│   └── paper_trade_simple.py  ← MAIN BOT (3 strategy generators + SimplePaperTrader)
 ├── dashboard/
 │   └── app.py               ← Streamlit dashboard
 ├── data/
 │   ├── collectors/
-│   │   └── market_data.py   ← Binance API wrapper (klines, ticker)
+│   │   └── market_data.py   ← Binance API wrapper (klines, ticker, derivatives)
 │   ├── features/
-│   │   └── smc/
-│   │       ├── detector.py  ← SMC pattern detection
-│   │       ├── confluence.py ← confluence scoring
-│   │       └── zones.py     ← data structures (OrderBlock, FVG, etc.)
+│   │   └── smc/             ← legacy SMC analysis (not used in v6.0)
 │   └── storage/
 │       ├── supabase_client.py ← DB repositories
 │       └── models.py        ← SQLAlchemy models

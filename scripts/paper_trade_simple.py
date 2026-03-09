@@ -1,16 +1,18 @@
 #!/usr/bin/env python
 """Multi-strategy paper trading script using Binance real-time data and Supabase.
 
-v5.1 — Tuned thresholds + soft HTF filter + DB fix:
-- funding_sentiment: Funding rate + OI divergence + basis scoring
-- volatility_squeeze: Bollinger Band squeeze + Keltner breakout on 4h candles
-- taker_flow: Taker volume + order book imbalance + L/S ratio
+v6.0 — Evidence-based strategy redesign:
+- funding_reversion: Funding rate mean reversion (strongest academic evidence)
+- trend_breakout: 1h trend + 15m breakout (our only proven edge)
+- oi_momentum: OI rising + RSI momentum zone (new money entering)
+- ATR-based dynamic stops (replaces fixed %)
+- Risk-based position sizing (replaces flat 20% margin)
 """
 
 import asyncio
 import signal
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -52,14 +54,33 @@ def calculate_rsi(prices: pd.Series, period: int = 14) -> dict:
     }
 
 
-def determine_htf_trend(df_1h: pd.DataFrame) -> str:
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
+    """Calculate Average True Range. Returns ATR value or 0 if insufficient data."""
+    if len(df) < period + 1:
+        return 0.0
+    highs = df["high"]
+    lows = df["low"]
+    closes = df["close"]
+    tr = pd.concat([
+        highs - lows,
+        (highs - closes.shift(1)).abs(),
+        (lows - closes.shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    atr = tr.rolling(period).mean()
+    val = float(atr.iloc[-1])
+    return val if not pd.isna(val) else 0.0
+
+
+def determine_htf_trend(df_1h: pd.DataFrame) -> dict:
     """Determine higher-timeframe trend from 1h candles.
 
-    Returns 'bullish', 'bearish', or 'neutral'.
-    Neutral when SMAs are converging (< 0.3% apart) = ranging market.
+    Returns dict with {direction, strength, slope} instead of just a string.
+    - direction: 'bullish', 'bearish', or 'neutral'
+    - strength: 0.0-1.0 (SMA spread normalized)
+    - slope: SMA20 slope (positive = rising)
     """
     if len(df_1h) < 50:
-        return "neutral"
+        return {"direction": "neutral", "strength": 0.0, "slope": 0.0}
 
     prices = df_1h["close"]
     sma20 = prices.rolling(20).mean()
@@ -68,651 +89,412 @@ def determine_htf_trend(df_1h: pd.DataFrame) -> str:
     sma20_val = float(sma20.iloc[-1])
     sma50_val = float(sma50.iloc[-1])
 
-    # If SMAs are within 0.3% of each other, market is ranging — return neutral
+    # SMA spread as strength indicator (0-1 scale, capped at 2%)
     sma_spread = abs(sma20_val - sma50_val) / sma50_val if sma50_val > 0 else 0
+    strength = min(1.0, sma_spread / 0.02)  # 2% spread = max strength
+
+    # SMA20 slope: change over last 5 bars
+    if len(sma20) >= 5:
+        sma20_5ago = float(sma20.iloc[-5])
+        slope = (sma20_val - sma20_5ago) / sma20_5ago if sma20_5ago > 0 else 0
+    else:
+        slope = 0.0
+
+    # Direction
     if sma_spread < 0.003:
-        return "neutral"
-
-    if sma20_val > sma50_val and current_price > sma20_val:
-        return "bullish"
+        direction = "neutral"
+        strength = strength * 0.5  # Reduce strength in ranging markets
+    elif sma20_val > sma50_val and current_price > sma20_val:
+        direction = "bullish"
     elif sma20_val < sma50_val and current_price < sma20_val:
-        return "bearish"
-    return "neutral"
+        direction = "bearish"
+    else:
+        direction = "neutral"
+
+    return {"direction": direction, "strength": round(strength, 3), "slope": round(slope, 5)}
+
+
+def hold_signal(reasoning: str = "No signal", htf_trend: dict = None) -> dict:
+    """Return a standard hold signal."""
+    return {
+        "signal": "hold",
+        "confidence": 0.5,
+        "reasoning": reasoning,
+        "indicators": {"htf_trend": htf_trend.get("direction", "neutral") if htf_trend else "neutral"},
+    }
+
+
+def apply_htf_adjustment(signal_type: str, confidence: float, htf_trend: dict, reasons: list) -> float:
+    """Adjust confidence based on HTF trend alignment.
+
+    Instead of hard-blocking, HTF strength modulates confidence:
+    - Aligned with trend: +5-15% confidence boost
+    - Counter-trend: -10-25% confidence penalty (scaled by trend strength)
+    - Neutral: no adjustment
+    """
+    direction = htf_trend.get("direction", "neutral")
+    strength = htf_trend.get("strength", 0.0)
+
+    is_buy = signal_type in ("buy", "strong_buy")
+    is_sell = signal_type in ("sell", "strong_sell")
+
+    if direction == "bullish":
+        if is_buy:
+            boost = 0.05 + 0.10 * strength
+            confidence = min(0.90, confidence + boost)
+            reasons.append(f"HTF bullish +{boost:.0%} conf (str={strength:.2f})")
+        elif is_sell:
+            penalty = 0.10 + 0.15 * strength
+            confidence = max(0.45, confidence - penalty)
+            reasons.append(f"HTF bullish -{penalty:.0%} conf for sell")
+    elif direction == "bearish":
+        if is_sell:
+            boost = 0.05 + 0.10 * strength
+            confidence = min(0.90, confidence + boost)
+            reasons.append(f"HTF bearish +{boost:.0%} conf (str={strength:.2f})")
+        elif is_buy:
+            penalty = 0.10 + 0.15 * strength
+            confidence = max(0.45, confidence - penalty)
+            reasons.append(f"HTF bearish -{penalty:.0%} conf for buy")
+
+    return confidence
 
 
 # =============================================================================
-# Strategy 1: Funding Sentiment (Funding Rate + OI Divergence + Basis)
+# Strategy 1: Funding Mean Reversion (LOW frequency, 0-2 trades/day)
 # =============================================================================
 
-class FundingSentimentGenerator:
-    """Generate signals from funding rate, open interest divergence, and basis.
+class FundingMeanReversionGenerator:
+    """Contrarian funding rate strategy — extreme funding precedes reversals.
 
-    Funding rate = cost of leverage. Extreme funding precedes reversals.
-    OI divergence (OI rising while price falls) = leading indicator of regime change.
+    Entry requires ALL 3 conditions (boolean, no scoring):
+    1. Funding rate extreme: > 0.05% (short) or < -0.03% (long)
+    2. OI rising > 0.5% over last 30min (new money = fuel)
+    3. Price hasn't already reversed > 0.5% in last hour
     """
 
     def __init__(self):
-        # Cache last known funding rate (only updates every 8h)
         self._last_funding_rate: float | None = None
         self._last_funding_time: str | None = None
 
-    def generate_signal(self, df: pd.DataFrame, htf_trend: str = "neutral",
+    def generate_signal(self, df_1m: pd.DataFrame, htf_trend: dict,
                         derivatives: dict = None, **kwargs) -> dict:
-        """Generate trading signal from derivatives sentiment data."""
-        if derivatives is None or not derivatives:
-            return {"signal": "hold", "confidence": 0.5, "reasoning": "No derivatives data",
-                    "indicators": {"htf_trend": htf_trend}}
+        """Generate signal from funding rate mean reversion."""
+        if not derivatives:
+            return hold_signal("No derivatives data", htf_trend)
 
-        prices = df["close"] if not df.empty else pd.Series()
-        current_price = float(prices.iloc[-1]) if len(prices) > 0 else 0
+        prices = df_1m["close"] if not df_1m.empty else pd.Series()
+        if len(prices) < 60:
+            return hold_signal("Insufficient 1m data", htf_trend)
 
-        total_score = 0.0
+        current_price = float(prices.iloc[-1])
         reasons = []
 
-        # === FUNDING RATE SCORE (max ±3.0) ===
-        funding_score = self._score_funding(derivatives, reasons)
-        total_score += funding_score
-
-        # === OI DIVERGENCE SCORE (max ±3.0) ===
-        oi_score = self._score_oi_divergence(derivatives, prices, reasons)
-        total_score += oi_score
-
-        # === BASIS SCORE (max ±2.0) ===
-        basis_score = self._score_basis(derivatives, reasons)
-        total_score += basis_score
-
-        # Determine signal
-        signal_type = "hold"
-        confidence = 0.5
-
-        if total_score >= 3.0:
-            signal_type = "strong_buy"
-            confidence = min(0.85, 0.60 + abs(total_score) * 0.03)
-        elif total_score >= 1.8:
-            signal_type = "buy"
-            confidence = min(0.75, 0.55 + abs(total_score) * 0.03)
-        elif total_score <= -3.0:
-            signal_type = "strong_sell"
-            confidence = min(0.85, 0.60 + abs(total_score) * 0.03)
-        elif total_score <= -1.8:
-            signal_type = "sell"
-            confidence = min(0.75, 0.55 + abs(total_score) * 0.03)
-
-        # === HTF TREND FILTER (soft) ===
-        if htf_trend == "bearish" and signal_type in ("buy", "strong_buy"):
-            confidence = max(0.5, confidence - 0.15)
-            reasons.append("HTF bearish (-15% conf for buy)")
-        elif htf_trend == "bullish" and signal_type in ("sell", "strong_sell"):
-            confidence = max(0.5, confidence - 0.15)
-            reasons.append("HTF bullish (-15% conf for sell)")
-        elif htf_trend == "neutral":
-            confidence = max(0.5, confidence - 0.05)
-            reasons.append("HTF neutral (-5% conf)")
-
-        return {
-            "signal": signal_type,
-            "confidence": confidence,
-            "reasoning": ", ".join(reasons) if reasons else "No strong signals",
-            "indicators": {
-                "price": current_price,
-                "funding_score": funding_score,
-                "oi_score": oi_score,
-                "basis_score": basis_score,
-                "total_score": total_score,
-                "htf_trend": htf_trend,
-            },
-        }
-
-    def _score_funding(self, derivatives: dict, reasons: list) -> float:
-        """Score funding rate (max ±3.0). Contrarian: extreme funding → reversal."""
-        score = 0.0
+        # === CONDITION 1: Extreme funding rate ===
         funding_data = derivatives.get("funding_rate", [])
         if not funding_data:
-            return 0.0
+            return hold_signal("No funding data", htf_trend)
 
-        # Update cache if we have new data
         latest = funding_data[-1]
         rate = latest["funding_rate"]
         funding_time = latest["funding_time"]
 
+        # Cache funding rate
         if self._last_funding_time != funding_time:
             self._last_funding_rate = rate
             self._last_funding_time = funding_time
         else:
             rate = self._last_funding_rate if self._last_funding_rate is not None else rate
 
-        # Extreme positive funding → contrarian short
-        if rate > 0.0005:  # >0.05%
-            score = -2.0
-            reasons.append(f"Funding extreme+ ({rate*100:.3f}%) → short")
-        elif rate > 0.0003:  # >0.03%
-            score = -1.0
-            reasons.append(f"Funding high ({rate*100:.3f}%)")
-        # Extreme negative funding → contrarian long
-        elif rate < -0.0003:  # <-0.03%
-            score = 2.0
-            reasons.append(f"Funding extreme- ({rate*100:.3f}%) → long")
-        elif rate < -0.0001:  # <-0.01%
-            score = 1.0
-            reasons.append(f"Funding negative ({rate*100:.3f}%)")
+        # Determine direction from funding
+        direction = None
+        if rate > 0.0005:  # > 0.05% → short (contrarian)
+            direction = "sell"
+            reasons.append(f"Funding extreme+ {rate*100:.3f}% → short")
+        elif rate < -0.0003:  # < -0.03% → long (contrarian)
+            direction = "buy"
+            reasons.append(f"Funding extreme- {rate*100:.3f}% → long")
+        else:
+            return hold_signal(f"Funding normal ({rate*100:.3f}%)", htf_trend)
 
-        # Funding acceleration: compare recent rates
-        if len(funding_data) >= 2:
-            prev_rate = funding_data[-2]["funding_rate"]
-            acceleration = rate - prev_rate
-            if abs(acceleration) > 0.0002:  # >0.02% change
-                accel_factor = 1.0 if (acceleration > 0 and score < 0) or (acceleration < 0 and score > 0) else 0.5
-                score *= (1 + accel_factor * 0.5)
-                score = max(-3.0, min(3.0, score))
-
-        return score
-
-    def _score_oi_divergence(self, derivatives: dict, prices: pd.Series, reasons: list) -> float:
-        """Score OI divergence (max ±3.0). OI vs price divergence = leading signal."""
-        score = 0.0
+        # === CONDITION 2: OI rising > 0.5% over last 30min ===
         oi_history = derivatives.get("oi_history", [])
-        if len(oi_history) < 2 or len(prices) < 2:
-            return 0.0
+        if len(oi_history) < 2:
+            return hold_signal("Insufficient OI data", htf_trend)
 
-        # Current vs earlier OI
         current_oi = oi_history[-1]["sum_open_interest_value"]
-        earlier_oi = oi_history[0]["sum_open_interest_value"]
+        # Find OI ~30min ago (6 x 5min intervals)
+        lookback_idx = max(0, len(oi_history) - 7)
+        earlier_oi = oi_history[lookback_idx]["sum_open_interest_value"]
         oi_change_pct = (current_oi - earlier_oi) / earlier_oi * 100 if earlier_oi > 0 else 0
 
-        # Price change over same period
-        price_now = float(prices.iloc[-1])
-        price_earlier = float(prices.iloc[0]) if len(prices) > len(oi_history) else float(prices.iloc[-min(len(prices), len(oi_history))])
-        price_change_pct = (price_now - price_earlier) / price_earlier * 100 if price_earlier > 0 else 0
+        if oi_change_pct < 0.5:
+            return hold_signal(f"OI not rising enough ({oi_change_pct:.2f}%)", htf_trend)
+        reasons.append(f"OI +{oi_change_pct:.2f}% (30min)")
 
-        # OI↑ + price↓ = shorts building (bearish)
-        if oi_change_pct > 2.0 and price_change_pct < -0.5:
-            score = -2.0
-            reasons.append(f"OI↑{oi_change_pct:.1f}% + price↓{price_change_pct:.1f}% (shorts building)")
+        # === CONDITION 3: Price hasn't already reversed > 0.5% in last hour ===
+        price_1h_ago = float(prices.iloc[-60]) if len(prices) >= 60 else float(prices.iloc[0])
+        price_change_1h = (current_price - price_1h_ago) / price_1h_ago * 100
 
-        # OI↓ + price↑ = short squeeze (bullish)
-        elif oi_change_pct < -2.0 and price_change_pct > 0.5:
-            score = 2.0
-            reasons.append(f"OI↓{oi_change_pct:.1f}% + price↑{price_change_pct:.1f}% (short squeeze)")
+        if direction == "buy" and price_change_1h > 0.5:
+            return hold_signal(f"Already reversed +{price_change_1h:.2f}% (too late)", htf_trend)
+        elif direction == "sell" and price_change_1h < -0.5:
+            return hold_signal(f"Already reversed {price_change_1h:.2f}% (too late)", htf_trend)
+        reasons.append(f"Price 1h: {price_change_1h:+.2f}% (not reversed yet)")
 
-        # OI↑ + price↑ = trend confirmation (bullish)
-        elif oi_change_pct > 2.0 and price_change_pct > 0.5:
-            score = 1.5
-            reasons.append(f"OI↑{oi_change_pct:.1f}% + price↑{price_change_pct:.1f}% (trend confirm)")
+        # All 3 conditions met — generate signal
+        is_strong = abs(rate) > 0.001  # Very extreme funding = strong signal
+        signal_type = f"strong_{direction}" if is_strong else direction
+        confidence = 0.75 if is_strong else 0.68
 
-        # OI↑ + price flat = accumulation (mild bullish)
-        elif oi_change_pct > 3.0 and abs(price_change_pct) < 0.5:
-            score = 0.5
-            reasons.append(f"OI↑{oi_change_pct:.1f}% + flat price (accumulation)")
+        # Apply HTF adjustment
+        confidence = apply_htf_adjustment(signal_type, confidence, htf_trend, reasons)
 
-        # OI elevated vs 7d avg amplifies
-        if len(oi_history) >= 12:  # ~1h of 5m data minimum
-            avg_oi = sum(r["sum_open_interest_value"] for r in oi_history) / len(oi_history)
-            if current_oi > avg_oi * 1.1:  # 10%+ above average
-                score *= 1.3
-                score = max(-3.0, min(3.0, score))
-
-        return score
-
-    def _score_basis(self, derivatives: dict, reasons: list) -> float:
-        """Score futures basis (max ±2.0). Premium = bullish, discount = bearish."""
-        score = 0.0
-        premium = derivatives.get("premium_index", {})
-        if not premium:
-            return 0.0
-
-        mark_price = premium.get("mark_price", 0)
-        index_price = premium.get("index_price", 0)
-        if index_price <= 0 or mark_price <= 0:
-            return 0.0
-
-        basis_pct = (mark_price - index_price) / index_price * 100
-
-        # Futures premium > 0.2% = bullish
-        if basis_pct > 0.5:
-            score = -1.0  # Contrarian: extreme premium → short
-            reasons.append(f"Basis +{basis_pct:.3f}% (extreme premium → contrarian)")
-        elif basis_pct > 0.2:
-            score = 1.0
-            reasons.append(f"Basis +{basis_pct:.3f}% (bullish premium)")
-
-        # Futures discount < -0.1% = bearish
-        elif basis_pct < -0.3:
-            score = 1.0  # Contrarian: extreme discount → long
-            reasons.append(f"Basis {basis_pct:.3f}% (extreme discount → contrarian)")
-        elif basis_pct < -0.1:
-            score = -1.0
-            reasons.append(f"Basis {basis_pct:.3f}% (bearish discount)")
-
-        return score
+        return {
+            "signal": signal_type,
+            "confidence": confidence,
+            "reasoning": ", ".join(reasons),
+            "indicators": {
+                "price": current_price,
+                "funding_rate": rate,
+                "oi_change_pct": oi_change_pct,
+                "price_change_1h": price_change_1h,
+                "htf_trend": htf_trend.get("direction", "neutral"),
+                "htf_strength": htf_trend.get("strength", 0),
+            },
+        }
 
 
 # =============================================================================
-# Strategy 2: Volatility Squeeze (BB inside KC → breakout)
+# Strategy 2: Trend Breakout (MEDIUM frequency, 2-5 trades/day)
 # =============================================================================
 
-class VolatilitySqueezeGenerator:
-    """Generate signals from Bollinger Band squeeze + Keltner Channel breakout.
+class TrendBreakoutGenerator:
+    """Trade 15m breakouts in the direction of the 1h trend.
 
-    Volatility is mean-reverting. BB inside KC = squeeze.
-    Breakout from squeeze produces asymmetric payoff on 4h timeframes.
+    Entry requires ALL 3 conditions (boolean, no scoring):
+    1. 1h HTF trend is bullish or bearish with strength > 0.3
+    2. 15m price closes above 10-bar high (long) or below 10-bar low (short)
+    3. 15m volume > 1.2x 20-bar average
     """
 
-    def __init__(self, bb_period: int = 20, bb_std: float = 2.0,
-                 kc_period: int = 20, kc_atr_mult: float = 1.5):
-        self.bb_period = bb_period
-        self.bb_std = bb_std
-        self.kc_period = kc_period
-        self.kc_atr_mult = kc_atr_mult
-
-    def generate_signal(self, df: pd.DataFrame, htf_trend: str = "neutral",
-                        df_4h: pd.DataFrame = None, df_1m: pd.DataFrame = None,
+    def generate_signal(self, df_15m: pd.DataFrame, htf_trend: dict,
                         **kwargs) -> dict:
-        """Generate signal from BB/KC squeeze on 4h candles."""
-        if df_4h is None or len(df_4h) < self.bb_period + 10:
-            return {"signal": "hold", "confidence": 0.5, "reasoning": "Insufficient 4h data",
-                    "indicators": {"htf_trend": htf_trend}}
+        """Generate signal from trend-aligned breakouts on 15m."""
+        if df_15m is None or len(df_15m) < 30:
+            return hold_signal("Insufficient 15m data", htf_trend)
 
-        # Check if last 4h candle is complete (avoid acting on incomplete candles)
-        # 4h candles close at 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
-        now = datetime.now(timezone.utc)
-        last_candle_time = df_4h.index[-1]
-        if hasattr(last_candle_time, 'to_pydatetime'):
-            last_candle_time = last_candle_time.to_pydatetime()
-        if last_candle_time.tzinfo is None:
-            last_candle_time = last_candle_time.replace(tzinfo=timezone.utc)
+        direction = htf_trend.get("direction", "neutral")
+        strength = htf_trend.get("strength", 0.0)
+        reasons = []
 
-        # If the latest candle started less than 4h ago, it's still forming — use previous
-        candle_age = (now - last_candle_time).total_seconds()
-        if candle_age < 4 * 3600:
-            # Use second-to-last candle as the "completed" one
-            if len(df_4h) < self.bb_period + 11:
-                return {"signal": "hold", "confidence": 0.5, "reasoning": "Waiting for 4h candle close",
-                        "indicators": {"htf_trend": htf_trend}}
-            df_4h = df_4h.iloc[:-1]
+        # === CONDITION 1: HTF trend with strength > 0.3 ===
+        if direction == "neutral" or strength < 0.3:
+            return hold_signal(f"HTF {direction} too weak (str={strength:.2f})", htf_trend)
+        reasons.append(f"HTF {direction} str={strength:.2f}")
 
-        prices = df_4h["close"]
-        highs = df_4h["high"]
-        lows = df_4h["low"]
+        prices = df_15m["close"]
+        highs = df_15m["high"]
+        lows = df_15m["low"]
+        volumes = df_15m["volume"]
         current_price = float(prices.iloc[-1])
 
-        # Bollinger Bands
-        bb_sma = prices.rolling(self.bb_period).mean()
-        bb_std = prices.rolling(self.bb_period).std()
-        bb_upper = bb_sma + self.bb_std * bb_std
-        bb_lower = bb_sma - self.bb_std * bb_std
-        bb_width = (bb_upper - bb_lower) / bb_sma
+        # === CONDITION 2: 15m breakout (10-bar high/low) ===
+        high_10 = float(highs.iloc[-11:-1].max())  # 10 bars before current
+        low_10 = float(lows.iloc[-11:-1].min())
 
-        # Keltner Channels (ATR-based)
-        tr = pd.concat([
-            highs - lows,
-            (highs - prices.shift(1)).abs(),
-            (lows - prices.shift(1)).abs(),
-        ], axis=1).max(axis=1)
-        atr = tr.rolling(self.kc_period).mean()
-        kc_mid = prices.rolling(self.kc_period).mean()
-        kc_upper = kc_mid + self.kc_atr_mult * atr
-        kc_lower = kc_mid - self.kc_atr_mult * atr
-
-        # Squeeze detection: BB inside KC
-        in_squeeze = (bb_upper < kc_upper) & (bb_lower > kc_lower)
-        squeeze_history = in_squeeze.iloc[-(self.bb_period):]
-
-        current_squeeze = bool(in_squeeze.iloc[-1])
-        prev_squeeze = bool(in_squeeze.iloc[-2]) if len(in_squeeze) > 1 else False
-
-        total_score = 0.0
-        reasons = []
-
-        # Squeeze must exist (current or just fired) for any signal
-        squeeze_bars = 0
-        for val in reversed(squeeze_history.values):
-            if val:
-                squeeze_bars += 1
-            else:
-                break
-        # If squeeze just fired, count the bars that WERE in squeeze
-        if not current_squeeze and prev_squeeze:
-            squeeze_bars = 0
-            for val in reversed(squeeze_history.values[:-1]):
-                if val:
-                    squeeze_bars += 1
-                else:
-                    break
-
-        if not current_squeeze and not prev_squeeze:
-            return {
-                "signal": "hold", "confidence": 0.5,
-                "reasoning": "No squeeze detected",
-                "indicators": {
-                    "price": current_price,
-                    "in_squeeze": False,
-                    "squeeze_bars": 0,
-                    "bb_width": float(bb_width.iloc[-1]) if not pd.isna(bb_width.iloc[-1]) else 0,
-                    "htf_trend": htf_trend,
-                },
-            }
-
-        # === DURATION SCORE (max 2.0) ===
-        if squeeze_bars >= 6:  # 24h+ of squeeze
-            total_score += 2.0
-            reasons.append(f"Long squeeze ({squeeze_bars} bars)")
-        elif squeeze_bars >= 3:  # 12h+
-            total_score += 1.0
-            reasons.append(f"Squeeze ({squeeze_bars} bars)")
+        signal_direction = None
+        if direction == "bullish" and current_price > high_10:
+            signal_direction = "buy"
+            reasons.append(f"15m break above 10-bar high ${high_10:,.2f}")
+        elif direction == "bearish" and current_price < low_10:
+            signal_direction = "sell"
+            reasons.append(f"15m break below 10-bar low ${low_10:,.2f}")
         else:
-            total_score += 0.5
+            return hold_signal(f"No breakout (price ${current_price:,.2f}, H10=${high_10:,.2f}, L10=${low_10:,.2f})", htf_trend)
 
-        # === INTENSITY: BB width in bottom 25th percentile ===
-        bb_w_current = float(bb_width.iloc[-1]) if not pd.isna(bb_width.iloc[-1]) else 0
-        bb_w_percentile = float((bb_width.dropna() < bb_w_current).mean()) if len(bb_width.dropna()) > 0 else 0.5
-        if bb_w_percentile <= 0.25:
-            total_score += 1.0
-            reasons.append(f"Tight squeeze (BB width {bb_w_percentile:.0%}ile)")
+        # === CONDITION 3: 15m volume > 1.2x 20-bar average ===
+        avg_vol = float(volumes.iloc[-21:-1].mean())
+        current_vol = float(volumes.iloc[-1])
+        vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
 
-        # === BREAKOUT DIRECTION (max 2.0) ===
-        direction = 0  # +1 bullish, -1 bearish
-        squeeze_fired = prev_squeeze and not current_squeeze
+        if vol_ratio < 1.2:
+            return hold_signal(f"Volume too low ({vol_ratio:.2f}x avg)", htf_trend)
+        reasons.append(f"Volume {vol_ratio:.1f}x avg")
 
-        if squeeze_fired:
-            # Squeeze just fired — determine direction from momentum
-            total_score += 1.0  # Bonus for breakout event
-            mom = float(prices.iloc[-1]) - float(prices.iloc[-3]) if len(prices) > 2 else 0
-            if mom > 0:
-                direction = 1
-                total_score += 1.0
-                reasons.append("Squeeze fired ↑ (bullish breakout)")
-            else:
-                direction = -1
-                total_score += 1.0
-                reasons.append("Squeeze fired ↓ (bearish breakout)")
-        else:
-            # Still loading in squeeze — use momentum direction
-            sma_val = float(bb_sma.iloc[-1]) if not pd.isna(bb_sma.iloc[-1]) else current_price
-            if current_price > sma_val:
-                direction = 1
-                reasons.append("Squeeze loading (bullish bias)")
-            else:
-                direction = -1
-                reasons.append("Squeeze loading (bearish bias)")
+        # All 3 conditions met
+        is_strong = vol_ratio > 2.0 and strength > 0.6
+        signal_type = f"strong_{signal_direction}" if is_strong else signal_direction
+        confidence = 0.75 if is_strong else 0.70
 
-        # === VOLUME CONFIRMATION (1m data) ===
-        if df_1m is not None and len(df_1m) > 20 and squeeze_fired:
-            vol = df_1m["volume"]
-            avg_vol = float(vol.iloc[-21:-1].mean())
-            current_vol = float(vol.iloc[-1])
-            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
-            if vol_ratio >= 1.5:
-                total_score += 1.5
-                reasons.append(f"Volume spike {vol_ratio:.1f}x")
-
-        # === EXPANSION RATE ===
-        if len(bb_width) > 1:
-            prev_bw = float(bb_width.iloc[-2]) if not pd.isna(bb_width.iloc[-2]) else 0
-            if prev_bw > 0 and bb_w_current > 0:
-                expansion = (bb_w_current - prev_bw) / prev_bw
-                if expansion > 0.10:
-                    total_score += 1.0
-                    reasons.append(f"BB expanding {expansion:.0%}")
-
-        # Determine signal
-        signal_type = "hold"
-        confidence = 0.5
-
-        if direction > 0:
-            if total_score >= 3.0:
-                signal_type = "strong_buy"
-                confidence = min(0.85, 0.60 + total_score * 0.03)
-            elif total_score >= 1.8:
-                signal_type = "buy"
-                confidence = min(0.75, 0.55 + total_score * 0.03)
-        elif direction < 0:
-            if total_score >= 3.0:
-                signal_type = "strong_sell"
-                confidence = min(0.85, 0.60 + total_score * 0.03)
-            elif total_score >= 1.8:
-                signal_type = "sell"
-                confidence = min(0.75, 0.55 + total_score * 0.03)
-
-        # === HTF TREND FILTER (soft) ===
-        if htf_trend == "bearish" and signal_type in ("buy", "strong_buy"):
-            confidence = max(0.5, confidence - 0.15)
-            reasons.append("HTF bearish (-15% conf for buy)")
-        elif htf_trend == "bullish" and signal_type in ("sell", "strong_sell"):
-            confidence = max(0.5, confidence - 0.15)
-            reasons.append("HTF bullish (-15% conf for sell)")
-        elif htf_trend == "neutral":
-            confidence = max(0.5, confidence - 0.05)
-            reasons.append("HTF neutral (-5% conf)")
+        # HTF is already aligned by design, so just a small boost for high strength
+        if strength > 0.6:
+            confidence = min(0.85, confidence + 0.05)
+            reasons.append(f"Strong trend boost")
 
         return {
             "signal": signal_type,
             "confidence": confidence,
-            "reasoning": ", ".join(reasons) if reasons else "No squeeze signals",
+            "reasoning": ", ".join(reasons),
             "indicators": {
                 "price": current_price,
-                "in_squeeze": current_squeeze,
-                "squeeze_fired": squeeze_fired,
-                "squeeze_bars": squeeze_bars,
-                "bb_width": bb_w_current,
-                "bb_width_percentile": bb_w_percentile,
-                "direction": direction,
-                "total_score": total_score,
-                "htf_trend": htf_trend,
+                "high_10": high_10,
+                "low_10": low_10,
+                "vol_ratio": vol_ratio,
+                "htf_trend": direction,
+                "htf_strength": strength,
             },
         }
 
 
 # =============================================================================
-# Strategy 3: Taker Flow (Taker Volume + Order Book Imbalance + L/S Ratio)
+# Strategy 3: OI Momentum (HIGH frequency, 3-8 trades/day)
 # =============================================================================
 
-class TakerFlowGenerator:
-    """Generate signals from taker volume, order book imbalance, and L/S ratio.
+class OIMomentumGenerator:
+    """OI rising + RSI momentum zone = new money entering in one direction.
 
-    Taker volume = real-time aggression (who is market-buying/selling).
-    Order book imbalance = passive liquidity positioning.
-    This is the short-term (1m) strategy — flow data is inherently short-lived.
+    Entry requires ALL 3 conditions (boolean, no scoring):
+    1. 5m RSI(14) in momentum zone: 55-75 (long) or 25-45 (short) — NOT extremes
+    2. OI rising > 1% over last 30min
+    3. Price within 2x ATR(5m) of 20-bar SMA — not chasing extended moves
     """
 
-    def generate_signal(self, df: pd.DataFrame, htf_trend: str = "neutral",
-                        derivatives: dict = None, orderbook: dict = None,
+    def generate_signal(self, df_5m: pd.DataFrame, htf_trend: dict,
+                        derivatives: dict = None, atr_5m: float = 0,
                         **kwargs) -> dict:
-        """Generate signal from taker flow and order book data."""
-        if derivatives is None or not derivatives:
-            return {"signal": "hold", "confidence": 0.5, "reasoning": "No derivatives data",
-                    "indicators": {"htf_trend": htf_trend}}
+        """Generate signal from OI + RSI momentum."""
+        if df_5m is None or len(df_5m) < 30:
+            return hold_signal("Insufficient 5m data", htf_trend)
+        if not derivatives:
+            return hold_signal("No derivatives data", htf_trend)
+        if atr_5m <= 0:
+            return hold_signal("No ATR data", htf_trend)
 
-        prices = df["close"] if not df.empty else pd.Series()
-        current_price = float(prices.iloc[-1]) if len(prices) > 0 else 0
-
-        total_score = 0.0
+        prices = df_5m["close"]
+        current_price = float(prices.iloc[-1])
         reasons = []
 
-        # === TAKER RATIO SCORE (max ±3.0) ===
-        taker_score = self._score_taker_ratio(derivatives, reasons)
-        total_score += taker_score
+        # === CONDITION 1: 5m RSI in momentum zone (NOT extremes) ===
+        rsi_data = calculate_rsi(prices)
+        rsi = rsi_data["value"]
 
-        # === ORDER BOOK SCORE (max ±2.0) ===
-        ob_score = self._score_orderbook(orderbook, current_price, reasons)
-        total_score += ob_score
+        signal_direction = None
+        if 55 <= rsi <= 75:
+            signal_direction = "buy"
+            reasons.append(f"RSI {rsi:.0f} (bullish momentum zone)")
+        elif 25 <= rsi <= 45:
+            signal_direction = "sell"
+            reasons.append(f"RSI {rsi:.0f} (bearish momentum zone)")
+        else:
+            return hold_signal(f"RSI {rsi:.0f} outside momentum zone", htf_trend)
 
-        # === LONG-SHORT RATIO SCORE (max ±1.5, contrarian) ===
-        ls_score = self._score_long_short(derivatives, reasons)
-        total_score += ls_score
+        # === CONDITION 2: OI rising > 1% over last 30min ===
+        oi_history = derivatives.get("oi_history", [])
+        if len(oi_history) < 2:
+            return hold_signal("Insufficient OI data", htf_trend)
 
-        # Determine signal
-        signal_type = "hold"
-        confidence = 0.5
+        current_oi = oi_history[-1]["sum_open_interest_value"]
+        lookback_idx = max(0, len(oi_history) - 7)
+        earlier_oi = oi_history[lookback_idx]["sum_open_interest_value"]
+        oi_change_pct = (current_oi - earlier_oi) / earlier_oi * 100 if earlier_oi > 0 else 0
 
-        if total_score >= 3.5:
-            signal_type = "strong_buy"
-            confidence = min(0.85, 0.60 + abs(total_score) * 0.03)
-        elif total_score >= 2.0:
-            signal_type = "buy"
-            confidence = min(0.75, 0.55 + abs(total_score) * 0.03)
-        elif total_score <= -3.5:
-            signal_type = "strong_sell"
-            confidence = min(0.85, 0.60 + abs(total_score) * 0.03)
-        elif total_score <= -2.0:
-            signal_type = "sell"
-            confidence = min(0.75, 0.55 + abs(total_score) * 0.03)
+        if oi_change_pct < 1.0:
+            return hold_signal(f"OI not rising enough ({oi_change_pct:.2f}%)", htf_trend)
+        reasons.append(f"OI +{oi_change_pct:.2f}% (30min)")
 
-        # === HTF TREND FILTER (soft) ===
-        if htf_trend == "bearish" and signal_type in ("buy", "strong_buy"):
-            confidence = max(0.5, confidence - 0.15)
-            reasons.append("HTF bearish (-15% conf for buy)")
-        elif htf_trend == "bullish" and signal_type in ("sell", "strong_sell"):
-            confidence = max(0.5, confidence - 0.15)
-            reasons.append("HTF bullish (-15% conf for sell)")
-        elif htf_trend == "neutral":
-            confidence = max(0.5, confidence - 0.05)
-            reasons.append("HTF neutral (-5% conf)")
+        # === CONDITION 3: Price within 2x ATR of 20-bar SMA ===
+        sma20 = float(prices.rolling(20).mean().iloc[-1])
+        distance_from_sma = abs(current_price - sma20)
+        max_distance = 2.0 * atr_5m
+
+        if distance_from_sma > max_distance:
+            return hold_signal(f"Price too extended from SMA20 ({distance_from_sma/atr_5m:.1f}x ATR)", htf_trend)
+        reasons.append(f"Price {distance_from_sma/atr_5m:.1f}x ATR from SMA20")
+
+        # All 3 conditions met
+        confidence = 0.68
+
+        # Apply HTF adjustment
+        signal_type = signal_direction
+        confidence = apply_htf_adjustment(signal_type, confidence, htf_trend, reasons)
 
         return {
             "signal": signal_type,
             "confidence": confidence,
-            "reasoning": ", ".join(reasons) if reasons else "No flow signals",
+            "reasoning": ", ".join(reasons),
             "indicators": {
                 "price": current_price,
-                "taker_score": taker_score,
-                "ob_score": ob_score,
-                "ls_score": ls_score,
-                "total_score": total_score,
-                "htf_trend": htf_trend,
+                "rsi": rsi,
+                "oi_change_pct": oi_change_pct,
+                "distance_from_sma_atr": round(distance_from_sma / atr_5m, 2) if atr_5m > 0 else 0,
+                "atr_5m": atr_5m,
+                "htf_trend": htf_trend.get("direction", "neutral"),
+                "htf_strength": htf_trend.get("strength", 0),
             },
         }
 
-    def _score_taker_ratio(self, derivatives: dict, reasons: list) -> float:
-        """Score taker buy/sell ratio (max ±3.0)."""
-        score = 0.0
-
-        # 5m taker ratio (primary)
-        taker_5m = derivatives.get("taker_ratio_5m", [])
-        if taker_5m:
-            ratio = taker_5m[0]["buy_sell_ratio"]
-            if ratio > 1.3:
-                score = 2.0
-                reasons.append(f"5m taker ratio {ratio:.2f} (aggressive buying)")
-            elif ratio > 1.1:
-                score = 1.0
-                reasons.append(f"5m taker ratio {ratio:.2f} (buying)")
-            elif ratio < 0.77:
-                score = -2.0
-                reasons.append(f"5m taker ratio {ratio:.2f} (aggressive selling)")
-            elif ratio < 0.91:
-                score = -1.0
-                reasons.append(f"5m taker ratio {ratio:.2f} (selling)")
-
-        # 15m confirmation adds ±1.0
-        taker_15m = derivatives.get("taker_ratio_15m", [])
-        if taker_15m and abs(score) > 0:
-            ratio_15m = taker_15m[0]["buy_sell_ratio"]
-            if score > 0 and ratio_15m > 1.1:
-                score += 1.0
-                reasons.append(f"15m confirms buying ({ratio_15m:.2f})")
-            elif score < 0 and ratio_15m < 0.91:
-                score += -1.0
-                reasons.append(f"15m confirms selling ({ratio_15m:.2f})")
-
-        return max(-3.0, min(3.0, score))
-
-    def _score_orderbook(self, orderbook: dict, current_price: float, reasons: list) -> float:
-        """Score order book imbalance (max ±2.0)."""
-        score = 0.0
-        if not orderbook or current_price <= 0:
-            return 0.0
-
-        bids = orderbook.get("bids", [])
-        asks = orderbook.get("asks", [])
-        if not bids or not asks:
-            return 0.0
-
-        # Calculate volume within 0.5% of current price
-        price_range = current_price * 0.005
-        bid_vol = sum(q for p, q in bids if p >= current_price - price_range)
-        ask_vol = sum(q for p, q in asks if p <= current_price + price_range)
-        total_vol = bid_vol + ask_vol
-
-        if total_vol <= 0:
-            return 0.0
-
-        bid_pct = bid_vol / total_vol
-
-        if bid_pct > 0.65:
-            score = 1.5
-            reasons.append(f"OB bid heavy ({bid_pct:.0%}) → support")
-        elif bid_pct < 0.35:
-            score = -1.5
-            reasons.append(f"OB ask heavy ({1-bid_pct:.0%}) → resistance")
-
-        # Whale order detection: any single order > 5x average
-        all_orders = bids + asks
-        if all_orders:
-            avg_size = sum(q for _, q in all_orders) / len(all_orders)
-            for p, q in bids:
-                if q > avg_size * 5 and p >= current_price - price_range:
-                    score += 0.5
-                    reasons.append(f"Whale bid ${p:,.0f}")
-                    break
-            for p, q in asks:
-                if q > avg_size * 5 and p <= current_price + price_range:
-                    score -= 0.5
-                    reasons.append(f"Whale ask ${p:,.0f}")
-                    break
-
-        return max(-2.0, min(2.0, score))
-
-    def _score_long_short(self, derivatives: dict, reasons: list) -> float:
-        """Score top trader L/S ratio (max ±1.5, contrarian)."""
-        score = 0.0
-        ls_data = derivatives.get("top_long_short", [])
-        if not ls_data:
-            return 0.0
-
-        long_pct = ls_data[0]["long_account"]  # Already 0-1
-
-        # Contrarian: crowded longs = bearish, crowded shorts = bullish
-        if long_pct > 0.71:
-            score = -1.5
-            reasons.append(f"Top traders {long_pct:.0%} long (crowded → contrarian short)")
-        elif long_pct > 0.62:
-            score = -0.5
-            reasons.append(f"Top traders {long_pct:.0%} long (leaning long)")
-        elif long_pct < 0.38:  # i.e. >62% short
-            score = 1.5
-            reasons.append(f"Top traders {1-long_pct:.0%} short (crowded → contrarian long)")
-        elif long_pct < 0.48:  # i.e. >52% short
-            score = 0.5
-            reasons.append(f"Top traders {1-long_pct:.0%} short (leaning short)")
-
-        return score
-
 
 # =============================================================================
-# Strategy Config + Paper Trader
+# Strategy Config + Position Sizing
 # =============================================================================
 
 @dataclass
 class StrategyConfig:
     """Configuration for a trading strategy."""
-    name: str                        # "funding_sentiment", "volatility_squeeze", "taker_flow"
-    strategy_type: str               # "funding", "squeeze", "taker"
+    name: str                        # "funding_reversion", "trend_breakout", "oi_momentum"
+    strategy_type: str               # "funding", "breakout", "oi"
     generator: object                # Signal generator instance
-    stop_loss_pct: float             # e.g., 0.015
-    take_profit_pct: float           # e.g., 0.040
-    trailing_activation_pct: float   # e.g., 0.020
-    trailing_distance_pct: float     # e.g., 0.010
-    max_position_hours: float        # e.g., 8.0
+    sl_atr_mult: float               # SL as multiple of ATR
+    tp_atr_mult: float               # TP as multiple of ATR
+    trailing_atr_mult: float         # Trailing activation as multiple of ATR
+    trailing_dist_atr_mult: float    # Trailing distance as multiple of ATR
+    max_position_hours: float        # Max hold time
+    risk_per_trade_pct: float        # Risk % of capital per trade (e.g. 0.02 = 2%)
     capital: float                   # Allocated capital
+    atr_timeframe: str = "1h"        # Which timeframe to compute ATR on
 
     @property
     def rr_ratio(self) -> float:
-        return self.take_profit_pct / self.stop_loss_pct if self.stop_loss_pct > 0 else 0
+        return self.tp_atr_mult / self.sl_atr_mult if self.sl_atr_mult > 0 else 0
 
     @property
     def source_label(self) -> str:
         """Signal source label for DB."""
-        return self.strategy_type  # "funding", "squeeze", "taker"
+        return self.strategy_type
+
+
+def calculate_position_size(capital: float, risk_pct: float, sl_distance_pct: float,
+                            leverage: int, price: float, max_margin_pct: float = 0.30) -> tuple[float, float]:
+    """Calculate position size based on risk per trade.
+
+    Args:
+        capital: Available capital
+        risk_pct: Fraction of capital to risk (e.g. 0.02 = 2%)
+        sl_distance_pct: Stop loss distance as fraction of price (e.g. 0.015 = 1.5%)
+        leverage: Leverage multiplier
+        price: Current price
+        max_margin_pct: Maximum margin as fraction of capital (cap at 30%)
+
+    Returns:
+        (quantity, margin) tuple
+    """
+    risk_amount = capital * risk_pct  # e.g. $1000 * 0.02 = $20 risked
+    # Position value needed so that SL distance = risk_amount
+    # position_value * sl_distance_pct = risk_amount
+    if sl_distance_pct <= 0:
+        return 0.0, 0.0
+    position_value = risk_amount / sl_distance_pct
+    margin = position_value / leverage
+
+    # Cap margin at max_margin_pct of capital
+    max_margin = capital * max_margin_pct
+    if margin > max_margin:
+        margin = max_margin
+        position_value = margin * leverage
+
+    quantity = position_value / price
+    return quantity, margin
 
 
 # Strategy name mapping for backward compat with old trades
@@ -721,6 +503,9 @@ LEGACY_STRATEGY_MAP = {
     "agreement_classic": "agreement_classic",
     "agreement_mtf": "agreement_mtf",
     "momentum": "momentum",
+    "funding_sentiment": "funding_sentiment",
+    "volatility_squeeze": "volatility_squeeze",
+    "taker_flow": "taker_flow",
 }
 
 
@@ -732,7 +517,6 @@ class SimplePaperTrader:
         symbols: list[str] = ["BTCUSDT"],
         strategies: list[StrategyConfig] = None,
         initial_capital: float = 1000.0,
-        max_position_pct: float = 0.20,
         leverage: int = 10,
         check_interval: int = 60,
         signal_exit_min_confidence: float = 0.70,
@@ -740,7 +524,6 @@ class SimplePaperTrader:
         stale_position_min_profit_pct: float = 0.005,
     ):
         self.symbols = symbols
-        self.max_position_pct = max_position_pct
         self.leverage = leverage
         self.check_interval = check_interval
         self.signal_exit_min_confidence = signal_exit_min_confidence
@@ -754,15 +537,17 @@ class SimplePaperTrader:
         if strategies is None:
             strategies = [
                 StrategyConfig(
-                    name="funding_sentiment",
+                    name="funding_reversion",
                     strategy_type="funding",
-                    generator=FundingSentimentGenerator(),
-                    stop_loss_pct=0.015,
-                    take_profit_pct=0.040,
-                    trailing_activation_pct=0.020,
-                    trailing_distance_pct=0.010,
-                    max_position_hours=8.0,
+                    generator=FundingMeanReversionGenerator(),
+                    sl_atr_mult=2.0,
+                    tp_atr_mult=4.0,
+                    trailing_atr_mult=3.0,
+                    trailing_dist_atr_mult=1.5,
+                    max_position_hours=12.0,
+                    risk_per_trade_pct=0.02,
                     capital=initial_capital,
+                    atr_timeframe="1h",
                 ),
             ]
 
@@ -865,13 +650,28 @@ class SimplePaperTrader:
                     else:
                         entry_time = datetime.now(timezone.utc)
 
-                    # Calculate stop/take profit using strategy-specific params
+                    # Use stored SL/TP pct if available, otherwise use defaults
+                    sl_pct = trade.get("indicators_at_entry", {}).get("sl_pct") if trade.get("indicators_at_entry") else None
+                    tp_pct = trade.get("indicators_at_entry", {}).get("tp_pct") if trade.get("indicators_at_entry") else None
+                    trailing_act_pct = trade.get("indicators_at_entry", {}).get("trailing_act_pct") if trade.get("indicators_at_entry") else None
+                    trailing_dist_pct = trade.get("indicators_at_entry", {}).get("trailing_dist_pct") if trade.get("indicators_at_entry") else None
+
+                    # Fallback to reasonable defaults if not stored
+                    if sl_pct is None:
+                        sl_pct = 0.02
+                    if tp_pct is None:
+                        tp_pct = 0.04
+                    if trailing_act_pct is None:
+                        trailing_act_pct = 0.03
+                    if trailing_dist_pct is None:
+                        trailing_dist_pct = 0.015
+
                     if side == "long":
-                        stop_price = entry_price * (1 - strategy.stop_loss_pct)
-                        take_profit_price = entry_price * (1 + strategy.take_profit_pct)
+                        stop_price = entry_price * (1 - sl_pct)
+                        take_profit_price = entry_price * (1 + tp_pct)
                     else:
-                        stop_price = entry_price * (1 + strategy.stop_loss_pct)
-                        take_profit_price = entry_price * (1 - strategy.take_profit_pct)
+                        stop_price = entry_price * (1 + sl_pct)
+                        take_profit_price = entry_price * (1 - tp_pct)
 
                     pos_key = self._pos_key(strategy_name, symbol)
                     self.positions[pos_key] = {
@@ -886,6 +686,10 @@ class SimplePaperTrader:
                         "stop_loss_price": stop_price,
                         "take_profit_price": take_profit_price,
                         "strategy_name": strategy_name,
+                        "sl_pct": sl_pct,
+                        "tp_pct": tp_pct,
+                        "trailing_act_pct": trailing_act_pct,
+                        "trailing_dist_pct": trailing_dist_pct,
                     }
 
                     hours_open = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
@@ -909,14 +713,18 @@ class SimplePaperTrader:
         await self._load_existing_positions()
 
         logger.info("=" * 70)
-        logger.info("🚀 Starting v5.1 Derivatives-Data Paper Trading")
+        logger.info("🚀 Starting v6.0 Evidence-Based Paper Trading")
         logger.info(f"   Symbols: {self.symbols}")
         logger.info(f"   Total Capital: ${self.initial_capital:,.2f} | Leverage: {self.leverage}x")
         logger.info("-" * 70)
         for s in self.strategies:
-            logger.info(f"   📋 {s.name}: ${s.capital:,.2f} | SL={s.stop_loss_pct:.1%} TP={s.take_profit_pct:.1%} R:R={s.rr_ratio:.1f}:1 | Max hold: {s.max_position_hours}h")
+            logger.info(
+                f"   📋 {s.name}: ${s.capital:,.2f} | "
+                f"SL={s.sl_atr_mult}x ATR({s.atr_timeframe}) TP={s.tp_atr_mult}x ATR | "
+                f"R:R={s.rr_ratio:.1f}:1 | Risk={s.risk_per_trade_pct:.1%}/trade | Max hold: {s.max_position_hours}h"
+            )
         logger.info("-" * 70)
-        logger.info(f"   Position size: {self.max_position_pct:.0%} margin | SL cooldown: {self.stop_loss_cooldown_minutes}min")
+        logger.info(f"   SL cooldown: {self.stop_loss_cooldown_minutes}min | Max daily SL: {self.max_daily_stop_losses}")
         logger.info("=" * 70)
 
         collector = MarketDataCollector()
@@ -956,29 +764,26 @@ class SimplePaperTrader:
     async def _fetch_market_data(self, symbol: str, collector: MarketDataCollector) -> dict | None:
         """Fetch all needed data for a symbol (candles + derivatives)."""
         try:
-            # Parallel fetch: 1m candles, 1h candles, ticker, derivatives, orderbook
-            # Also fetch 4h candles if squeeze strategy is active
-            fetch_4h = any(s.strategy_type == "squeeze" for s in self.strategies)
-            fetch_derivatives = any(s.strategy_type in ("funding", "taker") for s in self.strategies)
-            fetch_orderbook = any(s.strategy_type == "taker" for s in self.strategies)
+            # Parallel fetch: 1m, 5m, 15m, 1h candles + ticker + derivatives
+            needs_derivatives = any(s.strategy_type in ("funding", "oi") for s in self.strategies)
 
             tasks = [
                 collector.get_binance_klines(symbol, "1m", 100),
+                collector.get_binance_klines(symbol, "5m", 100),
+                collector.get_binance_klines(symbol, "15m", 100),
                 collector.get_binance_klines(symbol, "1h", 100),
                 collector.get_binance_ticker(symbol),
             ]
-            if fetch_4h:
-                tasks.append(collector.get_binance_klines(symbol, "4h", 50))
-            if fetch_derivatives:
+            if needs_derivatives:
                 tasks.append(collector.get_derivatives_data(symbol))
-            if fetch_orderbook:
-                tasks.append(collector.get_orderbook(symbol, 100))
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             df_1m = results[0] if not isinstance(results[0], Exception) else pd.DataFrame()
-            df_1h = results[1] if not isinstance(results[1], Exception) else pd.DataFrame()
-            ticker = results[2] if not isinstance(results[2], Exception) else {}
+            df_5m = results[1] if not isinstance(results[1], Exception) else pd.DataFrame()
+            df_15m = results[2] if not isinstance(results[2], Exception) else pd.DataFrame()
+            df_1h = results[3] if not isinstance(results[3], Exception) else pd.DataFrame()
+            ticker = results[4] if not isinstance(results[4], Exception) else {}
 
             if df_1m.empty:
                 return None
@@ -989,20 +794,15 @@ class SimplePaperTrader:
 
             market_data = {
                 "1m": df_1m,
+                "5m": df_5m,
+                "15m": df_15m,
                 "1h": df_1h,
                 "current_price": current_price,
             }
 
-            idx = 3
-            if fetch_4h:
-                market_data["4h"] = results[idx] if not isinstance(results[idx], Exception) else pd.DataFrame()
-                idx += 1
-            if fetch_derivatives:
+            if needs_derivatives:
+                idx = 5
                 market_data["derivatives"] = results[idx] if not isinstance(results[idx], Exception) else {}
-                idx += 1
-            if fetch_orderbook:
-                market_data["orderbook"] = results[idx] if not isinstance(results[idx], Exception) else {}
-                idx += 1
 
             return market_data
         except Exception as e:
@@ -1016,10 +816,19 @@ class SimplePaperTrader:
             df_1h = market_data["1h"]
             current_price = market_data["current_price"]
 
-            # Determine HTF trend (shared 1h analysis)
-            htf_trend = "neutral"
+            # Determine HTF trend (shared 1h analysis) — now returns dict
+            htf_trend = {"direction": "neutral", "strength": 0.0, "slope": 0.0}
             if not df_1h.empty:
                 htf_trend = determine_htf_trend(df_1h)
+
+            # Compute ATR for this strategy's timeframe
+            atr_df_map = {
+                "1h": df_1h,
+                "15m": market_data.get("15m", pd.DataFrame()),
+                "5m": market_data.get("5m", pd.DataFrame()),
+            }
+            atr_df = atr_df_map.get(strategy.atr_timeframe, df_1h)
+            atr_value = calculate_atr(atr_df) if not atr_df.empty else 0
 
             # Generate signal based on strategy type
             if strategy.strategy_type == "funding":
@@ -1027,39 +836,41 @@ class SimplePaperTrader:
                     df_1m, htf_trend,
                     derivatives=market_data.get("derivatives"),
                 )
-            elif strategy.strategy_type == "squeeze":
+            elif strategy.strategy_type == "breakout":
                 signal_result = strategy.generator.generate_signal(
-                    df_1m, htf_trend,
-                    df_4h=market_data.get("4h"),
-                    df_1m=df_1m,
+                    market_data.get("15m", pd.DataFrame()), htf_trend,
                 )
-            elif strategy.strategy_type == "taker":
+            elif strategy.strategy_type == "oi":
+                df_5m = market_data.get("5m", pd.DataFrame())
+                atr_5m = calculate_atr(df_5m) if not df_5m.empty else 0
                 signal_result = strategy.generator.generate_signal(
-                    df_1m, htf_trend,
+                    df_5m, htf_trend,
                     derivatives=market_data.get("derivatives"),
-                    orderbook=market_data.get("orderbook"),
+                    atr_5m=atr_5m,
                 )
             else:
                 signal_result = {"signal": "hold", "confidence": 0.5,
                                  "reasoning": f"Unknown strategy type: {strategy.strategy_type}"}
 
             # Determine timeframe label for DB
-            timeframe = "4h" if strategy.strategy_type == "squeeze" else "1m"
+            tf_map = {"funding": "1h", "breakout": "15m", "oi": "5m"}
+            timeframe = tf_map.get(strategy.strategy_type, "1m")
 
             # Save signal to DB
             await self._save_signal(symbol, signal_result, current_price, strategy, timeframe)
 
-            # Trading logic
+            # Trading logic — pass ATR for position sizing
             pos_key = self._pos_key(strategy.name, symbol)
             if pos_key in self.positions:
                 await self._check_exit(pos_key, signal_result, current_price, strategy)
             else:
-                await self._check_entry(pos_key, symbol, signal_result, current_price, strategy)
+                await self._check_entry(pos_key, symbol, signal_result, current_price, strategy, atr_value)
 
         except Exception as e:
             logger.error(f"Error processing [{strategy.name}] {symbol}: {e}")
 
-    async def _check_entry(self, pos_key: str, symbol: str, signal: dict, price: float, strategy: StrategyConfig):
+    async def _check_entry(self, pos_key: str, symbol: str, signal: dict, price: float,
+                           strategy: StrategyConfig, atr_value: float):
         """Check if should enter a position for a given strategy."""
         if pos_key in self.positions:
             return
@@ -1106,9 +917,9 @@ class SimplePaperTrader:
             return
 
         if signal["signal"] in ["buy", "strong_buy"]:
-            await self._open_position(pos_key, symbol, "long", price, signal, strategy)
+            await self._open_position(pos_key, symbol, "long", price, signal, strategy, atr_value)
         elif signal["signal"] in ["sell", "strong_sell"]:
-            await self._open_position(pos_key, symbol, "short", price, signal, strategy)
+            await self._open_position(pos_key, symbol, "short", price, signal, strategy, atr_value)
 
     async def _check_exit(self, pos_key: str, signal: dict, price: float, strategy: StrategyConfig):
         """Check if should exit a leveraged position.
@@ -1128,8 +939,14 @@ class SimplePaperTrader:
 
         pnl_pct = self._calculate_pnl_pct(position, price)
 
+        # Use position-stored SL/TP pct (computed at entry from ATR)
+        sl_pct = position.get("sl_pct", 0.02)
+        tp_pct = position.get("tp_pct", 0.04)
+        trailing_act_pct = position.get("trailing_act_pct", 0.03)
+        trailing_dist_pct = position.get("trailing_dist_pct", 0.015)
+
         # Update peak profit and trailing stop
-        self._update_trailing_stop(pos_key, pnl_pct, strategy)
+        self._update_trailing_stop(pos_key, pnl_pct, trailing_act_pct)
 
         should_exit = False
         exit_reason = ""
@@ -1142,7 +959,7 @@ class SimplePaperTrader:
             logger.warning(f"⚠️ Position liquidated! [{strategy.name}] {pos_key}")
 
         # 1. TAKE PROFIT
-        elif pnl_pct >= strategy.take_profit_pct:
+        elif pnl_pct >= tp_pct:
             should_exit = True
             roe = pnl_pct * self.leverage * 100
             exit_reason = f"Take profit ({pnl_pct:.2%} = +{roe:.0f}% ROE)"
@@ -1150,13 +967,13 @@ class SimplePaperTrader:
         # 2. TRAILING STOP
         elif position.get("trailing_stop_active", False):
             peak_pnl = position.get("peak_pnl_pct", 0)
-            trailing_stop_level = peak_pnl - strategy.trailing_distance_pct
+            trailing_stop_level = peak_pnl - trailing_dist_pct
             if pnl_pct <= trailing_stop_level:
                 should_exit = True
                 exit_reason = f"Trailing stop (peak: {peak_pnl:.2%}, current: {pnl_pct:.2%})"
 
         # 3. STOP LOSS
-        elif pnl_pct <= -strategy.stop_loss_pct:
+        elif pnl_pct <= -sl_pct:
             should_exit = True
             roe = pnl_pct * self.leverage * 100
             exit_reason = f"Stop loss ({pnl_pct:.2%} = {roe:.0f}% ROE)"
@@ -1171,8 +988,8 @@ class SimplePaperTrader:
             hours_open = (datetime.now(timezone.utc) - position["entry_time"]).total_seconds() / 3600
             exit_reason = f"Stale position ({hours_open:.1f}h, only {pnl_pct:.2%} profit)"
 
-        # 5. RSI-BASED PROFIT TAKING (using 1m data if available)
-        elif self._should_exit_on_rsi(position, signal, pnl_pct, strategy):
+        # 5. RSI-BASED PROFIT TAKING (using signal indicators)
+        elif self._should_exit_on_rsi(position, signal, pnl_pct, trailing_act_pct):
             indicators = signal.get("indicators", {})
             rsi = indicators.get("rsi", 50)
             should_exit = True
@@ -1195,40 +1012,42 @@ class SimplePaperTrader:
                 return True
         return False
 
-    def _should_exit_on_rsi(self, position: dict, signal: dict, pnl_pct: float, strategy: StrategyConfig) -> bool:
+    def _should_exit_on_rsi(self, position: dict, signal: dict, pnl_pct: float,
+                            trailing_act_pct: float) -> bool:
         """Exit profitable positions when RSI indicates overbought/oversold reversal."""
-        if pnl_pct < strategy.trailing_activation_pct:
+        if pnl_pct < trailing_act_pct:
             return False
 
         indicators = signal.get("indicators", {})
         rsi = indicators.get("rsi", 50)
-        rsi_momentum = indicators.get("rsi_momentum", "")
         side = position.get("side")
 
-        if side == "long" and rsi > 80 and rsi_momentum == "falling":
+        if side == "long" and rsi > 80:
             return True
-        if side == "short" and rsi < 20 and rsi_momentum == "rising":
+        if side == "short" and rsi < 20:
             return True
         return False
 
-    def _update_trailing_stop(self, pos_key: str, current_pnl_pct: float, strategy: StrategyConfig):
+    def _update_trailing_stop(self, pos_key: str, current_pnl_pct: float, trailing_act_pct: float):
         """Update trailing stop based on current P&L."""
         position = self.positions.get(pos_key)
         if not position:
             return
 
-        if current_pnl_pct >= strategy.trailing_activation_pct:
+        if current_pnl_pct >= trailing_act_pct:
             if not position.get("trailing_stop_active", False):
                 position["trailing_stop_active"] = True
                 position["peak_pnl_pct"] = current_pnl_pct
                 _, symbol = self._parse_pos_key(pos_key)
+                strategy_name = position.get("strategy_name", "")
                 logger.info(
-                    f"🔒 Trailing stop activated [{strategy.name}] {symbol} at {current_pnl_pct:.2%}"
+                    f"🔒 Trailing stop activated [{strategy_name}] {symbol} at {current_pnl_pct:.2%}"
                 )
             elif current_pnl_pct > position.get("peak_pnl_pct", 0):
                 position["peak_pnl_pct"] = current_pnl_pct
                 _, symbol = self._parse_pos_key(pos_key)
-                logger.debug(f"📈 [{strategy.name}] {symbol} new peak: {current_pnl_pct:.2%}")
+                strategy_name = position.get("strategy_name", "")
+                logger.debug(f"📈 [{strategy_name}] {symbol} new peak: {current_pnl_pct:.2%}")
 
     def _should_exit_on_signal(self, position: dict, signal: dict, pnl_pct: float) -> bool:
         """Determine if should exit based on opposite signal."""
@@ -1267,23 +1086,48 @@ class SimplePaperTrader:
             return (entry_price - current_price) / entry_price
 
     async def _open_position(self, pos_key: str, symbol: str, side: str, price: float,
-                              signal: dict, strategy: StrategyConfig):
-        """Open a leveraged position."""
+                              signal: dict, strategy: StrategyConfig, atr_value: float):
+        """Open a leveraged position with ATR-based stops and risk-based sizing."""
         stats = self.strategy_stats[strategy.name]
 
-        # Margin = strategy capital * position percentage
-        margin = stats["capital"] * self.max_position_pct
-        position_value = margin * self.leverage
-        quantity = position_value / price
+        # Compute ATR-based SL/TP as percentages of price
+        if atr_value <= 0:
+            # Fallback: use 1.5% SL if ATR unavailable
+            atr_value = price * 0.015
+
+        sl_distance = atr_value * strategy.sl_atr_mult
+        tp_distance = atr_value * strategy.tp_atr_mult
+        trailing_act_distance = atr_value * strategy.trailing_atr_mult
+        trailing_dist_distance = atr_value * strategy.trailing_dist_atr_mult
+
+        sl_pct = sl_distance / price
+        tp_pct = tp_distance / price
+        trailing_act_pct = trailing_act_distance / price
+        trailing_dist_pct = trailing_dist_distance / price
+
+        # Risk-based position sizing
+        quantity, margin = calculate_position_size(
+            capital=stats["capital"],
+            risk_pct=strategy.risk_per_trade_pct,
+            sl_distance_pct=sl_pct,
+            leverage=self.leverage,
+            price=price,
+        )
+
+        if quantity <= 0:
+            logger.warning(f"   [{strategy.name}] {symbol}: Position size too small, skipping")
+            return
+
+        position_value = quantity * price
 
         # Calculate stop loss, take profit, and liquidation prices
         if side == "long":
-            stop_price = price * (1 - strategy.stop_loss_pct)
-            take_profit_price = price * (1 + strategy.take_profit_pct)
+            stop_price = price * (1 - sl_pct)
+            take_profit_price = price * (1 + tp_pct)
             liquidation_price = price * (1 - self.liquidation_pct)
         else:
-            stop_price = price * (1 + strategy.stop_loss_pct)
-            take_profit_price = price * (1 - strategy.take_profit_pct)
+            stop_price = price * (1 + sl_pct)
+            take_profit_price = price * (1 - tp_pct)
             liquidation_price = price * (1 + self.liquidation_pct)
 
         self.positions[pos_key] = {
@@ -1301,6 +1145,11 @@ class SimplePaperTrader:
             "take_profit_price": take_profit_price,
             "liquidation_price": liquidation_price,
             "strategy_name": strategy.name,
+            # Store computed pct on position for exit checks
+            "sl_pct": sl_pct,
+            "tp_pct": tp_pct,
+            "trailing_act_pct": trailing_act_pct,
+            "trailing_dist_pct": trailing_dist_pct,
         }
 
         logger.info(
@@ -1309,13 +1158,21 @@ class SimplePaperTrader:
             f"Conf: {signal['confidence']:.0%}"
         )
         logger.info(
-            f"   └─ SL: ${stop_price:,.2f} ({strategy.stop_loss_pct:.1%}) | "
-            f"TP: ${take_profit_price:,.2f} ({strategy.take_profit_pct:.1%}) | "
-            f"Liq: ${liquidation_price:,.2f}"
+            f"   └─ SL: ${stop_price:,.2f} ({sl_pct:.2%}) | "
+            f"TP: ${take_profit_price:,.2f} ({tp_pct:.2%}) | "
+            f"ATR: ${atr_value:,.2f} | Risk: ${stats['capital'] * strategy.risk_per_trade_pct:,.2f}"
         )
 
         # Log to Supabase
         try:
+            indicators = signal.get("indicators", {})
+            # Store ATR-computed params for position reload
+            indicators["sl_pct"] = sl_pct
+            indicators["tp_pct"] = tp_pct
+            indicators["trailing_act_pct"] = trailing_act_pct
+            indicators["trailing_dist_pct"] = trailing_dist_pct
+            indicators["atr_value"] = atr_value
+
             await self.trade_repo.log_trade({
                 "position_id": self.positions[pos_key]["position_id"],
                 "symbol": symbol,
@@ -1328,7 +1185,7 @@ class SimplePaperTrader:
                 "signal_source": strategy.source_label,
                 "signal_confidence": signal["confidence"],
                 "entry_reasoning": signal["reasoning"],
-                "indicators_at_entry": signal.get("indicators"),
+                "indicators_at_entry": indicators,
             })
         except Exception as e:
             logger.error(f"Failed to log trade: {e}")
@@ -1541,7 +1398,7 @@ async def main():
     """Main function."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="v5.1 Derivatives-Data Paper Trading")
+    parser = argparse.ArgumentParser(description="v6.0 Evidence-Based Paper Trading")
     parser.add_argument(
         "--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT", "XRPUSDT"],
         help="Symbols to trade"
@@ -1560,8 +1417,8 @@ async def main():
     )
     parser.add_argument(
         "--strategies", nargs="+",
-        default=["funding_sentiment", "volatility_squeeze", "taker_flow"],
-        choices=["funding_sentiment", "volatility_squeeze", "taker_flow"],
+        default=["funding_reversion", "trend_breakout", "oi_momentum"],
+        choices=["funding_reversion", "trend_breakout", "oi_momentum"],
         help="Strategies to run (default: all three)"
     )
 
@@ -1585,41 +1442,47 @@ async def main():
 
     strategy_configs = []
     for name in selected:
-        if name == "funding_sentiment":
+        if name == "funding_reversion":
             strategy_configs.append(StrategyConfig(
-                name="funding_sentiment",
+                name="funding_reversion",
                 strategy_type="funding",
-                generator=FundingSentimentGenerator(),
-                stop_loss_pct=0.015,
-                take_profit_pct=0.040,
-                trailing_activation_pct=0.020,
-                trailing_distance_pct=0.010,
-                max_position_hours=8.0,
-                capital=capital_per_strategy,
-            ))
-        elif name == "volatility_squeeze":
-            strategy_configs.append(StrategyConfig(
-                name="volatility_squeeze",
-                strategy_type="squeeze",
-                generator=VolatilitySqueezeGenerator(),
-                stop_loss_pct=0.010,
-                take_profit_pct=0.030,
-                trailing_activation_pct=0.015,
-                trailing_distance_pct=0.007,
+                generator=FundingMeanReversionGenerator(),
+                sl_atr_mult=2.0,
+                tp_atr_mult=4.0,
+                trailing_atr_mult=3.0,
+                trailing_dist_atr_mult=1.5,
                 max_position_hours=12.0,
+                risk_per_trade_pct=0.02,
                 capital=capital_per_strategy,
+                atr_timeframe="1h",
             ))
-        elif name == "taker_flow":
+        elif name == "trend_breakout":
             strategy_configs.append(StrategyConfig(
-                name="taker_flow",
-                strategy_type="taker",
-                generator=TakerFlowGenerator(),
-                stop_loss_pct=0.008,
-                take_profit_pct=0.016,
-                trailing_activation_pct=0.008,
-                trailing_distance_pct=0.004,
-                max_position_hours=2.0,
+                name="trend_breakout",
+                strategy_type="breakout",
+                generator=TrendBreakoutGenerator(),
+                sl_atr_mult=1.5,
+                tp_atr_mult=3.0,
+                trailing_atr_mult=2.0,
+                trailing_dist_atr_mult=1.0,
+                max_position_hours=6.0,
+                risk_per_trade_pct=0.02,
                 capital=capital_per_strategy,
+                atr_timeframe="15m",
+            ))
+        elif name == "oi_momentum":
+            strategy_configs.append(StrategyConfig(
+                name="oi_momentum",
+                strategy_type="oi",
+                generator=OIMomentumGenerator(),
+                sl_atr_mult=1.5,
+                tp_atr_mult=2.5,
+                trailing_atr_mult=1.5,
+                trailing_dist_atr_mult=0.8,
+                max_position_hours=3.0,
+                risk_per_trade_pct=0.015,
+                capital=capital_per_strategy,
+                atr_timeframe="5m",
             ))
 
     # Create trader

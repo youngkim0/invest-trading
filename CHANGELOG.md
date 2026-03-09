@@ -1,5 +1,34 @@
 # Paper Trader Changelog
 
+## v6.0 — Evidence-Based Strategy Redesign (2026-03-09)
+
+**Problem**: v5.0-5.1 strategies all failed: funding_sentiment (0 trades — 8h funding data too slow), volatility_squeeze (0 trades — BB/KC squeeze too rare in crypto), taker_flow (5 trades, 25% WR, -$58 — 1m data too noisy, 0.8% SL too tight). Historical analysis shows the 1h HTF trend filter was the ONLY consistently profitable edge (v3.6 achieved 53% WR with it). Research confirms: funding rate mean reversion has strongest evidence (Sharpe 1.4-2.3), OI works as confirmer not standalone, ATR-based stops >> fixed %.
+
+**Solution**: Replace all 3 strategy generators with simpler, evidence-based designs using boolean conditions (no additive scoring), ATR-based dynamic stops, and risk-based position sizing.
+
+**3 New Strategies**:
+
+1. **Funding Reversion** (`funding_reversion`) — Contrarian funding rate mean reversion. Entry: funding > 0.05% (short) or < -0.03% (long) + OI rising > 0.5% (30min) + price hasn't reversed > 0.5% (1h). SL 2.0x ATR(1h), TP 4.0x ATR(1h), trailing 3.0x/1.5x ATR, max 12h, R:R 2:1, 2% risk/trade. LOW frequency (0-2/day).
+
+2. **Trend Breakout** (`trend_breakout`) — Trade 15m breakouts WITH the 1h trend. Entry: HTF trend strength > 0.3 + 15m close above 10-bar high/low + volume > 1.2x avg. SL 1.5x ATR(15m), TP 3.0x ATR(15m), trailing 2.0x/1.0x ATR, max 6h, R:R 2:1, 2% risk/trade. MEDIUM frequency (2-5/day).
+
+3. **OI Momentum** (`oi_momentum`) — OI rising + RSI in momentum zone. Entry: 5m RSI 55-75 (long) or 25-45 (short) + OI rising > 1% (30min) + price within 2x ATR of SMA20. SL 1.5x ATR(5m), TP 2.5x ATR(5m), trailing 1.5x/0.8x ATR, max 3h, R:R 1.67:1, 1.5% risk/trade. HIGH frequency (3-8/day).
+
+**Key architectural changes**:
+
+- **ATR-based dynamic stops**: `calculate_atr()` standalone function. SL/TP computed at entry as ATR multiples, stored on position as pct for exit checks. Adapts per-asset and per-market-volatility automatically.
+- **Risk-based position sizing**: `calculate_position_size()` — risk 1.5-2% capital per trade, capped at 30% margin. Replaces flat 20% margin allocation.
+- **HTF trend returns dict**: `determine_htf_trend()` now returns `{direction, strength, slope}`. `apply_htf_adjustment()` modulates confidence by trend strength instead of hard-blocking.
+- **Simple boolean conditions**: Each strategy checks 3 binary conditions. ALL must be true. No additive scoring = fewer parameters = less overfitting.
+- **New candle fetches**: Added 5m + 15m klines. Removed 4h.
+- **Position stores ATR params**: `sl_pct`, `tp_pct`, `trailing_act_pct`, `trailing_dist_pct` computed at entry from ATR and stored on position dict + DB indicators_at_entry. Exit logic reads from position, not strategy config.
+
+**Removed**: `FundingSentimentGenerator`, `VolatilitySqueezeGenerator`, `TakerFlowGenerator`, 4h candle fetch, `max_position_pct` (replaced by risk-based sizing), fixed SL/TP percentages on StrategyConfig.
+
+**Dashboard**: Updated strategy selector, badge mappings, comparison table, version string for v6.0 strategy names.
+
+---
+
 ## v5.1 — Tuned Thresholds + Soft HTF Filter + DB Fix (2026-03-09)
 
 **Problem**: After 6 hours of v5.0 running, only taker_flow generated trades (5 trades, all SHORT, 25% WR, -$54). funding_sentiment and volatility_squeeze had zero trades due to:
