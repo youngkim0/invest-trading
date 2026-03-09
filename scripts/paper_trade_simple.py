@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Multi-strategy paper trading script using Binance real-time data and Supabase.
 
-v5.0 — Derivatives-Data Signal Strategies:
+v5.1 — Tuned thresholds + soft HTF filter + DB fix:
 - funding_sentiment: Funding rate + OI divergence + basis scoring
 - volatility_squeeze: Bollinger Band squeeze + Keltner breakout on 4h candles
 - taker_flow: Taker volume + order book imbalance + L/S ratio
@@ -56,6 +56,7 @@ def determine_htf_trend(df_1h: pd.DataFrame) -> str:
     """Determine higher-timeframe trend from 1h candles.
 
     Returns 'bullish', 'bearish', or 'neutral'.
+    Neutral when SMAs are converging (< 0.3% apart) = ranging market.
     """
     if len(df_1h) < 50:
         return "neutral"
@@ -66,6 +67,11 @@ def determine_htf_trend(df_1h: pd.DataFrame) -> str:
     current_price = float(prices.iloc[-1])
     sma20_val = float(sma20.iloc[-1])
     sma50_val = float(sma50.iloc[-1])
+
+    # If SMAs are within 0.3% of each other, market is ranging — return neutral
+    sma_spread = abs(sma20_val - sma50_val) / sma50_val if sma50_val > 0 else 0
+    if sma_spread < 0.003:
+        return "neutral"
 
     if sma20_val > sma50_val and current_price > sma20_val:
         return "bullish"
@@ -119,31 +125,29 @@ class FundingSentimentGenerator:
         signal_type = "hold"
         confidence = 0.5
 
-        if total_score >= 4.0:
+        if total_score >= 3.0:
             signal_type = "strong_buy"
             confidence = min(0.85, 0.60 + abs(total_score) * 0.03)
-        elif total_score >= 2.5:
+        elif total_score >= 1.8:
             signal_type = "buy"
             confidence = min(0.75, 0.55 + abs(total_score) * 0.03)
-        elif total_score <= -4.0:
+        elif total_score <= -3.0:
             signal_type = "strong_sell"
             confidence = min(0.85, 0.60 + abs(total_score) * 0.03)
-        elif total_score <= -2.5:
+        elif total_score <= -1.8:
             signal_type = "sell"
             confidence = min(0.75, 0.55 + abs(total_score) * 0.03)
 
-        # === HTF TREND HARD FILTER ===
+        # === HTF TREND FILTER (soft) ===
         if htf_trend == "bearish" and signal_type in ("buy", "strong_buy"):
-            reasons = [f"HTF bearish - blocked {signal_type}"] + reasons
-            signal_type = "hold"
-            confidence = 0.5
-        elif htf_trend != "bearish" and signal_type in ("sell", "strong_sell"):
-            reasons = [f"HTF {htf_trend} - blocked {signal_type} (need bearish)"] + reasons
-            signal_type = "hold"
-            confidence = 0.5
-        elif htf_trend == "neutral" and signal_type in ("buy", "strong_buy"):
-            confidence = max(0.5, confidence - 0.10)
-            reasons.append("HTF neutral (-10% conf)")
+            confidence = max(0.5, confidence - 0.15)
+            reasons.append("HTF bearish (-15% conf for buy)")
+        elif htf_trend == "bullish" and signal_type in ("sell", "strong_sell"):
+            confidence = max(0.5, confidence - 0.15)
+            reasons.append("HTF bullish (-15% conf for sell)")
+        elif htf_trend == "neutral":
+            confidence = max(0.5, confidence - 0.05)
+            reasons.append("HTF neutral (-5% conf)")
 
         return {
             "signal": signal_type,
@@ -455,32 +459,30 @@ class VolatilitySqueezeGenerator:
         confidence = 0.5
 
         if direction > 0:
-            if total_score >= 4.0:
+            if total_score >= 3.0:
                 signal_type = "strong_buy"
                 confidence = min(0.85, 0.60 + total_score * 0.03)
-            elif total_score >= 2.5:
+            elif total_score >= 1.8:
                 signal_type = "buy"
                 confidence = min(0.75, 0.55 + total_score * 0.03)
         elif direction < 0:
-            if total_score >= 4.0:
+            if total_score >= 3.0:
                 signal_type = "strong_sell"
                 confidence = min(0.85, 0.60 + total_score * 0.03)
-            elif total_score >= 2.5:
+            elif total_score >= 1.8:
                 signal_type = "sell"
                 confidence = min(0.75, 0.55 + total_score * 0.03)
 
-        # === HTF TREND HARD FILTER ===
+        # === HTF TREND FILTER (soft) ===
         if htf_trend == "bearish" and signal_type in ("buy", "strong_buy"):
-            reasons = [f"HTF bearish - blocked {signal_type}"] + reasons
-            signal_type = "hold"
-            confidence = 0.5
-        elif htf_trend != "bearish" and signal_type in ("sell", "strong_sell"):
-            reasons = [f"HTF {htf_trend} - blocked {signal_type} (need bearish)"] + reasons
-            signal_type = "hold"
-            confidence = 0.5
-        elif htf_trend == "neutral" and signal_type in ("buy", "strong_buy"):
-            confidence = max(0.5, confidence - 0.10)
-            reasons.append("HTF neutral (-10% conf)")
+            confidence = max(0.5, confidence - 0.15)
+            reasons.append("HTF bearish (-15% conf for buy)")
+        elif htf_trend == "bullish" and signal_type in ("sell", "strong_sell"):
+            confidence = max(0.5, confidence - 0.15)
+            reasons.append("HTF bullish (-15% conf for sell)")
+        elif htf_trend == "neutral":
+            confidence = max(0.5, confidence - 0.05)
+            reasons.append("HTF neutral (-5% conf)")
 
         return {
             "signal": signal_type,
@@ -555,18 +557,16 @@ class TakerFlowGenerator:
             signal_type = "sell"
             confidence = min(0.75, 0.55 + abs(total_score) * 0.03)
 
-        # === HTF TREND HARD FILTER ===
+        # === HTF TREND FILTER (soft) ===
         if htf_trend == "bearish" and signal_type in ("buy", "strong_buy"):
-            reasons = [f"HTF bearish - blocked {signal_type}"] + reasons
-            signal_type = "hold"
-            confidence = 0.5
-        elif htf_trend != "bearish" and signal_type in ("sell", "strong_sell"):
-            reasons = [f"HTF {htf_trend} - blocked {signal_type} (need bearish)"] + reasons
-            signal_type = "hold"
-            confidence = 0.5
-        elif htf_trend == "neutral" and signal_type in ("buy", "strong_buy"):
-            confidence = max(0.5, confidence - 0.10)
-            reasons.append("HTF neutral (-10% conf)")
+            confidence = max(0.5, confidence - 0.15)
+            reasons.append("HTF bearish (-15% conf for buy)")
+        elif htf_trend == "bullish" and signal_type in ("sell", "strong_sell"):
+            confidence = max(0.5, confidence - 0.15)
+            reasons.append("HTF bullish (-15% conf for sell)")
+        elif htf_trend == "neutral":
+            confidence = max(0.5, confidence - 0.05)
+            reasons.append("HTF neutral (-5% conf)")
 
         return {
             "signal": signal_type,
@@ -909,7 +909,7 @@ class SimplePaperTrader:
         await self._load_existing_positions()
 
         logger.info("=" * 70)
-        logger.info("🚀 Starting v5.0 Derivatives-Data Paper Trading")
+        logger.info("🚀 Starting v5.1 Derivatives-Data Paper Trading")
         logger.info(f"   Symbols: {self.symbols}")
         logger.info(f"   Total Capital: ${self.initial_capital:,.2f} | Leverage: {self.leverage}x")
         logger.info("-" * 70)
@@ -1370,7 +1370,8 @@ class SimplePaperTrader:
 
         # Update trade in Supabase
         try:
-            await self.trade_repo.table.update({
+            position_id = position["position_id"]
+            exit_data = {
                 "exit_price": price,
                 "exit_time": datetime.now(timezone.utc).isoformat(),
                 "gross_pnl": pnl,
@@ -1378,7 +1379,12 @@ class SimplePaperTrader:
                 "return_pct": pnl_pct * 100,
                 "duration_seconds": int(duration),
                 "exit_reasoning": reason,
-            }).eq("position_id", position["position_id"]).execute()
+            }
+            await asyncio.to_thread(
+                lambda: self.trade_repo.table.update(exit_data)
+                .eq("position_id", position_id)
+                .execute()
+            )
         except Exception as e:
             logger.error(f"Failed to update trade: {e}")
 
@@ -1535,7 +1541,7 @@ async def main():
     """Main function."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="v5.0 Derivatives-Data Paper Trading")
+    parser = argparse.ArgumentParser(description="v5.1 Derivatives-Data Paper Trading")
     parser.add_argument(
         "--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT", "XRPUSDT"],
         help="Symbols to trade"

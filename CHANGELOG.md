@@ -1,5 +1,29 @@
 # Paper Trader Changelog
 
+## v5.1 — Tuned Thresholds + Soft HTF Filter + DB Fix (2026-03-09)
+
+**Problem**: After 6 hours of v5.0 running, only taker_flow generated trades (5 trades, all SHORT, 25% WR, -$54). funding_sentiment and volatility_squeeze had zero trades due to:
+1. Signal thresholds too high (needed composite score >= 2.5 for entry)
+2. HTF trend filter was a **hard block** — bearish trend blocked ALL buy signals, bullish blocked ALL sell signals, creating a short-only bias in ranging markets
+3. Critical DB bug: `await` on synchronous Supabase `APIResponse` meant **trade exits never saved to database** (broken since v4.0)
+
+**Changes**:
+
+1. **Fixed trade exit DB bug**: Wrapped `trade_repo.table.update()` in `asyncio.to_thread()` (same pattern as other DB calls). Trade exits now persist correctly.
+
+2. **Lowered signal thresholds** for funding_sentiment and volatility_squeeze:
+   - Strong signal: 4.0 → 3.0
+   - Normal signal: 2.5 → 1.8
+   - taker_flow unchanged (already at 3.5/2.0)
+
+3. **Soft HTF trend filter** (all 3 strategies): Instead of blocking counter-trend trades entirely, reduce confidence by 15%. This allows high-conviction counter-trend entries while still preferring trend-aligned trades. The confidence gate (0.65 min) naturally filters out weak counter-trend signals.
+
+4. **Ranging market detection**: `determine_htf_trend()` now returns "neutral" when SMA20 and SMA50 are within 0.3% of each other, preventing false directional bias in choppy markets.
+
+**Expected impact**: All 3 strategies should now generate trades. Counter-trend trades allowed but penalized. Ranging markets treated as neutral instead of forcing a directional bias.
+
+---
+
 ## v5.0 — Derivatives-Data Signal Strategies (2026-03-09)
 
 **Problem**: v4.0's 3 strategies (agreement_classic, agreement_mtf, momentum) all used lagging technical indicators (MACD/SMA/RSI) on 1m candles. After 3 days and 143 trades, signal accuracy was **43%** — worse than a coinflip. Testing across all timeframes (1m through 1d) showed MACD+SMA had ~47-51% accuracy on every timeframe. The indicators had zero predictive power. The system only profited because the 1h HTF filter correctly identified macro trend direction. Entry signals were decorative.
