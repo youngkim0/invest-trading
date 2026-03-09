@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """Multi-strategy paper trading script using Binance real-time data and Supabase.
 
-Supports 3 strategies:
-- agreement_classic: Original MACD+SMC+SMA agreement on 1m+1h
-- agreement_mtf: Multi-timeframe agreement (1m+5m+30m+1h)
-- momentum: Momentum/Breakout strategy with volume confirmation
+v5.0 — Derivatives-Data Signal Strategies:
+- funding_sentiment: Funding rate + OI divergence + basis scoring
+- volatility_squeeze: Bollinger Band squeeze + Keltner breakout on 4h candles
+- taker_flow: Taker volume + order book imbalance + L/S ratio
 """
 
 import asyncio
@@ -33,622 +33,676 @@ from data.storage.supabase_client import (
     SignalRepository,
     PerformanceRepository,
 )
-from data.features.smc.detector import SMCDetector
-from data.features.smc.confluence import ConfluenceEngine
-from data.features.smc.zones import ZoneDirection
 
 
-class TechnicalSignalGenerator:
-    """Generate trading signals from technical indicators + SMC."""
+def calculate_rsi(prices: pd.Series, period: int = 14) -> dict:
+    """Calculate RSI with momentum detection."""
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    current_rsi = float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else 50.0
+    prev_rsi = float(rsi.iloc[-2]) if len(rsi) > 1 and not pd.isna(rsi.iloc[-2]) else current_rsi
+    return {
+        "value": current_rsi,
+        "prev": prev_rsi,
+        "rising": current_rsi > prev_rsi,
+        "falling": current_rsi < prev_rsi,
+    }
 
-    def __init__(self, rsi_oversold: float = 30, rsi_overbought: float = 70):
-        self.rsi_oversold = rsi_oversold
-        self.rsi_overbought = rsi_overbought
 
-        # Initialize SMC components
-        self.smc_detector = SMCDetector(
-            lookback=100,
-            atr_period=14,
-            swing_lookback=5,
-            min_impulse_atr=1.5,  # Slightly lower for more OB detection
-        )
-        self.confluence_engine = ConfluenceEngine(
-            min_confluence_score=0.55,  # Lower threshold for paper trading
-            min_rr_ratio=0.5,  # Allow low zone R:R, we enforce R:R in exit logic
-            atr_stop_multiplier=1.5,
-        )
+def determine_htf_trend(df_1h: pd.DataFrame) -> str:
+    """Determine higher-timeframe trend from 1h candles.
 
-    def calculate_rsi(self, prices: pd.Series, period: int = 14) -> dict:
-        """Calculate RSI with momentum detection."""
-        delta = prices.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        current_rsi = float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else 50.0
-        prev_rsi = float(rsi.iloc[-2]) if len(rsi) > 1 and not pd.isna(rsi.iloc[-2]) else current_rsi
-        return {
-            "value": current_rsi,
-            "prev": prev_rsi,
-            "rising": current_rsi > prev_rsi,
-            "falling": current_rsi < prev_rsi,
-        }
-
-    def calculate_macd(self, prices: pd.Series) -> dict:
-        """Calculate MACD with histogram momentum."""
-        ema12 = prices.ewm(span=12).mean()
-        ema26 = prices.ewm(span=26).mean()
-        macd = ema12 - ema26
-        signal = macd.ewm(span=9).mean()
-        histogram = macd - signal
-        prev_hist = float(histogram.iloc[-2]) if len(histogram) > 1 else 0
-        return {
-            "macd": float(macd.iloc[-1]),
-            "signal": float(signal.iloc[-1]),
-            "histogram": float(histogram.iloc[-1]),
-            "hist_rising": float(histogram.iloc[-1]) > prev_hist,
-            "hist_falling": float(histogram.iloc[-1]) < prev_hist,
-        }
-
-    def calculate_sma_crossover(self, prices: pd.Series) -> dict:
-        """Calculate SMA crossover and price position."""
-        sma20 = prices.rolling(20).mean()
-        sma50 = prices.rolling(50).mean()
-        current_price = float(prices.iloc[-1])
-        sma20_val = float(sma20.iloc[-1])
-        sma50_val = float(sma50.iloc[-1])
-
-        return {
-            "sma20": sma20_val,
-            "sma50": sma50_val,
-            "bullish_cross": bool(sma20.iloc[-1] > sma50.iloc[-1] and sma20.iloc[-2] <= sma50.iloc[-2]),
-            "bearish_cross": bool(sma20.iloc[-1] < sma50.iloc[-1] and sma20.iloc[-2] >= sma50.iloc[-2]),
-            # Price position relative to SMAs (more reliable than crossovers)
-            "price_above_sma20": current_price > sma20_val,
-            "price_above_sma50": current_price > sma50_val,
-            "sma20_above_sma50": sma20_val > sma50_val,
-        }
-
-    def calculate_price_momentum(self, prices: pd.Series) -> dict:
-        """Calculate short-term price momentum."""
-        current = float(prices.iloc[-1])
-        price_5_ago = float(prices.iloc[-5]) if len(prices) >= 5 else current
-        price_10_ago = float(prices.iloc[-10]) if len(prices) >= 10 else current
-
-        momentum_5 = (current - price_5_ago) / price_5_ago * 100
-        momentum_10 = (current - price_10_ago) / price_10_ago * 100
-
-        return {
-            "momentum_5": momentum_5,
-            "momentum_10": momentum_10,
-            "strong_up": momentum_5 > 1.5,  # >1.5% in 5 candles
-            "strong_down": momentum_5 < -1.5,
-            "weakening_up": momentum_5 > 0 and momentum_5 < momentum_10 / 2,  # Slowing uptrend
-            "weakening_down": momentum_5 < 0 and momentum_5 > momentum_10 / 2,  # Slowing downtrend
-        }
-
-    def determine_htf_trend(self, df_1h: pd.DataFrame) -> str:
-        """Determine higher-timeframe trend from 1h candles.
-
-        Returns 'bullish', 'bearish', or 'neutral'.
-        """
-        if len(df_1h) < 50:
-            return "neutral"
-
-        prices = df_1h["close"]
-        sma20 = prices.rolling(20).mean()
-        sma50 = prices.rolling(50).mean()
-        current_price = float(prices.iloc[-1])
-        sma20_val = float(sma20.iloc[-1])
-        sma50_val = float(sma50.iloc[-1])
-
-        if sma20_val > sma50_val and current_price > sma20_val:
-            return "bullish"
-        elif sma20_val < sma50_val and current_price < sma20_val:
-            return "bearish"
+    Returns 'bullish', 'bearish', or 'neutral'.
+    """
+    if len(df_1h) < 50:
         return "neutral"
 
-    def generate_signal(self, df: pd.DataFrame, htf_trend: str = "neutral", **kwargs) -> dict:
-        """Generate trading signal requiring SMC + Technical AGREEMENT.
+    prices = df_1h["close"]
+    sma20 = prices.rolling(20).mean()
+    sma50 = prices.rolling(50).mean()
+    current_price = float(prices.iloc[-1])
+    sma20_val = float(sma20.iloc[-1])
+    sma50_val = float(sma50.iloc[-1])
 
-        Key rules:
-        1. SMC and technical indicators MUST agree on direction
-        2. If they conflict, return HOLD (no trade)
-        3. Higher confidence when both strongly agree
-        4. HTF trend acts as hard filter - no buying in downtrends, no selling in uptrends
-        """
-        if len(df) < 60:
-            return {"signal": "hold", "confidence": 0.5, "reasoning": "Insufficient data"}
-
-        prices = df["close"]
-        current_price = float(prices.iloc[-1])
-
-        # Calculate technical indicators
-        rsi = self.calculate_rsi(prices)
-        macd = self.calculate_macd(prices)
-        sma = self.calculate_sma_crossover(prices)
-        momentum = self.calculate_price_momentum(prices)
-
-        # === SMC Analysis ===
-        smc_direction = None
-        smc_score = 0
-        smc_reasons = []
-        smc_result = None
-        market_trend = None
-
-        try:
-            smc_analysis = self.smc_detector.analyze(df)
-            if smc_analysis:
-                # Get market structure trend (most important)
-                market_structure = smc_analysis.get("market_structure")
-                if market_structure:
-                    market_trend = market_structure.trend
-                    if market_trend == ZoneDirection.BULLISH:
-                        smc_reasons.append("Bullish structure")
-                    elif market_trend == ZoneDirection.BEARISH:
-                        smc_reasons.append("Bearish structure")
-
-                # Get confluence result
-                smc_result = self.confluence_engine.analyze(
-                    current_price=current_price,
-                    order_blocks=smc_analysis.get("order_blocks", []),
-                    fair_value_gaps=smc_analysis.get("fair_value_gaps", []),
-                    liquidity_sweeps=smc_analysis.get("liquidity_sweeps", []),
-                    channels=smc_analysis.get("channels", []),
-                    market_structure=market_structure,
-                    atr=smc_analysis.get("atr", 0.0),
-                )
-
-                if smc_result and smc_result.score >= 0.55:
-                    smc_score = smc_result.score
-                    smc_direction = smc_result.direction
-                    smc_reasons.append(f"SMC {smc_score:.0%}")
-
-                    if smc_result.factors.get("zone_confluence", 0) > 0.15:
-                        smc_reasons.append("OB+FVG")
-        except Exception as e:
-            logger.debug(f"SMC analysis failed: {e}")
-
-        # === Technical Scoring ===
-        tech_buy_score = 0
-        tech_sell_score = 0
-        reasons = []
-
-        # RSI signals
-        if rsi["value"] < self.rsi_oversold:
-            tech_buy_score += 2
-            reasons.append(f"RSI oversold ({rsi['value']:.0f})")
-        elif rsi["value"] > self.rsi_overbought:
-            tech_sell_score += 2
-            reasons.append(f"RSI overbought ({rsi['value']:.0f})")
-        elif rsi["value"] < 40:
-            tech_buy_score += 1
-        elif rsi["value"] > 60:
-            tech_sell_score += 1
-
-        # RSI momentum
-        if rsi["value"] > 65 and rsi["falling"]:
-            tech_sell_score += 1
-        elif rsi["value"] < 35 and rsi["rising"]:
-            tech_buy_score += 1
-
-        # MACD signals
-        if macd["histogram"] > 0 and macd["macd"] > macd["signal"]:
-            tech_buy_score += 1.5 if macd["hist_rising"] else 0.5
-            if macd["hist_rising"]:
-                reasons.append("MACD bullish+")
-        elif macd["histogram"] < 0 and macd["macd"] < macd["signal"]:
-            tech_sell_score += 1.5 if macd["hist_falling"] else 0.5
-            if macd["hist_falling"]:
-                reasons.append("MACD bearish+")
-
-        # SMA analysis - price position is more reliable than crossovers
-        # Price above both SMAs = bullish trend
-        if sma["price_above_sma20"] and sma["price_above_sma50"]:
-            tech_buy_score += 1.5
-            reasons.append("Price above SMAs")
-        elif not sma["price_above_sma20"] and not sma["price_above_sma50"]:
-            tech_sell_score += 1.5
-            reasons.append("Price below SMAs")
-
-        # Crossovers only as confirmation (reduced weight)
-        if sma["bullish_cross"]:
-            tech_buy_score += 1.0
-            reasons.append("SMA bullish cross")
-        elif sma["bearish_cross"]:
-            tech_sell_score += 1.0
-            reasons.append("SMA bearish cross")
-
-        # Strong momentum only
-        if momentum["strong_up"] and momentum["momentum_5"] > 2.0:
-            tech_buy_score += 1.5
-            reasons.append(f"Strong +{momentum['momentum_5']:.1f}%")
-        elif momentum["strong_down"] and momentum["momentum_5"] < -2.0:
-            tech_sell_score += 1.5
-            reasons.append(f"Strong {momentum['momentum_5']:.1f}%")
-
-        # === DETERMINE TECHNICAL DIRECTION ===
-        tech_score = tech_buy_score - tech_sell_score
-        if tech_score >= 1.5:  # Lowered from 2.0 - SMC provides additional confirmation
-            tech_direction = "bullish"
-        elif tech_score <= -1.5:  # Lowered from -2.0
-            tech_direction = "bearish"
-        else:
-            tech_direction = "neutral"
-
-        # === RSI EXTREME VETO - MOST IMPORTANT ===
-        # RSI oversold/overbought are contrarian signals - they VETO opposite trades
-        rsi_oversold = rsi["value"] < self.rsi_oversold  # < 30
-        rsi_overbought = rsi["value"] > self.rsi_overbought  # > 70
-        # rsi_extreme thresholds removed in v3.6 — RSI reversal entries disabled
-
-        # === AGREEMENT CHECK - CRITICAL ===
-        # Both SMC and technicals must agree, otherwise HOLD
-        signal = "hold"
-        confidence = 0.5
-
-        smc_bullish = smc_direction == ZoneDirection.BULLISH
-        smc_bearish = smc_direction == ZoneDirection.BEARISH
-
-        # === RSI VETO LOGIC ===
-        # NEVER sell when oversold - price likely to bounce UP
-        if rsi_oversold and tech_direction == "bearish":
-            signal = "hold"
-            confidence = 0.5
-            reasons = [f"RSI oversold ({rsi['value']:.0f}) - NO SELL, wait for bounce"]
-
-        # NEVER buy when overbought - price likely to pull back
-        elif rsi_overbought and tech_direction == "bullish":
-            signal = "hold"
-            confidence = 0.5
-            reasons = [f"RSI overbought ({rsi['value']:.0f}) - NO BUY, wait for pullback"]
-
-        # NOTE: RSI reversal entries removed in v3.6. Data showed 25% WR, -$65 over 8 trades.
-        # RSI extremes on 1m candles indicate strong trend, not reversal.
-        # RSI VETO (above) is kept — only the entry trigger is removed.
-
-        # BULLISH: Both SMC and technicals agree bullish (and not overbought)
-        elif tech_direction == "bullish" and smc_bullish:
-            # Require 1m SMA20 > SMA50 (short-term trend must be up)
-            if not sma["sma20_above_sma50"]:
-                signal = "hold"
-                confidence = 0.5
-                reasons.append(f"SMA20 crossed below SMA50 - short-term trend bearish, no buy")
-            # Require MACD histogram confirms direction (not near-zero)
-            elif macd["histogram"] <= 0 or (abs(macd["histogram"]) / current_price * 100 if current_price > 0 else 0) < 0.001:
-                signal = "hold"
-                confidence = 0.5
-                reasons.append(f"MACD too weak ({macd['histogram']:.4f}) - no momentum")
-            else:
-                combined_score = abs(tech_score) + smc_score * 3
-                if combined_score >= 6.0:
-                    signal = "strong_buy"
-                    confidence = min(0.85, 0.60 + combined_score * 0.03)
-                elif combined_score >= 4.5:
-                    signal = "buy"
-                    confidence = min(0.75, 0.55 + combined_score * 0.03)
-                reasons.extend(smc_reasons)
-                reasons.append("SMC+Tech aligned")
-
-        # BEARISH: Both SMC and technicals agree bearish (and not oversold)
-        elif tech_direction == "bearish" and smc_bearish:
-            # Require MACD histogram confirms direction (not near-zero)
-            macd_pct = abs(macd["histogram"]) / current_price * 100 if current_price > 0 else 0
-            if macd["histogram"] >= 0 or macd_pct < 0.001:
-                signal = "hold"
-                confidence = 0.5
-                reasons.append(f"MACD too weak ({macd['histogram']:.4f}) - no momentum")
-            else:
-                combined_score = abs(tech_score) + smc_score * 3
-                if combined_score >= 6.0:
-                    signal = "strong_sell"
-                    confidence = min(0.85, 0.60 + combined_score * 0.03)
-                elif combined_score >= 4.5:
-                    signal = "sell"
-                    confidence = min(0.75, 0.55 + combined_score * 0.03)
-                reasons.extend(smc_reasons)
-                reasons.append("SMC+Tech aligned")
-
-        # CONFLICT: SMC and technicals disagree - NO TRADE
-        elif (tech_direction == "bullish" and smc_bearish) or (tech_direction == "bearish" and smc_bullish):
-            signal = "hold"
-            confidence = 0.5
-            reasons = ["SMC↔Tech conflict - no trade"]
-
-        # WEAK: Not enough conviction from either
-        else:
-            signal = "hold"
-            confidence = 0.5
-            if not reasons:
-                reasons = ["Waiting for confluence"]
-
-        # === HTF TREND HARD FILTER ===
-        # Only buy in bullish/neutral 1h trend, only sell in bearish 1h trend
-        if htf_trend == "bearish" and signal in ("buy", "strong_buy"):
-            reasons = [f"HTF bearish - blocked {signal}"] + reasons
-            signal = "hold"
-            confidence = 0.5
-        elif htf_trend != "bearish" and signal in ("sell", "strong_sell"):
-            reasons = [f"HTF {htf_trend} - blocked {signal} (need bearish)"] + reasons
-            signal = "hold"
-            confidence = 0.5
-        elif htf_trend == "neutral" and signal in ("buy", "strong_buy"):
-            confidence = max(0.5, confidence - 0.10)
-            reasons.append("HTF neutral (-10% conf)")
-
-        return {
-            "signal": signal,
-            "confidence": confidence,
-            "reasoning": ", ".join(reasons) if reasons else "No strong signals",
-            "indicators": {
-                "rsi": rsi["value"],
-                "rsi_momentum": "rising" if rsi["rising"] else "falling",
-                "macd": macd,
-                "sma": sma,
-                "momentum": momentum,
-                "price": current_price,
-                "smc_score": smc_score if smc_result else 0,
-                "smc_direction": smc_direction.value if smc_direction else None,
-                "htf_trend": htf_trend,
-            },
-        }
+    if sma20_val > sma50_val and current_price > sma20_val:
+        return "bullish"
+    elif sma20_val < sma50_val and current_price < sma20_val:
+        return "bearish"
+    return "neutral"
 
 
-class MTFSignalGenerator(TechnicalSignalGenerator):
-    """Multi-timeframe agreement signal generator (1m+5m+30m+1h).
+# =============================================================================
+# Strategy 1: Funding Sentiment (Funding Rate + OI Divergence + Basis)
+# =============================================================================
 
-    Uses the same agreement logic as TechnicalSignalGenerator on 1m candles,
-    then adds confluence scoring from 5m and 30m timeframes.
-    If MTF strongly disagrees, downgrades to hold.
-    If MTF strongly confirms, upgrades signal strength.
+class FundingSentimentGenerator:
+    """Generate signals from funding rate, open interest divergence, and basis.
+
+    Funding rate = cost of leverage. Extreme funding precedes reversals.
+    OI divergence (OI rising while price falls) = leading indicator of regime change.
     """
+
+    def __init__(self):
+        # Cache last known funding rate (only updates every 8h)
+        self._last_funding_rate: float | None = None
+        self._last_funding_time: str | None = None
 
     def generate_signal(self, df: pd.DataFrame, htf_trend: str = "neutral",
-                        df_5m: pd.DataFrame = None, df_30m: pd.DataFrame = None, **kwargs) -> dict:
-        """Generate signal with multi-timeframe confluence."""
-        # Get base signal from 1m (parent class)
-        base_result = super().generate_signal(df, htf_trend)
+                        derivatives: dict = None, **kwargs) -> dict:
+        """Generate trading signal from derivatives sentiment data."""
+        if derivatives is None or not derivatives:
+            return {"signal": "hold", "confidence": 0.5, "reasoning": "No derivatives data",
+                    "indicators": {"htf_trend": htf_trend}}
 
-        # If base is hold, no point adding MTF confluence
-        if base_result["signal"] == "hold":
-            return base_result
+        prices = df["close"] if not df.empty else pd.Series()
+        current_price = float(prices.iloc[-1]) if len(prices) > 0 else 0
 
-        is_buy = base_result["signal"] in ("buy", "strong_buy")
-        mtf_bonus = 0.0
-        mtf_reasons = []
-
-        # === 5m confluence (+1.0 confirm / -0.5 disagree) ===
-        if df_5m is not None and len(df_5m) >= 50:
-            prices_5m = df_5m["close"]
-            macd_5m = self.calculate_macd(prices_5m)
-            sma_5m = self.calculate_sma_crossover(prices_5m)
-
-            if is_buy:
-                if macd_5m["histogram"] > 0 and sma_5m["sma20_above_sma50"]:
-                    mtf_bonus += 1.0
-                    mtf_reasons.append("5m confirms↑")
-                elif macd_5m["histogram"] < 0 and not sma_5m["sma20_above_sma50"]:
-                    mtf_bonus -= 0.5
-                    mtf_reasons.append("5m disagrees")
-            else:  # sell
-                if macd_5m["histogram"] < 0 and not sma_5m["sma20_above_sma50"]:
-                    mtf_bonus += 1.0
-                    mtf_reasons.append("5m confirms↓")
-                elif macd_5m["histogram"] > 0 and sma_5m["sma20_above_sma50"]:
-                    mtf_bonus -= 0.5
-                    mtf_reasons.append("5m disagrees")
-
-        # === 30m confluence (+1.5 confirm / -1.0 disagree) ===
-        if df_30m is not None and len(df_30m) >= 50:
-            prices_30m = df_30m["close"]
-            macd_30m = self.calculate_macd(prices_30m)
-            sma_30m = self.calculate_sma_crossover(prices_30m)
-
-            if is_buy:
-                if macd_30m["histogram"] > 0 and sma_30m["sma20_above_sma50"]:
-                    mtf_bonus += 1.5
-                    mtf_reasons.append("30m confirms↑")
-                elif macd_30m["histogram"] < 0 and not sma_30m["sma20_above_sma50"]:
-                    mtf_bonus -= 1.0
-                    mtf_reasons.append("30m disagrees")
-            else:  # sell
-                if macd_30m["histogram"] < 0 and not sma_30m["sma20_above_sma50"]:
-                    mtf_bonus += 1.5
-                    mtf_reasons.append("30m confirms↓")
-                elif macd_30m["histogram"] > 0 and sma_30m["sma20_above_sma50"]:
-                    mtf_bonus -= 1.0
-                    mtf_reasons.append("30m disagrees")
-
-        # If MTF strongly disagrees, downgrade to hold
-        if mtf_bonus <= -1.5:
-            return {
-                **base_result,
-                "signal": "hold",
-                "confidence": 0.5,
-                "reasoning": f"MTF disagreement ({', '.join(mtf_reasons)}), " + base_result["reasoning"],
-            }
-
-        # Adjust confidence based on MTF
-        conf_adj = mtf_bonus * 0.03
-        new_confidence = min(0.95, max(0.5, base_result["confidence"] + conf_adj))
-
-        # If MTF strongly confirms, upgrade signal strength
-        new_signal = base_result["signal"]
-        if mtf_bonus >= 2.0:
-            if new_signal == "buy":
-                new_signal = "strong_buy"
-            elif new_signal == "sell":
-                new_signal = "strong_sell"
-
-        reasoning = base_result["reasoning"]
-        if mtf_reasons:
-            reasoning += ", " + ", ".join(mtf_reasons)
-
-        return {
-            **base_result,
-            "signal": new_signal,
-            "confidence": new_confidence,
-            "reasoning": reasoning,
-        }
-
-
-class MomentumBreakoutGenerator(TechnicalSignalGenerator):
-    """Momentum/Breakout signal generator for aggressive entries.
-
-    Entry rules:
-    - Breakout: Price breaks 20-bar high (buy) or 20-bar low (sell) → 2.0 pts
-    - Volume spike: Current volume >= 2x 20-bar average → 2.0 pts
-    - RSI confirmation: 40-70 for buy, 30-60 for sell → 1.0 pt
-    - MACD direction: Histogram positive+rising / negative+falling → 1.5 pts
-    - SMA trend: SMA20 > SMA50 (buy) or SMA20 < SMA50 (sell) → 1.5 pts
-    - Buy threshold >= 5.0, strong >= 7.0
-
-    Reuses RSI/MACD/SMA from parent class. HTF filter same as agreement.
-    """
-
-    def generate_signal(self, df: pd.DataFrame, htf_trend: str = "neutral", **kwargs) -> dict:
-        """Generate momentum/breakout signal."""
-        if len(df) < 60:
-            return {"signal": "hold", "confidence": 0.5, "reasoning": "Insufficient data"}
-
-        prices = df["close"]
-        volumes = df["volume"]
-        current_price = float(prices.iloc[-1])
-
-        # Calculate base indicators (reuse parent methods)
-        rsi = self.calculate_rsi(prices)
-        macd = self.calculate_macd(prices)
-        sma = self.calculate_sma_crossover(prices)
-
-        # Breakout detection (20-bar high/low, excluding current bar)
-        lookback = min(20, len(prices) - 1)
-        high_20 = float(prices.iloc[-lookback - 1:-1].max())
-        low_20 = float(prices.iloc[-lookback - 1:-1].min())
-        breakout_up = current_price > high_20
-        breakout_down = current_price < low_20
-
-        # Volume spike detection
-        avg_volume_20 = float(volumes.iloc[-lookback - 1:-1].mean()) if len(volumes) > lookback else 0
-        current_volume = float(volumes.iloc[-1])
-        volume_ratio = current_volume / avg_volume_20 if avg_volume_20 > 0 else 0
-        volume_spike = volume_ratio >= 2.0
-
-        # Scoring
-        buy_score = 0.0
-        sell_score = 0.0
+        total_score = 0.0
         reasons = []
 
-        # Breakout (2.0 pts)
-        if breakout_up:
-            buy_score += 2.0
-            reasons.append(f"Breakout above ${high_20:,.2f}")
-        if breakout_down:
-            sell_score += 2.0
-            reasons.append(f"Breakdown below ${low_20:,.2f}")
+        # === FUNDING RATE SCORE (max ±3.0) ===
+        funding_score = self._score_funding(derivatives, reasons)
+        total_score += funding_score
 
-        # Volume spike (2.0 pts) - only counts if breakout confirms direction
-        if volume_spike:
-            if breakout_up:
-                buy_score += 2.0
-                reasons.append(f"Vol spike {volume_ratio:.1f}x")
-            elif breakout_down:
-                sell_score += 2.0
-                reasons.append(f"Vol spike {volume_ratio:.1f}x")
+        # === OI DIVERGENCE SCORE (max ±3.0) ===
+        oi_score = self._score_oi_divergence(derivatives, prices, reasons)
+        total_score += oi_score
 
-        # RSI confirmation (1.0 pt)
-        # Buy: 40-70 (not overbought), Sell: 30-60 (not oversold)
-        if 40 <= rsi["value"] <= 70:
-            buy_score += 1.0
-        if 30 <= rsi["value"] <= 60:
-            sell_score += 1.0
-
-        # MACD direction (1.5 pts)
-        if macd["histogram"] > 0 and macd["hist_rising"]:
-            buy_score += 1.5
-            reasons.append("MACD rising+")
-        elif macd["histogram"] < 0 and macd["hist_falling"]:
-            sell_score += 1.5
-            reasons.append("MACD falling-")
-
-        # SMA trend (1.5 pts)
-        if sma["sma20_above_sma50"]:
-            buy_score += 1.5
-        else:
-            sell_score += 1.5
+        # === BASIS SCORE (max ±2.0) ===
+        basis_score = self._score_basis(derivatives, reasons)
+        total_score += basis_score
 
         # Determine signal
         signal_type = "hold"
         confidence = 0.5
 
-        if buy_score >= 7.0:
+        if total_score >= 4.0:
             signal_type = "strong_buy"
-            confidence = min(0.85, 0.60 + buy_score * 0.03)
-        elif buy_score >= 5.0:
+            confidence = min(0.85, 0.60 + abs(total_score) * 0.03)
+        elif total_score >= 2.5:
             signal_type = "buy"
-            confidence = min(0.75, 0.55 + buy_score * 0.03)
-        elif sell_score >= 7.0:
+            confidence = min(0.75, 0.55 + abs(total_score) * 0.03)
+        elif total_score <= -4.0:
             signal_type = "strong_sell"
-            confidence = min(0.85, 0.60 + sell_score * 0.03)
-        elif sell_score >= 5.0:
+            confidence = min(0.85, 0.60 + abs(total_score) * 0.03)
+        elif total_score <= -2.5:
             signal_type = "sell"
-            confidence = min(0.75, 0.55 + sell_score * 0.03)
+            confidence = min(0.75, 0.55 + abs(total_score) * 0.03)
 
-        # RSI Veto (same as agreement)
-        if rsi["value"] < self.rsi_oversold and signal_type in ("sell", "strong_sell"):
-            signal_type = "hold"
-            confidence = 0.5
-            reasons = [f"RSI oversold ({rsi['value']:.0f}) - veto sell"]
-        elif rsi["value"] > self.rsi_overbought and signal_type in ("buy", "strong_buy"):
-            signal_type = "hold"
-            confidence = 0.5
-            reasons = [f"RSI overbought ({rsi['value']:.0f}) - veto buy"]
-
-        # HTF filter (same as agreement)
+        # === HTF TREND HARD FILTER ===
         if htf_trend == "bearish" and signal_type in ("buy", "strong_buy"):
             reasons = [f"HTF bearish - blocked {signal_type}"] + reasons
             signal_type = "hold"
             confidence = 0.5
         elif htf_trend != "bearish" and signal_type in ("sell", "strong_sell"):
-            reasons = [f"HTF {htf_trend} - blocked sell"] + reasons
+            reasons = [f"HTF {htf_trend} - blocked {signal_type} (need bearish)"] + reasons
             signal_type = "hold"
             confidence = 0.5
         elif htf_trend == "neutral" and signal_type in ("buy", "strong_buy"):
             confidence = max(0.5, confidence - 0.10)
             reasons.append("HTF neutral (-10% conf)")
 
-        if not reasons:
-            reasons = ["No breakout signals"]
+        return {
+            "signal": signal_type,
+            "confidence": confidence,
+            "reasoning": ", ".join(reasons) if reasons else "No strong signals",
+            "indicators": {
+                "price": current_price,
+                "funding_score": funding_score,
+                "oi_score": oi_score,
+                "basis_score": basis_score,
+                "total_score": total_score,
+                "htf_trend": htf_trend,
+            },
+        }
+
+    def _score_funding(self, derivatives: dict, reasons: list) -> float:
+        """Score funding rate (max ±3.0). Contrarian: extreme funding → reversal."""
+        score = 0.0
+        funding_data = derivatives.get("funding_rate", [])
+        if not funding_data:
+            return 0.0
+
+        # Update cache if we have new data
+        latest = funding_data[-1]
+        rate = latest["funding_rate"]
+        funding_time = latest["funding_time"]
+
+        if self._last_funding_time != funding_time:
+            self._last_funding_rate = rate
+            self._last_funding_time = funding_time
+        else:
+            rate = self._last_funding_rate if self._last_funding_rate is not None else rate
+
+        # Extreme positive funding → contrarian short
+        if rate > 0.0005:  # >0.05%
+            score = -2.0
+            reasons.append(f"Funding extreme+ ({rate*100:.3f}%) → short")
+        elif rate > 0.0003:  # >0.03%
+            score = -1.0
+            reasons.append(f"Funding high ({rate*100:.3f}%)")
+        # Extreme negative funding → contrarian long
+        elif rate < -0.0003:  # <-0.03%
+            score = 2.0
+            reasons.append(f"Funding extreme- ({rate*100:.3f}%) → long")
+        elif rate < -0.0001:  # <-0.01%
+            score = 1.0
+            reasons.append(f"Funding negative ({rate*100:.3f}%)")
+
+        # Funding acceleration: compare recent rates
+        if len(funding_data) >= 2:
+            prev_rate = funding_data[-2]["funding_rate"]
+            acceleration = rate - prev_rate
+            if abs(acceleration) > 0.0002:  # >0.02% change
+                accel_factor = 1.0 if (acceleration > 0 and score < 0) or (acceleration < 0 and score > 0) else 0.5
+                score *= (1 + accel_factor * 0.5)
+                score = max(-3.0, min(3.0, score))
+
+        return score
+
+    def _score_oi_divergence(self, derivatives: dict, prices: pd.Series, reasons: list) -> float:
+        """Score OI divergence (max ±3.0). OI vs price divergence = leading signal."""
+        score = 0.0
+        oi_history = derivatives.get("oi_history", [])
+        if len(oi_history) < 2 or len(prices) < 2:
+            return 0.0
+
+        # Current vs earlier OI
+        current_oi = oi_history[-1]["sum_open_interest_value"]
+        earlier_oi = oi_history[0]["sum_open_interest_value"]
+        oi_change_pct = (current_oi - earlier_oi) / earlier_oi * 100 if earlier_oi > 0 else 0
+
+        # Price change over same period
+        price_now = float(prices.iloc[-1])
+        price_earlier = float(prices.iloc[0]) if len(prices) > len(oi_history) else float(prices.iloc[-min(len(prices), len(oi_history))])
+        price_change_pct = (price_now - price_earlier) / price_earlier * 100 if price_earlier > 0 else 0
+
+        # OI↑ + price↓ = shorts building (bearish)
+        if oi_change_pct > 2.0 and price_change_pct < -0.5:
+            score = -2.0
+            reasons.append(f"OI↑{oi_change_pct:.1f}% + price↓{price_change_pct:.1f}% (shorts building)")
+
+        # OI↓ + price↑ = short squeeze (bullish)
+        elif oi_change_pct < -2.0 and price_change_pct > 0.5:
+            score = 2.0
+            reasons.append(f"OI↓{oi_change_pct:.1f}% + price↑{price_change_pct:.1f}% (short squeeze)")
+
+        # OI↑ + price↑ = trend confirmation (bullish)
+        elif oi_change_pct > 2.0 and price_change_pct > 0.5:
+            score = 1.5
+            reasons.append(f"OI↑{oi_change_pct:.1f}% + price↑{price_change_pct:.1f}% (trend confirm)")
+
+        # OI↑ + price flat = accumulation (mild bullish)
+        elif oi_change_pct > 3.0 and abs(price_change_pct) < 0.5:
+            score = 0.5
+            reasons.append(f"OI↑{oi_change_pct:.1f}% + flat price (accumulation)")
+
+        # OI elevated vs 7d avg amplifies
+        if len(oi_history) >= 12:  # ~1h of 5m data minimum
+            avg_oi = sum(r["sum_open_interest_value"] for r in oi_history) / len(oi_history)
+            if current_oi > avg_oi * 1.1:  # 10%+ above average
+                score *= 1.3
+                score = max(-3.0, min(3.0, score))
+
+        return score
+
+    def _score_basis(self, derivatives: dict, reasons: list) -> float:
+        """Score futures basis (max ±2.0). Premium = bullish, discount = bearish."""
+        score = 0.0
+        premium = derivatives.get("premium_index", {})
+        if not premium:
+            return 0.0
+
+        mark_price = premium.get("mark_price", 0)
+        index_price = premium.get("index_price", 0)
+        if index_price <= 0 or mark_price <= 0:
+            return 0.0
+
+        basis_pct = (mark_price - index_price) / index_price * 100
+
+        # Futures premium > 0.2% = bullish
+        if basis_pct > 0.5:
+            score = -1.0  # Contrarian: extreme premium → short
+            reasons.append(f"Basis +{basis_pct:.3f}% (extreme premium → contrarian)")
+        elif basis_pct > 0.2:
+            score = 1.0
+            reasons.append(f"Basis +{basis_pct:.3f}% (bullish premium)")
+
+        # Futures discount < -0.1% = bearish
+        elif basis_pct < -0.3:
+            score = 1.0  # Contrarian: extreme discount → long
+            reasons.append(f"Basis {basis_pct:.3f}% (extreme discount → contrarian)")
+        elif basis_pct < -0.1:
+            score = -1.0
+            reasons.append(f"Basis {basis_pct:.3f}% (bearish discount)")
+
+        return score
+
+
+# =============================================================================
+# Strategy 2: Volatility Squeeze (BB inside KC → breakout)
+# =============================================================================
+
+class VolatilitySqueezeGenerator:
+    """Generate signals from Bollinger Band squeeze + Keltner Channel breakout.
+
+    Volatility is mean-reverting. BB inside KC = squeeze.
+    Breakout from squeeze produces asymmetric payoff on 4h timeframes.
+    """
+
+    def __init__(self, bb_period: int = 20, bb_std: float = 2.0,
+                 kc_period: int = 20, kc_atr_mult: float = 1.5):
+        self.bb_period = bb_period
+        self.bb_std = bb_std
+        self.kc_period = kc_period
+        self.kc_atr_mult = kc_atr_mult
+
+    def generate_signal(self, df: pd.DataFrame, htf_trend: str = "neutral",
+                        df_4h: pd.DataFrame = None, df_1m: pd.DataFrame = None,
+                        **kwargs) -> dict:
+        """Generate signal from BB/KC squeeze on 4h candles."""
+        if df_4h is None or len(df_4h) < self.bb_period + 10:
+            return {"signal": "hold", "confidence": 0.5, "reasoning": "Insufficient 4h data",
+                    "indicators": {"htf_trend": htf_trend}}
+
+        # Check if last 4h candle is complete (avoid acting on incomplete candles)
+        # 4h candles close at 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
+        now = datetime.now(timezone.utc)
+        last_candle_time = df_4h.index[-1]
+        if hasattr(last_candle_time, 'to_pydatetime'):
+            last_candle_time = last_candle_time.to_pydatetime()
+        if last_candle_time.tzinfo is None:
+            last_candle_time = last_candle_time.replace(tzinfo=timezone.utc)
+
+        # If the latest candle started less than 4h ago, it's still forming — use previous
+        candle_age = (now - last_candle_time).total_seconds()
+        if candle_age < 4 * 3600:
+            # Use second-to-last candle as the "completed" one
+            if len(df_4h) < self.bb_period + 11:
+                return {"signal": "hold", "confidence": 0.5, "reasoning": "Waiting for 4h candle close",
+                        "indicators": {"htf_trend": htf_trend}}
+            df_4h = df_4h.iloc[:-1]
+
+        prices = df_4h["close"]
+        highs = df_4h["high"]
+        lows = df_4h["low"]
+        current_price = float(prices.iloc[-1])
+
+        # Bollinger Bands
+        bb_sma = prices.rolling(self.bb_period).mean()
+        bb_std = prices.rolling(self.bb_period).std()
+        bb_upper = bb_sma + self.bb_std * bb_std
+        bb_lower = bb_sma - self.bb_std * bb_std
+        bb_width = (bb_upper - bb_lower) / bb_sma
+
+        # Keltner Channels (ATR-based)
+        tr = pd.concat([
+            highs - lows,
+            (highs - prices.shift(1)).abs(),
+            (lows - prices.shift(1)).abs(),
+        ], axis=1).max(axis=1)
+        atr = tr.rolling(self.kc_period).mean()
+        kc_mid = prices.rolling(self.kc_period).mean()
+        kc_upper = kc_mid + self.kc_atr_mult * atr
+        kc_lower = kc_mid - self.kc_atr_mult * atr
+
+        # Squeeze detection: BB inside KC
+        in_squeeze = (bb_upper < kc_upper) & (bb_lower > kc_lower)
+        squeeze_history = in_squeeze.iloc[-(self.bb_period):]
+
+        current_squeeze = bool(in_squeeze.iloc[-1])
+        prev_squeeze = bool(in_squeeze.iloc[-2]) if len(in_squeeze) > 1 else False
+
+        total_score = 0.0
+        reasons = []
+
+        # Squeeze must exist (current or just fired) for any signal
+        squeeze_bars = 0
+        for val in reversed(squeeze_history.values):
+            if val:
+                squeeze_bars += 1
+            else:
+                break
+        # If squeeze just fired, count the bars that WERE in squeeze
+        if not current_squeeze and prev_squeeze:
+            squeeze_bars = 0
+            for val in reversed(squeeze_history.values[:-1]):
+                if val:
+                    squeeze_bars += 1
+                else:
+                    break
+
+        if not current_squeeze and not prev_squeeze:
+            return {
+                "signal": "hold", "confidence": 0.5,
+                "reasoning": "No squeeze detected",
+                "indicators": {
+                    "price": current_price,
+                    "in_squeeze": False,
+                    "squeeze_bars": 0,
+                    "bb_width": float(bb_width.iloc[-1]) if not pd.isna(bb_width.iloc[-1]) else 0,
+                    "htf_trend": htf_trend,
+                },
+            }
+
+        # === DURATION SCORE (max 2.0) ===
+        if squeeze_bars >= 6:  # 24h+ of squeeze
+            total_score += 2.0
+            reasons.append(f"Long squeeze ({squeeze_bars} bars)")
+        elif squeeze_bars >= 3:  # 12h+
+            total_score += 1.0
+            reasons.append(f"Squeeze ({squeeze_bars} bars)")
+        else:
+            total_score += 0.5
+
+        # === INTENSITY: BB width in bottom 25th percentile ===
+        bb_w_current = float(bb_width.iloc[-1]) if not pd.isna(bb_width.iloc[-1]) else 0
+        bb_w_percentile = float((bb_width.dropna() < bb_w_current).mean()) if len(bb_width.dropna()) > 0 else 0.5
+        if bb_w_percentile <= 0.25:
+            total_score += 1.0
+            reasons.append(f"Tight squeeze (BB width {bb_w_percentile:.0%}ile)")
+
+        # === BREAKOUT DIRECTION (max 2.0) ===
+        direction = 0  # +1 bullish, -1 bearish
+        squeeze_fired = prev_squeeze and not current_squeeze
+
+        if squeeze_fired:
+            # Squeeze just fired — determine direction from momentum
+            total_score += 1.0  # Bonus for breakout event
+            mom = float(prices.iloc[-1]) - float(prices.iloc[-3]) if len(prices) > 2 else 0
+            if mom > 0:
+                direction = 1
+                total_score += 1.0
+                reasons.append("Squeeze fired ↑ (bullish breakout)")
+            else:
+                direction = -1
+                total_score += 1.0
+                reasons.append("Squeeze fired ↓ (bearish breakout)")
+        else:
+            # Still loading in squeeze — use momentum direction
+            sma_val = float(bb_sma.iloc[-1]) if not pd.isna(bb_sma.iloc[-1]) else current_price
+            if current_price > sma_val:
+                direction = 1
+                reasons.append("Squeeze loading (bullish bias)")
+            else:
+                direction = -1
+                reasons.append("Squeeze loading (bearish bias)")
+
+        # === VOLUME CONFIRMATION (1m data) ===
+        if df_1m is not None and len(df_1m) > 20 and squeeze_fired:
+            vol = df_1m["volume"]
+            avg_vol = float(vol.iloc[-21:-1].mean())
+            current_vol = float(vol.iloc[-1])
+            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
+            if vol_ratio >= 1.5:
+                total_score += 1.5
+                reasons.append(f"Volume spike {vol_ratio:.1f}x")
+
+        # === EXPANSION RATE ===
+        if len(bb_width) > 1:
+            prev_bw = float(bb_width.iloc[-2]) if not pd.isna(bb_width.iloc[-2]) else 0
+            if prev_bw > 0 and bb_w_current > 0:
+                expansion = (bb_w_current - prev_bw) / prev_bw
+                if expansion > 0.10:
+                    total_score += 1.0
+                    reasons.append(f"BB expanding {expansion:.0%}")
+
+        # Determine signal
+        signal_type = "hold"
+        confidence = 0.5
+
+        if direction > 0:
+            if total_score >= 4.0:
+                signal_type = "strong_buy"
+                confidence = min(0.85, 0.60 + total_score * 0.03)
+            elif total_score >= 2.5:
+                signal_type = "buy"
+                confidence = min(0.75, 0.55 + total_score * 0.03)
+        elif direction < 0:
+            if total_score >= 4.0:
+                signal_type = "strong_sell"
+                confidence = min(0.85, 0.60 + total_score * 0.03)
+            elif total_score >= 2.5:
+                signal_type = "sell"
+                confidence = min(0.75, 0.55 + total_score * 0.03)
+
+        # === HTF TREND HARD FILTER ===
+        if htf_trend == "bearish" and signal_type in ("buy", "strong_buy"):
+            reasons = [f"HTF bearish - blocked {signal_type}"] + reasons
+            signal_type = "hold"
+            confidence = 0.5
+        elif htf_trend != "bearish" and signal_type in ("sell", "strong_sell"):
+            reasons = [f"HTF {htf_trend} - blocked {signal_type} (need bearish)"] + reasons
+            signal_type = "hold"
+            confidence = 0.5
+        elif htf_trend == "neutral" and signal_type in ("buy", "strong_buy"):
+            confidence = max(0.5, confidence - 0.10)
+            reasons.append("HTF neutral (-10% conf)")
 
         return {
             "signal": signal_type,
             "confidence": confidence,
-            "reasoning": ", ".join(reasons),
+            "reasoning": ", ".join(reasons) if reasons else "No squeeze signals",
             "indicators": {
-                "rsi": rsi["value"],
-                "rsi_momentum": "rising" if rsi["rising"] else "falling",
-                "macd": macd,
-                "sma": sma,
                 "price": current_price,
-                "breakout_up": breakout_up,
-                "breakout_down": breakout_down,
-                "volume_spike": volume_spike,
-                "volume_ratio": volume_ratio,
+                "in_squeeze": current_squeeze,
+                "squeeze_fired": squeeze_fired,
+                "squeeze_bars": squeeze_bars,
+                "bb_width": bb_w_current,
+                "bb_width_percentile": bb_w_percentile,
+                "direction": direction,
+                "total_score": total_score,
                 "htf_trend": htf_trend,
             },
         }
 
 
+# =============================================================================
+# Strategy 3: Taker Flow (Taker Volume + Order Book Imbalance + L/S Ratio)
+# =============================================================================
+
+class TakerFlowGenerator:
+    """Generate signals from taker volume, order book imbalance, and L/S ratio.
+
+    Taker volume = real-time aggression (who is market-buying/selling).
+    Order book imbalance = passive liquidity positioning.
+    This is the short-term (1m) strategy — flow data is inherently short-lived.
+    """
+
+    def generate_signal(self, df: pd.DataFrame, htf_trend: str = "neutral",
+                        derivatives: dict = None, orderbook: dict = None,
+                        **kwargs) -> dict:
+        """Generate signal from taker flow and order book data."""
+        if derivatives is None or not derivatives:
+            return {"signal": "hold", "confidence": 0.5, "reasoning": "No derivatives data",
+                    "indicators": {"htf_trend": htf_trend}}
+
+        prices = df["close"] if not df.empty else pd.Series()
+        current_price = float(prices.iloc[-1]) if len(prices) > 0 else 0
+
+        total_score = 0.0
+        reasons = []
+
+        # === TAKER RATIO SCORE (max ±3.0) ===
+        taker_score = self._score_taker_ratio(derivatives, reasons)
+        total_score += taker_score
+
+        # === ORDER BOOK SCORE (max ±2.0) ===
+        ob_score = self._score_orderbook(orderbook, current_price, reasons)
+        total_score += ob_score
+
+        # === LONG-SHORT RATIO SCORE (max ±1.5, contrarian) ===
+        ls_score = self._score_long_short(derivatives, reasons)
+        total_score += ls_score
+
+        # Determine signal
+        signal_type = "hold"
+        confidence = 0.5
+
+        if total_score >= 3.5:
+            signal_type = "strong_buy"
+            confidence = min(0.85, 0.60 + abs(total_score) * 0.03)
+        elif total_score >= 2.0:
+            signal_type = "buy"
+            confidence = min(0.75, 0.55 + abs(total_score) * 0.03)
+        elif total_score <= -3.5:
+            signal_type = "strong_sell"
+            confidence = min(0.85, 0.60 + abs(total_score) * 0.03)
+        elif total_score <= -2.0:
+            signal_type = "sell"
+            confidence = min(0.75, 0.55 + abs(total_score) * 0.03)
+
+        # === HTF TREND HARD FILTER ===
+        if htf_trend == "bearish" and signal_type in ("buy", "strong_buy"):
+            reasons = [f"HTF bearish - blocked {signal_type}"] + reasons
+            signal_type = "hold"
+            confidence = 0.5
+        elif htf_trend != "bearish" and signal_type in ("sell", "strong_sell"):
+            reasons = [f"HTF {htf_trend} - blocked {signal_type} (need bearish)"] + reasons
+            signal_type = "hold"
+            confidence = 0.5
+        elif htf_trend == "neutral" and signal_type in ("buy", "strong_buy"):
+            confidence = max(0.5, confidence - 0.10)
+            reasons.append("HTF neutral (-10% conf)")
+
+        return {
+            "signal": signal_type,
+            "confidence": confidence,
+            "reasoning": ", ".join(reasons) if reasons else "No flow signals",
+            "indicators": {
+                "price": current_price,
+                "taker_score": taker_score,
+                "ob_score": ob_score,
+                "ls_score": ls_score,
+                "total_score": total_score,
+                "htf_trend": htf_trend,
+            },
+        }
+
+    def _score_taker_ratio(self, derivatives: dict, reasons: list) -> float:
+        """Score taker buy/sell ratio (max ±3.0)."""
+        score = 0.0
+
+        # 5m taker ratio (primary)
+        taker_5m = derivatives.get("taker_ratio_5m", [])
+        if taker_5m:
+            ratio = taker_5m[0]["buy_sell_ratio"]
+            if ratio > 1.3:
+                score = 2.0
+                reasons.append(f"5m taker ratio {ratio:.2f} (aggressive buying)")
+            elif ratio > 1.1:
+                score = 1.0
+                reasons.append(f"5m taker ratio {ratio:.2f} (buying)")
+            elif ratio < 0.77:
+                score = -2.0
+                reasons.append(f"5m taker ratio {ratio:.2f} (aggressive selling)")
+            elif ratio < 0.91:
+                score = -1.0
+                reasons.append(f"5m taker ratio {ratio:.2f} (selling)")
+
+        # 15m confirmation adds ±1.0
+        taker_15m = derivatives.get("taker_ratio_15m", [])
+        if taker_15m and abs(score) > 0:
+            ratio_15m = taker_15m[0]["buy_sell_ratio"]
+            if score > 0 and ratio_15m > 1.1:
+                score += 1.0
+                reasons.append(f"15m confirms buying ({ratio_15m:.2f})")
+            elif score < 0 and ratio_15m < 0.91:
+                score += -1.0
+                reasons.append(f"15m confirms selling ({ratio_15m:.2f})")
+
+        return max(-3.0, min(3.0, score))
+
+    def _score_orderbook(self, orderbook: dict, current_price: float, reasons: list) -> float:
+        """Score order book imbalance (max ±2.0)."""
+        score = 0.0
+        if not orderbook or current_price <= 0:
+            return 0.0
+
+        bids = orderbook.get("bids", [])
+        asks = orderbook.get("asks", [])
+        if not bids or not asks:
+            return 0.0
+
+        # Calculate volume within 0.5% of current price
+        price_range = current_price * 0.005
+        bid_vol = sum(q for p, q in bids if p >= current_price - price_range)
+        ask_vol = sum(q for p, q in asks if p <= current_price + price_range)
+        total_vol = bid_vol + ask_vol
+
+        if total_vol <= 0:
+            return 0.0
+
+        bid_pct = bid_vol / total_vol
+
+        if bid_pct > 0.65:
+            score = 1.5
+            reasons.append(f"OB bid heavy ({bid_pct:.0%}) → support")
+        elif bid_pct < 0.35:
+            score = -1.5
+            reasons.append(f"OB ask heavy ({1-bid_pct:.0%}) → resistance")
+
+        # Whale order detection: any single order > 5x average
+        all_orders = bids + asks
+        if all_orders:
+            avg_size = sum(q for _, q in all_orders) / len(all_orders)
+            for p, q in bids:
+                if q > avg_size * 5 and p >= current_price - price_range:
+                    score += 0.5
+                    reasons.append(f"Whale bid ${p:,.0f}")
+                    break
+            for p, q in asks:
+                if q > avg_size * 5 and p <= current_price + price_range:
+                    score -= 0.5
+                    reasons.append(f"Whale ask ${p:,.0f}")
+                    break
+
+        return max(-2.0, min(2.0, score))
+
+    def _score_long_short(self, derivatives: dict, reasons: list) -> float:
+        """Score top trader L/S ratio (max ±1.5, contrarian)."""
+        score = 0.0
+        ls_data = derivatives.get("top_long_short", [])
+        if not ls_data:
+            return 0.0
+
+        long_pct = ls_data[0]["long_account"]  # Already 0-1
+
+        # Contrarian: crowded longs = bearish, crowded shorts = bullish
+        if long_pct > 0.71:
+            score = -1.5
+            reasons.append(f"Top traders {long_pct:.0%} long (crowded → contrarian short)")
+        elif long_pct > 0.62:
+            score = -0.5
+            reasons.append(f"Top traders {long_pct:.0%} long (leaning long)")
+        elif long_pct < 0.38:  # i.e. >62% short
+            score = 1.5
+            reasons.append(f"Top traders {1-long_pct:.0%} short (crowded → contrarian long)")
+        elif long_pct < 0.48:  # i.e. >52% short
+            score = 0.5
+            reasons.append(f"Top traders {1-long_pct:.0%} short (leaning short)")
+
+        return score
+
+
+# =============================================================================
+# Strategy Config + Paper Trader
+# =============================================================================
+
 @dataclass
 class StrategyConfig:
     """Configuration for a trading strategy."""
-    name: str                        # "agreement_classic", "agreement_mtf", "momentum"
-    strategy_type: str               # "agreement", "agreement_mtf", "momentum"
+    name: str                        # "funding_sentiment", "volatility_squeeze", "taker_flow"
+    strategy_type: str               # "funding", "squeeze", "taker"
     generator: object                # Signal generator instance
-    stop_loss_pct: float             # e.g., 0.012
-    take_profit_pct: float           # e.g., 0.025
-    trailing_activation_pct: float   # e.g., 0.015
-    trailing_distance_pct: float     # e.g., 0.008
-    max_position_hours: float        # e.g., 4.0
+    stop_loss_pct: float             # e.g., 0.015
+    take_profit_pct: float           # e.g., 0.040
+    trailing_activation_pct: float   # e.g., 0.020
+    trailing_distance_pct: float     # e.g., 0.010
+    max_position_hours: float        # e.g., 8.0
     capital: float                   # Allocated capital
 
     @property
@@ -658,12 +712,15 @@ class StrategyConfig:
     @property
     def source_label(self) -> str:
         """Signal source label for DB."""
-        return self.strategy_type  # "agreement", "agreement_mtf", "momentum"
+        return self.strategy_type  # "funding", "squeeze", "taker"
 
 
-# Strategy name mapping for backward compat with old "paper_technical" trades
+# Strategy name mapping for backward compat with old trades
 LEGACY_STRATEGY_MAP = {
     "paper_technical": "agreement_classic",
+    "agreement_classic": "agreement_classic",
+    "agreement_mtf": "agreement_mtf",
+    "momentum": "momentum",
 }
 
 
@@ -693,18 +750,18 @@ class SimplePaperTrader:
         # Liquidation tracking
         self.liquidation_pct = 1.0 / leverage * 0.9  # ~9% for 10x (with 10% buffer)
 
-        # Default strategy if none provided (backward compat)
+        # Default strategy if none provided
         if strategies is None:
             strategies = [
                 StrategyConfig(
-                    name="agreement_classic",
-                    strategy_type="agreement",
-                    generator=TechnicalSignalGenerator(),
-                    stop_loss_pct=0.012,
-                    take_profit_pct=0.025,
-                    trailing_activation_pct=0.015,
-                    trailing_distance_pct=0.008,
-                    max_position_hours=4.0,
+                    name="funding_sentiment",
+                    strategy_type="funding",
+                    generator=FundingSentimentGenerator(),
+                    stop_loss_pct=0.015,
+                    take_profit_pct=0.040,
+                    trailing_activation_pct=0.020,
+                    trailing_distance_pct=0.010,
+                    max_position_hours=8.0,
                     capital=initial_capital,
                 ),
             ]
@@ -781,7 +838,7 @@ class SimplePaperTrader:
                     if not symbol:
                         continue
 
-                    # Map strategy name (handle legacy "paper_technical")
+                    # Map strategy name (handle legacy names)
                     strategy_name = trade.get("strategy_name", "paper_technical")
                     strategy_name = LEGACY_STRATEGY_MAP.get(strategy_name, strategy_name)
 
@@ -852,7 +909,7 @@ class SimplePaperTrader:
         await self._load_existing_positions()
 
         logger.info("=" * 70)
-        logger.info("🚀 Starting Multi-Strategy Paper Trading")
+        logger.info("🚀 Starting v5.0 Derivatives-Data Paper Trading")
         logger.info(f"   Symbols: {self.symbols}")
         logger.info(f"   Total Capital: ${self.initial_capital:,.2f} | Leverage: {self.leverage}x")
         logger.info("-" * 70)
@@ -867,14 +924,14 @@ class SimplePaperTrader:
         try:
             while self.running:
                 for symbol in self.symbols:
-                    # Fetch candles once per symbol (shared across strategies)
-                    candles = await self._fetch_candles(symbol, collector)
-                    if candles is None:
+                    # Fetch all market data once per symbol
+                    market_data = await self._fetch_market_data(symbol, collector)
+                    if market_data is None:
                         continue
 
                     # Run each strategy
                     for strategy in self.strategies:
-                        await self._process_strategy_symbol(strategy, symbol, candles)
+                        await self._process_strategy_symbol(strategy, symbol, market_data)
 
                 # Save performance snapshots (one per strategy)
                 await self._save_performance_snapshots()
@@ -896,60 +953,101 @@ class SimplePaperTrader:
         """Stop paper trading."""
         self.running = False
 
-    async def _fetch_candles(self, symbol: str, collector: MarketDataCollector) -> dict | None:
-        """Fetch all needed candles for a symbol (shared across strategies)."""
+    async def _fetch_market_data(self, symbol: str, collector: MarketDataCollector) -> dict | None:
+        """Fetch all needed data for a symbol (candles + derivatives)."""
         try:
-            df_1m = await collector.get_binance_klines(symbol, "1m", 100)
+            # Parallel fetch: 1m candles, 1h candles, ticker, derivatives, orderbook
+            # Also fetch 4h candles if squeeze strategy is active
+            fetch_4h = any(s.strategy_type == "squeeze" for s in self.strategies)
+            fetch_derivatives = any(s.strategy_type in ("funding", "taker") for s in self.strategies)
+            fetch_orderbook = any(s.strategy_type == "taker" for s in self.strategies)
+
+            tasks = [
+                collector.get_binance_klines(symbol, "1m", 100),
+                collector.get_binance_klines(symbol, "1h", 100),
+                collector.get_binance_ticker(symbol),
+            ]
+            if fetch_4h:
+                tasks.append(collector.get_binance_klines(symbol, "4h", 50))
+            if fetch_derivatives:
+                tasks.append(collector.get_derivatives_data(symbol))
+            if fetch_orderbook:
+                tasks.append(collector.get_orderbook(symbol, 100))
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            df_1m = results[0] if not isinstance(results[0], Exception) else pd.DataFrame()
+            df_1h = results[1] if not isinstance(results[1], Exception) else pd.DataFrame()
+            ticker = results[2] if not isinstance(results[2], Exception) else {}
+
             if df_1m.empty:
                 return None
 
-            df_1h = await collector.get_binance_klines(symbol, "1h", 100)
-
-            ticker = await collector.get_binance_ticker(symbol)
             current_price = ticker.get("price", 0) if ticker else 0
             if current_price <= 0:
                 return None
 
-            candles = {
+            market_data = {
                 "1m": df_1m,
                 "1h": df_1h,
                 "current_price": current_price,
             }
 
-            # Only fetch 5m/30m if any MTF strategy is active
-            if any(s.strategy_type == "agreement_mtf" for s in self.strategies):
-                candles["5m"] = await collector.get_binance_klines(symbol, "5m", 100)
-                candles["30m"] = await collector.get_binance_klines(symbol, "30m", 100)
+            idx = 3
+            if fetch_4h:
+                market_data["4h"] = results[idx] if not isinstance(results[idx], Exception) else pd.DataFrame()
+                idx += 1
+            if fetch_derivatives:
+                market_data["derivatives"] = results[idx] if not isinstance(results[idx], Exception) else {}
+                idx += 1
+            if fetch_orderbook:
+                market_data["orderbook"] = results[idx] if not isinstance(results[idx], Exception) else {}
+                idx += 1
 
-            return candles
+            return market_data
         except Exception as e:
-            logger.error(f"Error fetching candles for {symbol}: {e}")
+            logger.error(f"Error fetching market data for {symbol}: {e}")
             return None
 
-    async def _process_strategy_symbol(self, strategy: StrategyConfig, symbol: str, candles: dict):
+    async def _process_strategy_symbol(self, strategy: StrategyConfig, symbol: str, market_data: dict):
         """Process a single strategy+symbol combination."""
         try:
-            df_1m = candles["1m"]
-            df_1h = candles["1h"]
-            current_price = candles["current_price"]
+            df_1m = market_data["1m"]
+            df_1h = market_data["1h"]
+            current_price = market_data["current_price"]
 
             # Determine HTF trend (shared 1h analysis)
             htf_trend = "neutral"
             if not df_1h.empty:
-                htf_trend = strategy.generator.determine_htf_trend(df_1h)
+                htf_trend = determine_htf_trend(df_1h)
 
             # Generate signal based on strategy type
-            if strategy.strategy_type == "agreement_mtf":
+            if strategy.strategy_type == "funding":
                 signal_result = strategy.generator.generate_signal(
                     df_1m, htf_trend,
-                    df_5m=candles.get("5m"),
-                    df_30m=candles.get("30m"),
+                    derivatives=market_data.get("derivatives"),
+                )
+            elif strategy.strategy_type == "squeeze":
+                signal_result = strategy.generator.generate_signal(
+                    df_1m, htf_trend,
+                    df_4h=market_data.get("4h"),
+                    df_1m=df_1m,
+                )
+            elif strategy.strategy_type == "taker":
+                signal_result = strategy.generator.generate_signal(
+                    df_1m, htf_trend,
+                    derivatives=market_data.get("derivatives"),
+                    orderbook=market_data.get("orderbook"),
                 )
             else:
-                signal_result = strategy.generator.generate_signal(df_1m, htf_trend)
+                signal_result = {"signal": "hold", "confidence": 0.5,
+                                 "reasoning": f"Unknown strategy type: {strategy.strategy_type}"}
+
+            # Determine timeframe label for DB
+            timeframe = "4h" if strategy.strategy_type == "squeeze" else "1m"
 
             # Save signal to DB
-            await self._save_signal(symbol, signal_result, current_price, strategy)
+            await self._save_signal(symbol, signal_result, current_price, strategy, timeframe)
 
             # Trading logic
             pos_key = self._pos_key(strategy.name, symbol)
@@ -1073,7 +1171,7 @@ class SimplePaperTrader:
             hours_open = (datetime.now(timezone.utc) - position["entry_time"]).total_seconds() / 3600
             exit_reason = f"Stale position ({hours_open:.1f}h, only {pnl_pct:.2%} profit)"
 
-        # 5. RSI-BASED PROFIT TAKING
+        # 5. RSI-BASED PROFIT TAKING (using 1m data if available)
         elif self._should_exit_on_rsi(position, signal, pnl_pct, strategy):
             indicators = signal.get("indicators", {})
             rsi = indicators.get("rsi", 50)
@@ -1298,7 +1396,8 @@ class SimplePaperTrader:
             except Exception as e:
                 logger.error(f"Error closing {pos_key}: {e}")
 
-    async def _save_signal(self, symbol: str, signal: dict, price: float, strategy: StrategyConfig):
+    async def _save_signal(self, symbol: str, signal: dict, price: float,
+                           strategy: StrategyConfig, timeframe: str = "1m"):
         """Save signal to Supabase."""
         try:
             # Convert indicators to JSON-safe format
@@ -1316,7 +1415,7 @@ class SimplePaperTrader:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "symbol": symbol,
                 "exchange": "binance",
-                "timeframe": "1m",
+                "timeframe": timeframe,
                 "signal_type": signal["signal"],
                 "source": strategy.source_label,
                 "confidence": signal["confidence"],
@@ -1436,7 +1535,7 @@ async def main():
     """Main function."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Multi-Strategy Paper Trading")
+    parser = argparse.ArgumentParser(description="v5.0 Derivatives-Data Paper Trading")
     parser.add_argument(
         "--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT", "XRPUSDT"],
         help="Symbols to trade"
@@ -1455,16 +1554,10 @@ async def main():
     )
     parser.add_argument(
         "--strategies", nargs="+",
-        default=["agreement_classic", "agreement_mtf", "momentum"],
-        choices=["agreement_classic", "agreement_mtf", "momentum"],
+        default=["funding_sentiment", "volatility_squeeze", "taker_flow"],
+        choices=["funding_sentiment", "volatility_squeeze", "taker_flow"],
         help="Strategies to run (default: all three)"
     )
-    # Exit params (applied to agreement strategies; momentum has own defaults)
-    parser.add_argument("--stop-loss", type=float, default=0.012, help="Agreement SL %% (default: 1.2%%)")
-    parser.add_argument("--take-profit", type=float, default=0.025, help="Agreement TP %% (default: 2.5%%)")
-    parser.add_argument("--trailing-activation", type=float, default=0.015, help="Agreement trailing activation (default: 1.5%%)")
-    parser.add_argument("--trailing-distance", type=float, default=0.008, help="Agreement trailing distance (default: 0.8%%)")
-    parser.add_argument("--max-position-hours", type=float, default=4.0, help="Agreement max hold hours (default: 4.0)")
 
     args = parser.parse_args()
 
@@ -1482,44 +1575,44 @@ async def main():
 
     # Build strategy configs
     selected = args.strategies
-    capital_per_strategy = args.capital  # Each strategy gets full capital amount
+    capital_per_strategy = args.capital
 
     strategy_configs = []
     for name in selected:
-        if name == "agreement_classic":
+        if name == "funding_sentiment":
             strategy_configs.append(StrategyConfig(
-                name="agreement_classic",
-                strategy_type="agreement",
-                generator=TechnicalSignalGenerator(),
-                stop_loss_pct=args.stop_loss,
-                take_profit_pct=args.take_profit,
-                trailing_activation_pct=args.trailing_activation,
-                trailing_distance_pct=args.trailing_distance,
-                max_position_hours=args.max_position_hours,
+                name="funding_sentiment",
+                strategy_type="funding",
+                generator=FundingSentimentGenerator(),
+                stop_loss_pct=0.015,
+                take_profit_pct=0.040,
+                trailing_activation_pct=0.020,
+                trailing_distance_pct=0.010,
+                max_position_hours=8.0,
                 capital=capital_per_strategy,
             ))
-        elif name == "agreement_mtf":
+        elif name == "volatility_squeeze":
             strategy_configs.append(StrategyConfig(
-                name="agreement_mtf",
-                strategy_type="agreement_mtf",
-                generator=MTFSignalGenerator(),
-                stop_loss_pct=args.stop_loss,
-                take_profit_pct=args.take_profit,
-                trailing_activation_pct=args.trailing_activation,
-                trailing_distance_pct=args.trailing_distance,
-                max_position_hours=args.max_position_hours,
+                name="volatility_squeeze",
+                strategy_type="squeeze",
+                generator=VolatilitySqueezeGenerator(),
+                stop_loss_pct=0.010,
+                take_profit_pct=0.030,
+                trailing_activation_pct=0.015,
+                trailing_distance_pct=0.007,
+                max_position_hours=12.0,
                 capital=capital_per_strategy,
             ))
-        elif name == "momentum":
+        elif name == "taker_flow":
             strategy_configs.append(StrategyConfig(
-                name="momentum",
-                strategy_type="momentum",
-                generator=MomentumBreakoutGenerator(),
-                stop_loss_pct=0.008,         # Tighter SL for momentum
-                take_profit_pct=0.018,       # Faster TP
-                trailing_activation_pct=0.010,
-                trailing_distance_pct=0.005,
-                max_position_hours=2.0,      # Shorter hold
+                name="taker_flow",
+                strategy_type="taker",
+                generator=TakerFlowGenerator(),
+                stop_loss_pct=0.008,
+                take_profit_pct=0.016,
+                trailing_activation_pct=0.008,
+                trailing_distance_pct=0.004,
+                max_position_hours=2.0,
                 capital=capital_per_strategy,
             ))
 

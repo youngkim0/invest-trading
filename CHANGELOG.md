@@ -1,5 +1,42 @@
 # Paper Trader Changelog
 
+## v5.0 — Derivatives-Data Signal Strategies (2026-03-09)
+
+**Problem**: v4.0's 3 strategies (agreement_classic, agreement_mtf, momentum) all used lagging technical indicators (MACD/SMA/RSI) on 1m candles. After 3 days and 143 trades, signal accuracy was **43%** — worse than a coinflip. Testing across all timeframes (1m through 1d) showed MACD+SMA had ~47-51% accuracy on every timeframe. The indicators had zero predictive power. The system only profited because the 1h HTF filter correctly identified macro trend direction. Entry signals were decorative.
+
+**Solution**: Replace all 3 signal generators with strategies using **derivatives market data** (funding rates, open interest, taker flow, order book) — forward-looking data that measures what participants are *doing*, not what price already *did*. All data is freely available from Binance public Futures API (no API key needed).
+
+**3 New Strategies**:
+
+1. **Funding Sentiment** (`funding_sentiment`) — Funding rate + OI divergence + futures basis scoring. Extreme funding precedes reversals. OI divergence (OI rising while price falls) is a leading indicator. Basis measures futures premium/discount. Params: SL 1.5%, TP 4.0%, trailing 2.0%/1.0%, max hold 8h, R:R 2.67:1.
+
+2. **Volatility Squeeze** (`volatility_squeeze`) — Bollinger Band squeeze inside Keltner Channel on **4h candles**. Volatility is mean-reverting; breakout from squeeze produces asymmetric payoff. Only acts on completed 4h candles. Volume confirmation from 1m data. Params: SL 1.0%, TP 3.0%, trailing 1.5%/0.7%, max hold 12h, R:R 3.0:1.
+
+3. **Taker Flow** (`taker_flow`) — Taker buy/sell volume ratio + order book imbalance + top trader L/S ratio (contrarian). Real-time aggression data. Short-term (1m) strategy since flow data is inherently short-lived. Params: SL 0.8%, TP 1.6%, trailing 0.8%/0.4%, max hold 2h, R:R 2.0:1.
+
+**Data sources** (all Binance Futures public API):
+- `fapi/v1/fundingRate` — funding rate history
+- `fapi/v1/openInterest` — current OI snapshot
+- `futures/data/openInterestHist` — OI trend (5m intervals)
+- `fapi/v1/premiumIndex` — mark price, index price, predicted funding
+- `futures/data/takerlongshortRatio` — taker buy/sell volume (5m/15m/1h)
+- `futures/data/topLongShortAccountRatio` — top trader positioning
+- `api/v3/depth` — order book (existing)
+
+**Architecture changes**:
+- Removed: `TechnicalSignalGenerator`, `MTFSignalGenerator`, `MomentumBreakoutGenerator`, all SMC imports
+- Kept: `StrategyConfig`, `SimplePaperTrader` (position management, exit logic, DB logging), `determine_htf_trend()` (standalone), `calculate_rsi()` (standalone, for RSI exit), SL cooldown/daily max SL
+- Added: `FundingSentimentGenerator`, `VolatilitySqueezeGenerator`, `TakerFlowGenerator`
+- `_fetch_candles()` → `_fetch_market_data()`: parallel fetch candles + derivatives + orderbook
+- 4h candle fetch added for squeeze strategy
+- `get_derivatives_data()` in MarketDataCollector: parallel fetch all 8 futures endpoints via asyncio.gather
+
+**Rate limits**: 8 derivatives API calls per symbol per cycle x 3 symbols x 1/min = 24 calls/min (Binance allows 1200/min).
+
+**Dashboard**: Updated strategy selector, badge mappings, and comparison table for new strategy names. Version bumped to v5.0.
+
+---
+
 ## v4.0 — Multi-Strategy Architecture (2026-03-06)
 
 **Goal**: Compare multiple signal generation strategies side-by-side with independent capital allocation and tracking. Determines which approach works best in different market conditions.
