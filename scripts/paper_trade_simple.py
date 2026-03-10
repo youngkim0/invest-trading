@@ -354,10 +354,11 @@ class TrendBreakoutGenerator:
 class OIMomentumGenerator:
     """OI rising + RSI momentum zone = new money entering in one direction.
 
-    Entry requires ALL 3 conditions (boolean, no scoring):
-    1. 5m RSI(14) in momentum zone: 55-75 (long) or 25-45 (short) — NOT extremes
-    2. OI rising > 1% over last 30min
-    3. Price within 2x ATR(5m) of 20-bar SMA — not chasing extended moves
+    Entry requires ALL 4 conditions (boolean, no scoring):
+    1. HTF trend strength >= 0.2 (avoid ranging markets)
+    2. 5m RSI(14) in momentum zone: 55-75 (long) or 25-45 (short) — NOT extremes
+    3. OI rising > 1% over last 30min
+    4. Price within 2x ATR(5m) of 20-bar SMA — not chasing extended moves
     """
 
     def generate_signal(self, df_5m: pd.DataFrame, htf_trend: dict,
@@ -374,6 +375,12 @@ class OIMomentumGenerator:
         prices = df_5m["close"]
         current_price = float(prices.iloc[-1])
         reasons = []
+
+        # === CONDITION 0: HTF trend strength >= 0.2 ===
+        strength = htf_trend.get("strength", 0.0)
+        if strength < 0.2:
+            return hold_signal(f"HTF too weak for OI momentum (str={strength:.2f})", htf_trend)
+        reasons.append(f"HTF str={strength:.2f}")
 
         # === CONDITION 1: 5m RSI in momentum zone (NOT extremes) ===
         rsi_data = calculate_rsi(prices)
@@ -1463,7 +1470,7 @@ async def main():
                 generator=TrendBreakoutGenerator(),
                 sl_atr_mult=1.5,
                 tp_atr_mult=3.0,
-                trailing_atr_mult=2.0,
+                trailing_atr_mult=2.5,
                 trailing_dist_atr_mult=1.0,
                 max_position_hours=6.0,
                 risk_per_trade_pct=0.02,
@@ -1477,8 +1484,8 @@ async def main():
                 generator=OIMomentumGenerator(),
                 sl_atr_mult=1.5,
                 tp_atr_mult=2.5,
-                trailing_atr_mult=1.5,
-                trailing_dist_atr_mult=0.8,
+                trailing_atr_mult=2.0,
+                trailing_dist_atr_mult=1.0,
                 max_position_hours=3.0,
                 risk_per_trade_pct=0.015,
                 capital=capital_per_strategy,

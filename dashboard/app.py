@@ -26,7 +26,7 @@ try:
     UTC = ZoneInfo("UTC")
 except Exception:
     pass  # Keep the fallback values defined above
-NEW_SYSTEM_DATE = "2026-03-09T12:57:00Z"
+NEW_SYSTEM_DATE = "2026-03-10T14:00:00Z"
 
 
 def to_kst(timestamp_str: str) -> str:
@@ -460,7 +460,7 @@ Keep response under 500 words."""
 def main():
     st.title("📈 AI Trading Dashboard")
     kst_now = datetime.now(timezone.utc) + timedelta(hours=9)
-    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v6.0 started: Mar 9, 2026 21:57 KST | v6.0 (evidence-based strategies + ATR stops)")
+    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v6.0.1 started: Mar 10, 2026 23:00 KST | v6.0.1 (fixed R:R + OI filtering)")
 
     # Auto refresh + strategy selector
     col1, col2, col3 = st.columns([2.5, 1.5, 1])
@@ -719,7 +719,10 @@ def main():
         for sym in ["BTCUSDT", "ETHUSDT", "XRPUSDT"]:
             price_maps[sym] = fetch_price_at_time(sym, 500)
 
-        for i, sig in enumerate(page_signals):
+        # Filter to actionable signals only (buy/sell) — hold signals are noise
+        actionable_signals = [s for s in page_signals if (s.get('signal_type') or 'hold') != 'hold']
+
+        for i, sig in enumerate(actionable_signals):
             signal_type = sig.get('signal_type', 'hold') or 'hold'
             confidence = float(sig.get('confidence') or 0) * 100
             sig_price = float(sig.get('entry_price') or 0)
@@ -743,7 +746,7 @@ def main():
             result = "⏳"
             result_text = "Pending"
 
-            if signal_type != 'hold' and sig_price > 0:
+            if sig_price > 0:
                 # Parse signal timestamp
                 sig_time = sig.get('timestamp', '')
                 sig_dt = None
@@ -790,15 +793,12 @@ def main():
                         signal_results['pending'] += 1
                 else:
                     signal_results['pending'] += 1
-            else:
-                if signal_type == 'hold':
-                    result = "➖"
-                    result_text = "Hold"
-
             # Strategy source label
             sig_source = sig.get('source', 'technical')
             source_labels = {
                 'funding': '💰 Funding',
+                'breakout': '📈 Breakout',
+                'oi': '⚡ OI Momentum',
                 'squeeze': '📊 Squeeze',
                 'taker': '🌊 Flow',
                 'agreement': '🔵 Classic',

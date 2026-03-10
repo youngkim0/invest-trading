@@ -1,5 +1,16 @@
 # Paper Trader Changelog
 
+## v6.0.1 — Fix Inverted R:R and OI Momentum Filtering (2026-03-10)
+
+**Problem**: After 24h of v6.0, results were 4W/6L (-$40.88, 40% WR) with inverted R:R (0.83:1 instead of 2:1). Root causes: (1) trailing_atr_mult set equal to sl_atr_mult for oi_momentum (both 1.5x ATR) — trailing activates at SL distance, so winners exit for tiny gains; (2) oi_momentum entered on near-zero HTF strength (0.021), catching noise in ranging markets; (3) dashboard signal table flooded with hold signals, making accuracy stats 0/0.
+
+**Fixes**:
+- **Raise trailing activation**: oi_momentum 1.5x→2.0x ATR (dist 0.8x→1.0x); trend_breakout 2.0x→2.5x ATR. Now trailing activates well above SL, letting winners run to proper R:R.
+- **Add HTF strength filter to oi_momentum**: Require strength >= 0.2 before entering. Prevents entries in directionless markets.
+- **Dashboard: filter to actionable signals only**: Signal table now shows only buy/sell signals (not holds). Accuracy stats become meaningful.
+- **Dashboard: add source labels**: Added "breakout" and "oi" labels for v6.0 strategies.
+- **Data reset**: NEW_SYSTEM_DATE updated to clear v6.0 data and start fresh with fixes.
+
 ## v6.0 — Evidence-Based Strategy Redesign (2026-03-09)
 
 **Problem**: v5.0-5.1 strategies all failed: funding_sentiment (0 trades — 8h funding data too slow), volatility_squeeze (0 trades — BB/KC squeeze too rare in crypto), taker_flow (5 trades, 25% WR, -$58 — 1m data too noisy, 0.8% SL too tight). Historical analysis shows the 1h HTF trend filter was the ONLY consistently profitable edge (v3.6 achieved 53% WR with it). Research confirms: funding rate mean reversion has strongest evidence (Sharpe 1.4-2.3), OI works as confirmer not standalone, ATR-based stops >> fixed %.
