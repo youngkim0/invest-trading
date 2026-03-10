@@ -100,7 +100,7 @@ def fetch_signals(limit: int = 100):
         client = get_supabase()
         if not client:
             return []
-        result = client.table('signals').select('*').order('timestamp', desc=True).limit(limit).execute()
+        result = client.table('signals').select('*').gte('timestamp', NEW_SYSTEM_DATE).order('timestamp', desc=True).limit(limit).execute()
         return result.data or []
     except Exception as e:
         st.error(f"Error fetching signals: {e}")
