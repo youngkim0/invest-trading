@@ -1,5 +1,15 @@
 # Paper Trader Changelog
 
+## v6.0.2 — Fix Trailing Stops, Signal Noise, ATR Floor (2026-03-11)
+
+**Problem**: v6.0.1 ran 12h (16 trades, 8W/8L, -$18.57, 50% WR). Despite 50% WR, system lost money because trailing stops clipped all winners: 6/7 wins exited via trailing at 36-60% of designed TP. Actual R:R was 0.83:1 instead of designed 2:1. Only 1/16 trades hit full TP. Signal DB flooded with ~6500 hold signals/12h. oi_momentum's 5m ATR produced SL as tight as 0.33%, clipped by noise.
+
+**Fixes**:
+- **Disable trailing stops**: Added `trailing_enabled` flag to StrategyConfig (default False). Trailing update + trailing exit gated on flag. Backwards-compatible (existing positions default True). Pure SL/TP exits let winners run to designed 2:1 R:R. Can re-enable later with better tuning.
+- **Only save actionable signals**: Skip `_save_signal()` for hold signals. Holds still logged to debug for journalctl. Eliminates ~6500 hold signals/12h noise in DB. Dashboard accuracy stats become meaningful.
+- **ATR floor for oi_momentum**: Added `min_sl_pct` to StrategyConfig. When ATR-computed SL < floor, all stops scale proportionally (preserves R:R). Set 0.5% floor for oi_momentum. Prevents ultra-tight 0.33% stops from noise-clipping.
+- **Strategy-aware stale exit**: `_is_stale_position` now uses `tp_pct * 0.25` instead of fixed 0.005. Adapts per strategy (funding_reversion needs different threshold than oi_momentum).
+
 ## v6.0.1 — Fix Inverted R:R and OI Momentum Filtering (2026-03-10)
 
 **Problem**: After 24h of v6.0, results were 4W/6L (-$40.88, 40% WR) with inverted R:R (0.83:1 instead of 2:1). Root causes: (1) trailing_atr_mult set equal to sl_atr_mult for oi_momentum (both 1.5x ATR) — trailing activates at SL distance, so winners exit for tiny gains; (2) oi_momentum entered on near-zero HTF strength (0.021), catching noise in ranging markets; (3) dashboard signal table flooded with hold signals, making accuracy stats 0/0.

@@ -460,6 +460,8 @@ class StrategyConfig:
     risk_per_trade_pct: float        # Risk % of capital per trade (e.g. 0.02 = 2%)
     capital: float                   # Allocated capital
     atr_timeframe: str = "1h"        # Which timeframe to compute ATR on
+    trailing_enabled: bool = False   # Whether trailing stops are active
+    min_sl_pct: float = 0.0         # Floor for SL % (0 = no floor)
 
     @property
     def rr_ratio(self) -> float:
@@ -555,6 +557,7 @@ class SimplePaperTrader:
                     risk_per_trade_pct=0.02,
                     capital=initial_capital,
                     atr_timeframe="1h",
+                    trailing_enabled=False,
                 ),
             ]
 
@@ -863,8 +866,11 @@ class SimplePaperTrader:
             tf_map = {"funding": "1h", "breakout": "15m", "oi": "5m"}
             timeframe = tf_map.get(strategy.strategy_type, "1m")
 
-            # Save signal to DB
-            await self._save_signal(symbol, signal_result, current_price, strategy, timeframe)
+            # Save only actionable signals to DB (skip holds)
+            if signal_result.get("signal", "hold") != "hold":
+                await self._save_signal(symbol, signal_result, current_price, strategy, timeframe)
+            else:
+                logger.debug(f"   [{strategy.name}] {symbol}: hold signal (not saved to DB)")
 
             # Trading logic — pass ATR for position sizing
             pos_key = self._pos_key(strategy.name, symbol)
@@ -952,8 +958,9 @@ class SimplePaperTrader:
         trailing_act_pct = position.get("trailing_act_pct", 0.03)
         trailing_dist_pct = position.get("trailing_dist_pct", 0.015)
 
-        # Update peak profit and trailing stop
-        self._update_trailing_stop(pos_key, pnl_pct, trailing_act_pct)
+        # Update peak profit and trailing stop (only if trailing enabled)
+        if position.get("trailing_enabled", True):
+            self._update_trailing_stop(pos_key, pnl_pct, trailing_act_pct)
 
         should_exit = False
         exit_reason = ""
@@ -971,8 +978,8 @@ class SimplePaperTrader:
             roe = pnl_pct * self.leverage * 100
             exit_reason = f"Take profit ({pnl_pct:.2%} = +{roe:.0f}% ROE)"
 
-        # 2. TRAILING STOP
-        elif position.get("trailing_stop_active", False):
+        # 2. TRAILING STOP (only if trailing enabled for this strategy)
+        elif position.get("trailing_enabled", True) and position.get("trailing_stop_active", False):
             peak_pnl = position.get("peak_pnl_pct", 0)
             trailing_stop_level = peak_pnl - trailing_dist_pct
             if pnl_pct <= trailing_stop_level:
@@ -1012,10 +1019,12 @@ class SimplePaperTrader:
             await self._close_position(pos_key, price, exit_reason, strategy)
 
     def _is_stale_position(self, position: dict, pnl_pct: float, strategy: StrategyConfig) -> bool:
-        """Check if position is stale (old with minimal profit)."""
+        """Check if position is stale (old with minimal profit).
+        Uses 25% of designed TP as minimum profit threshold (strategy-aware)."""
         hours_open = (datetime.now(timezone.utc) - position["entry_time"]).total_seconds() / 3600
         if hours_open >= strategy.max_position_hours:
-            if pnl_pct < self.stale_position_min_profit_pct:
+            min_profit = position.get("tp_pct", 0.04) * 0.25
+            if pnl_pct < min_profit:
                 return True
         return False
 
@@ -1112,6 +1121,15 @@ class SimplePaperTrader:
         trailing_act_pct = trailing_act_distance / price
         trailing_dist_pct = trailing_dist_distance / price
 
+        # Apply SL floor: if ATR-based SL is below minimum, scale all stops proportionally
+        if strategy.min_sl_pct > 0 and sl_pct < strategy.min_sl_pct:
+            scale = strategy.min_sl_pct / sl_pct
+            logger.info(f"   [{strategy.name}] Applied SL floor: {sl_pct:.3%} → {strategy.min_sl_pct:.3%} (scale {scale:.2f}x)")
+            sl_pct = strategy.min_sl_pct
+            tp_pct *= scale
+            trailing_act_pct *= scale
+            trailing_dist_pct *= scale
+
         # Risk-based position sizing
         quantity, margin = calculate_position_size(
             capital=stats["capital"],
@@ -1157,6 +1175,7 @@ class SimplePaperTrader:
             "tp_pct": tp_pct,
             "trailing_act_pct": trailing_act_pct,
             "trailing_dist_pct": trailing_dist_pct,
+            "trailing_enabled": strategy.trailing_enabled,
         }
 
         logger.info(
@@ -1462,6 +1481,7 @@ async def main():
                 risk_per_trade_pct=0.02,
                 capital=capital_per_strategy,
                 atr_timeframe="1h",
+                trailing_enabled=False,
             ))
         elif name == "trend_breakout":
             strategy_configs.append(StrategyConfig(
@@ -1476,6 +1496,7 @@ async def main():
                 risk_per_trade_pct=0.02,
                 capital=capital_per_strategy,
                 atr_timeframe="15m",
+                trailing_enabled=False,
             ))
         elif name == "oi_momentum":
             strategy_configs.append(StrategyConfig(
@@ -1490,6 +1511,8 @@ async def main():
                 risk_per_trade_pct=0.015,
                 capital=capital_per_strategy,
                 atr_timeframe="5m",
+                trailing_enabled=False,
+                min_sl_pct=0.005,
             ))
 
     # Create trader
