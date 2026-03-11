@@ -356,7 +356,7 @@ class OIMomentumGenerator:
 
     Entry requires ALL 3 conditions (boolean, no scoring):
     1. 5m RSI(14) in momentum zone: 55-75 (long) or 25-45 (short) — NOT extremes
-    2. OI rising > 1% over last 30min
+    2. OI rising > 0.5% over last 30min (lowered from 1% — too restrictive in ranging markets)
     3. Price within 2x ATR(5m) of 20-bar SMA — not chasing extended moves
 
     No HTF filter — RSI already determines direction, OI confirms conviction.
@@ -401,7 +401,7 @@ class OIMomentumGenerator:
         earlier_oi = oi_history[lookback_idx]["sum_open_interest_value"]
         oi_change_pct = (current_oi - earlier_oi) / earlier_oi * 100 if earlier_oi > 0 else 0
 
-        if oi_change_pct < 1.0:
+        if oi_change_pct < 0.5:
             return hold_signal(f"OI not rising enough ({oi_change_pct:.2f}%)", htf_trend)
         reasons.append(f"OI +{oi_change_pct:.2f}% (30min)")
 

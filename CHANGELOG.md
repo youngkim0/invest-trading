@@ -10,6 +10,7 @@
 - **ATR floor for oi_momentum**: Added `min_sl_pct` to StrategyConfig. When ATR-computed SL < floor, all stops scale proportionally (preserves R:R). Set 0.5% floor for oi_momentum. Prevents ultra-tight 0.33% stops from noise-clipping.
 - **Strategy-aware stale exit**: `_is_stale_position` now uses `tp_pct * 0.25` instead of fixed 0.005. Adapts per strategy (funding_reversion needs different threshold than oi_momentum).
 - **Remove HTF filter from oi_momentum**: The 0.2 strength threshold (from v6.0.1) made oi_momentum impossible to fire in ranging markets — `determine_htf_trend` halves strength when SMA spread < 0.3%, capping it at ~0.04. Since oi_momentum uses RSI for direction and OI for confirmation, it doesn't need HTF strength. Down to 3 conditions (from 4).
+- **Lower OI threshold 1.0% → 0.5%**: In ranging markets, 30min OI changes peak at 0.5-0.7%. The 1% threshold only triggered once in 4 hours of data. At 0.5%, would have caught 6 more valid opportunities. Still meaningful (confirms new money entering).
 
 ## v6.0.1 — Fix Inverted R:R and OI Momentum Filtering (2026-03-10)
 
