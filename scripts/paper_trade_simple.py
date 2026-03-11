@@ -355,7 +355,7 @@ class OIMomentumGenerator:
     """OI rising + RSI momentum zone = new money entering in one direction.
 
     Entry requires ALL 4 conditions (boolean, no scoring):
-    1. HTF trend strength >= 0.2 (avoid ranging markets)
+    1. HTF trend strength >= 0.05 (just filter dead markets, RSI picks direction)
     2. 5m RSI(14) in momentum zone: 55-75 (long) or 25-45 (short) — NOT extremes
     3. OI rising > 1% over last 30min
     4. Price within 2x ATR(5m) of 20-bar SMA — not chasing extended moves
@@ -376,9 +376,11 @@ class OIMomentumGenerator:
         current_price = float(prices.iloc[-1])
         reasons = []
 
-        # === CONDITION 0: HTF trend strength >= 0.2 ===
+        # === CONDITION 0: HTF trend strength >= 0.05 ===
+        # Much lower than trend_breakout (0.3) — OI momentum is short-term,
+        # uses RSI for direction, just needs market to not be completely dead
         strength = htf_trend.get("strength", 0.0)
-        if strength < 0.2:
+        if strength < 0.05:
             return hold_signal(f"HTF too weak for OI momentum (str={strength:.2f})", htf_trend)
         reasons.append(f"HTF str={strength:.2f}")
 
