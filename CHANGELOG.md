@@ -1,8 +1,8 @@
 # Paper Trader Changelog
 
-## v6.0.2 — Fix Trailing Stops, Signal Noise, ATR Floor (2026-03-11)
+## v6.0.2 — Fix Trailing Stops, Signal Noise, ATR Floor, Loosen Thresholds (2026-03-11)
 
-**Problem**: v6.0.1 ran 12h (16 trades, 8W/8L, -$18.57, 50% WR). Despite 50% WR, system lost money because trailing stops clipped all winners: 6/7 wins exited via trailing at 36-60% of designed TP. Actual R:R was 0.83:1 instead of designed 2:1. Only 1/16 trades hit full TP. Signal DB flooded with ~6500 hold signals/12h. oi_momentum's 5m ATR produced SL as tight as 0.33%, clipped by noise.
+**Problem**: v6.0.1 ran 12h (16 trades, 8W/8L, -$18.57, 50% WR). Despite 50% WR, system lost money because trailing stops clipped all winners: 6/7 wins exited via trailing at 36-60% of designed TP. Actual R:R was 0.83:1 instead of designed 2:1. Only 1/16 trades hit full TP. Signal DB flooded with ~6500 hold signals/12h. oi_momentum's 5m ATR produced SL as tight as 0.33%, clipped by noise. After initial fixes, funding_reversion and trend_breakout had 0 trades in 2 days — thresholds too restrictive for ranging markets.
 
 **Fixes**:
 - **Disable trailing stops**: Added `trailing_enabled` flag to StrategyConfig (default False). Trailing update + trailing exit gated on flag. Backwards-compatible (existing positions default True). Pure SL/TP exits let winners run to designed 2:1 R:R. Can re-enable later with better tuning.
@@ -11,6 +11,8 @@
 - **Strategy-aware stale exit**: `_is_stale_position` now uses `tp_pct * 0.25` instead of fixed 0.005. Adapts per strategy (funding_reversion needs different threshold than oi_momentum).
 - **Remove HTF filter from oi_momentum**: The 0.2 strength threshold (from v6.0.1) made oi_momentum impossible to fire in ranging markets — `determine_htf_trend` halves strength when SMA spread < 0.3%, capping it at ~0.04. Since oi_momentum uses RSI for direction and OI for confirmation, it doesn't need HTF strength. Down to 3 conditions (from 4).
 - **Lower OI threshold 1.0% → 0.5%**: In ranging markets, 30min OI changes peak at 0.5-0.7%. The 1% threshold only triggered once in 4 hours of data. At 0.5%, would have caught 6 more valid opportunities. Still meaningful (confirms new money entering).
+- **Trend breakout ranging mode**: HTF strength 0.3 was impossible in ranging markets (max ~0.07). Now allows breakouts even when HTF is neutral, but requires higher volume (1.5x avg vs 1.2x). When trending, still uses original 1.2x volume threshold. Range breakouts get -5% confidence penalty.
+- **Lower funding thresholds**: Funding >0.05%/<-0.03% too rare in normal markets (0 trades in 2 days). Lowered to >0.03%/<-0.02%. Still contrarian, but catches moderately elevated funding. Strong signal threshold stays at 0.1%.
 
 ## v6.0.1 — Fix Inverted R:R and OI Momentum Filtering (2026-03-10)
 

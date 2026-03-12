@@ -165,10 +165,10 @@ def apply_htf_adjustment(signal_type: str, confidence: float, htf_trend: dict, r
 # =============================================================================
 
 class FundingMeanReversionGenerator:
-    """Contrarian funding rate strategy — extreme funding precedes reversals.
+    """Contrarian funding rate strategy — elevated funding precedes reversals.
 
     Entry requires ALL 3 conditions (boolean, no scoring):
-    1. Funding rate extreme: > 0.05% (short) or < -0.03% (long)
+    1. Funding rate elevated: > 0.03% (short) or < -0.02% (long)
     2. OI rising > 0.5% over last 30min (new money = fuel)
     3. Price hasn't already reversed > 0.5% in last hour
     """
@@ -208,12 +208,12 @@ class FundingMeanReversionGenerator:
 
         # Determine direction from funding
         direction = None
-        if rate > 0.0005:  # > 0.05% → short (contrarian)
+        if rate > 0.0003:  # > 0.03% → short (contrarian)
             direction = "sell"
-            reasons.append(f"Funding extreme+ {rate*100:.3f}% → short")
-        elif rate < -0.0003:  # < -0.03% → long (contrarian)
+            reasons.append(f"Funding elevated+ {rate*100:.3f}% → short")
+        elif rate < -0.0002:  # < -0.02% → long (contrarian)
             direction = "buy"
-            reasons.append(f"Funding extreme- {rate*100:.3f}% → long")
+            reasons.append(f"Funding elevated- {rate*100:.3f}% → long")
         else:
             return hold_signal(f"Funding normal ({rate*100:.3f}%)", htf_trend)
 
@@ -270,17 +270,17 @@ class FundingMeanReversionGenerator:
 # =============================================================================
 
 class TrendBreakoutGenerator:
-    """Trade 15m breakouts in the direction of the 1h trend.
+    """Trade 15m breakouts, trend-aligned or range breakouts with volume.
 
     Entry requires ALL 3 conditions (boolean, no scoring):
-    1. 1h HTF trend is bullish or bearish with strength > 0.3
+    1. HTF trending (strength > 0.1) OR ranging (neutral) with higher volume bar
     2. 15m price closes above 10-bar high (long) or below 10-bar low (short)
-    3. 15m volume > 1.2x 20-bar average
+    3. 15m volume > 1.2x avg (trending) or > 1.5x avg (ranging)
     """
 
     def generate_signal(self, df_15m: pd.DataFrame, htf_trend: dict,
                         **kwargs) -> dict:
-        """Generate signal from trend-aligned breakouts on 15m."""
+        """Generate signal from trend-aligned or range breakouts on 15m."""
         if df_15m is None or len(df_15m) < 30:
             return hold_signal("Insufficient 15m data", htf_trend)
 
@@ -288,10 +288,16 @@ class TrendBreakoutGenerator:
         strength = htf_trend.get("strength", 0.0)
         reasons = []
 
-        # === CONDITION 1: HTF trend with strength > 0.3 ===
-        if direction == "neutral" or strength < 0.3:
+        # === CONDITION 1: HTF trending OR ranging (neutral allows breakouts with higher vol) ===
+        required_vol_ratio = 1.2
+        if direction == "neutral":
+            # Ranging market: allow breakouts in either direction, require higher volume
+            required_vol_ratio = 1.5
+            reasons.append("Ranging mode (vol 1.5x req)")
+        elif strength < 0.1:
             return hold_signal(f"HTF {direction} too weak (str={strength:.2f})", htf_trend)
-        reasons.append(f"HTF {direction} str={strength:.2f}")
+        else:
+            reasons.append(f"HTF {direction} str={strength:.2f}")
 
         prices = df_15m["close"]
         highs = df_15m["high"]
@@ -310,22 +316,37 @@ class TrendBreakoutGenerator:
         elif direction == "bearish" and current_price < low_10:
             signal_direction = "sell"
             reasons.append(f"15m break below 10-bar low ${low_10:,.2f}")
+        elif direction == "neutral":
+            # Ranging: trade whichever direction breaks out
+            if current_price > high_10:
+                signal_direction = "buy"
+                reasons.append(f"15m range break above ${high_10:,.2f}")
+            elif current_price < low_10:
+                signal_direction = "sell"
+                reasons.append(f"15m range break below ${low_10:,.2f}")
+            else:
+                return hold_signal(f"No breakout (${current_price:,.2f} in range ${low_10:,.2f}-${high_10:,.2f})", htf_trend)
         else:
             return hold_signal(f"No breakout (price ${current_price:,.2f}, H10=${high_10:,.2f}, L10=${low_10:,.2f})", htf_trend)
 
-        # === CONDITION 3: 15m volume > 1.2x 20-bar average ===
+        # === CONDITION 3: 15m volume > required threshold ===
         avg_vol = float(volumes.iloc[-21:-1].mean())
         current_vol = float(volumes.iloc[-1])
         vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
 
-        if vol_ratio < 1.2:
-            return hold_signal(f"Volume too low ({vol_ratio:.2f}x avg)", htf_trend)
+        if vol_ratio < required_vol_ratio:
+            return hold_signal(f"Volume too low ({vol_ratio:.2f}x, need {required_vol_ratio}x)", htf_trend)
         reasons.append(f"Volume {vol_ratio:.1f}x avg")
 
         # All 3 conditions met
         is_strong = vol_ratio > 2.0 and strength > 0.6
         signal_type = f"strong_{signal_direction}" if is_strong else signal_direction
         confidence = 0.75 if is_strong else 0.70
+
+        # Reduce confidence for range breakouts (no HTF confirmation)
+        if direction == "neutral":
+            confidence -= 0.05
+            reasons.append("Range breakout (-5% conf)")
 
         # HTF is already aligned by design, so just a small boost for high strength
         if strength > 0.6:
