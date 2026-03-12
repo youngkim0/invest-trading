@@ -683,7 +683,7 @@ def main():
         total_signals = len(signals)
         total_pages = max(1, (total_signals + signals_per_page - 1) // signals_per_page)
 
-        nav_col1, nav_col2, nav_col3, nav_col4 = st.columns([1, 2, 2, 1])
+        nav_col1, nav_col2, nav_col3, nav_col4, nav_col5 = st.columns([1, 2, 2, 1.5, 1])
         with nav_col1:
             st.write(f"**{total_signals}** signals")
         with nav_col2:
@@ -691,6 +691,8 @@ def main():
         with nav_col3:
             st.write(f"of {total_pages} pages")
         with nav_col4:
+            sort_by = st.selectbox("Sort by", ["Time", "Strategy"], key="signal_sort")
+        with nav_col5:
             show_holds = st.checkbox("Show holds", value=False, key="show_holds")
 
         # Filter signals if needed
@@ -698,6 +700,10 @@ def main():
             filtered_signals = [s for s in signals if s.get('signal_type', 'hold') != 'hold']
         else:
             filtered_signals = signals
+
+        # Sort by strategy if selected (then by time within each strategy)
+        if sort_by == "Strategy":
+            filtered_signals = sorted(filtered_signals, key=lambda s: (s.get('source', 'technical'), s.get('timestamp', '')), reverse=True)
 
         # Recalculate pagination after filter
         total_filtered = len(filtered_signals)
