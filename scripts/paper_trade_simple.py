@@ -1447,7 +1447,7 @@ async def main():
     )
     parser.add_argument(
         "--capital", type=float, default=1000.0,
-        help="Capital per strategy (each strategy gets this amount)"
+        help="Base capital unit (allocated per strategy: funding 0.5x, trend 1.5x, oi 1.0x)"
     )
     parser.add_argument(
         "--leverage", type=int, default=10,
@@ -1480,7 +1480,14 @@ async def main():
 
     # Build strategy configs
     selected = args.strategies
-    capital_per_strategy = args.capital
+    base_capital = args.capital
+
+    # Capital allocation: more to proven strategies, less to rare-event ones
+    capital_allocation = {
+        "funding_reversion": base_capital * 0.5,   # $500 — rare-event, mostly idle
+        "trend_breakout": base_capital * 1.5,      # $1500 — only profitable strategy
+        "oi_momentum": base_capital * 1.0,         # $1000 — unchanged
+    }
 
     strategy_configs = []
     for name in selected:
@@ -1495,7 +1502,7 @@ async def main():
                 trailing_dist_atr_mult=1.5,
                 max_position_hours=12.0,
                 risk_per_trade_pct=0.02,
-                capital=capital_per_strategy,
+                capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="1h",
                 trailing_enabled=False,
             ))
@@ -1510,7 +1517,7 @@ async def main():
                 trailing_dist_atr_mult=1.0,
                 max_position_hours=6.0,
                 risk_per_trade_pct=0.02,
-                capital=capital_per_strategy,
+                capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="15m",
                 trailing_enabled=False,
             ))
@@ -1520,12 +1527,12 @@ async def main():
                 strategy_type="oi",
                 generator=OIMomentumGenerator(),
                 sl_atr_mult=1.5,
-                tp_atr_mult=2.5,
+                tp_atr_mult=3.5,
                 trailing_atr_mult=2.0,
                 trailing_dist_atr_mult=1.0,
-                max_position_hours=3.0,
+                max_position_hours=4.0,
                 risk_per_trade_pct=0.015,
-                capital=capital_per_strategy,
+                capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="5m",
                 trailing_enabled=False,
                 min_sl_pct=0.005,

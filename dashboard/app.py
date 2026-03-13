@@ -460,7 +460,7 @@ Keep response under 500 words."""
 def main():
     st.title("📈 AI Trading Dashboard")
     kst_now = datetime.now(timezone.utc) + timedelta(hours=9)
-    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v6.0.2 started: Mar 11, 2026 16:27 KST | v6.0.2 (no trailing, ATR floor, range breakouts, lower funding)")
+    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v6.0.3 started: Mar 13, 2026 | v6.0.3 (widen oi_momentum TP, rebalance capital to trend_breakout)")
 
     # Auto refresh + strategy selector
     col1, col2, col3 = st.columns([2.5, 1.5, 1])

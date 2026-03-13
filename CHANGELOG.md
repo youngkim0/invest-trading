@@ -1,5 +1,23 @@
 # Paper Trader Changelog
 
+## v6.0.3 — Improve oi_momentum R:R, Rebalance Capital (2026-03-13)
+
+**Problem**: v6.0.2 ran 2 days (65 trades, 36.9% WR, -$218). Strategy breakdown:
+- **trend_breakout**: 19 trades, 42% WR, +$5 — only profitable strategy. Winners larger than losers (+1.2-1.6% vs -0.7-0.9%). Structurally sound.
+- **oi_momentum**: 33 trades, 39% WR, -$85 — poor R:R. TP (2.5x ATR) and SL (1.5x ATR) produce similar-magnitude outcomes (~0.6-0.9% both sides). At 39% WR with 1:1.67 R:R, expected PnL is barely positive but stale exits and min_sl_pct floor erode the edge. Also 89% buy bias (RSI momentum zone 55-75 fires much more than 25-45 in trending markets). All 3 open positions often correlated (all long BTC/ETH/XRP simultaneously).
+- **funding_reversion**: 0 trades — funding normal (-0.011%) entire period. $1,000 sitting idle.
+- **taker_flow**: 13 legacy trades from Mar 9 pre-deployment (23% WR, -$138). Not in current code.
+
+**Fixes**:
+- **Widen oi_momentum TP 2.5x → 3.5x ATR**: R:R improves from 1:1.67 to 1:2.33. Breakeven WR drops from 38% to 30%. At current 39% WR, expected PnL per trade = 0.39*3.5 - 0.61*1.5 = +0.45 (was +0.06). Trades need more room to reach TP, so also extended max hours.
+- **Extend oi_momentum max_position_hours 3h → 4h**: With wider TP (3.5x ATR on 5m), trades need more time. 4h gives better chance of hitting TP before stale exit.
+- **Rebalance capital allocation**: Instead of equal $1,000 per strategy, now weighted by performance evidence:
+  - funding_reversion: $1,000 → $500 (rare-event, 0 trades in 7 days, mostly idle)
+  - trend_breakout: $1,000 → $1,500 (only profitable strategy, proven edge)
+  - oi_momentum: $1,000 → $1,000 (unchanged, awaiting R:R fix results)
+  - Total unchanged at $3,000.
+- **Dashboard**: Updated version string to v6.0.3.
+
 ## v6.0.2 — Fix Trailing Stops, Signal Noise, ATR Floor, Loosen Thresholds (2026-03-11)
 
 **Problem**: v6.0.1 ran 12h (16 trades, 8W/8L, -$18.57, 50% WR). Despite 50% WR, system lost money because trailing stops clipped all winners: 6/7 wins exited via trailing at 36-60% of designed TP. Actual R:R was 0.83:1 instead of designed 2:1. Only 1/16 trades hit full TP. Signal DB flooded with ~6500 hold signals/12h. oi_momentum's 5m ATR produced SL as tight as 0.33%, clipped by noise. After initial fixes, funding_reversion and trend_breakout had 0 trades in 2 days — thresholds too restrictive for ranging markets.
