@@ -548,7 +548,7 @@ def main():
     if strategy_filter is None:
         STARTING_CAPITAL = 3000.0
         # Filter trades to active strategies only
-        active_trades = [t for t in trades if t.get('strategy') in ACTIVE_STRATEGIES]
+        active_trades = [t for t in trades if t.get('strategy_name') in ACTIVE_STRATEGIES]
     else:
         STARTING_CAPITAL = STRATEGY_CAPITAL.get(strategy_filter, 1000.0)
         active_trades = trades  # Already filtered by strategy_filter
