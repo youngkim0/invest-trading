@@ -536,18 +536,29 @@ def main():
     # ============================================
     # PORTFOLIO VALUE BANNER (at the top)
     # ============================================
-    # Each strategy gets $1000, total $3000 when viewing all; $1000 per strategy
+    # Only count active strategies for portfolio calculation
+    ACTIVE_STRATEGIES = {"funding_reversion", "trend_breakout", "trend_pullback", "order_flow"}
+    STRATEGY_CAPITAL = {
+        "funding_reversion": 500.0,
+        "trend_breakout": 1000.0,
+        "trend_pullback": 750.0,
+        "order_flow": 750.0,
+    }
+
     if strategy_filter is None:
         STARTING_CAPITAL = 3000.0
+        # Filter trades to active strategies only
+        active_trades = [t for t in trades if t.get('strategy') in ACTIVE_STRATEGIES]
     else:
-        STARTING_CAPITAL = 1000.0
+        STARTING_CAPITAL = STRATEGY_CAPITAL.get(strategy_filter, 1000.0)
+        active_trades = trades  # Already filtered by strategy_filter
 
-    # Calculate realized P&L from closed trades
-    closed_trades = [t for t in trades if t.get('exit_time')]
+    # Calculate realized P&L from closed trades (active strategies only)
+    closed_trades = [t for t in active_trades if t.get('exit_time')]
     realized_pnl = sum(t.get('net_pnl') or 0 for t in closed_trades)
 
-    # Calculate unrealized P&L from open positions
-    open_trades = [t for t in trades if not t.get('exit_time')]
+    # Calculate unrealized P&L from open positions (active strategies only)
+    open_trades = [t for t in active_trades if not t.get('exit_time')]
     unrealized_pnl = 0.0
     for t in open_trades:
         symbol = t.get('symbol', '')
