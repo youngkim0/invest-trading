@@ -1,5 +1,33 @@
 # Paper Trader Changelog
 
+## v6.2 — Add order_flow strategy using taker ratio + top trader data (2026-03-13)
+
+**Rationale**: Two derivatives data sources fetched every cycle but never used: taker buy/sell ratio (15m) and top trader long/short account ratio. Academic research shows order flow has permanent price impact (Sharpe 3.63 in Anastasopoulos 2025). Backtesting at 1.05/0.95 thresholds returned 142% vs 101% B&H (CryptoCoffeeShop 2021-2024). Top trader positioning works as contrarian filter — skip when crowd is too one-sided (>58%).
+
+**New Strategy — Order Flow** (`order_flow`):
+- Entry requires ALL 3 conditions:
+  1. HTF trend established: strength > 0.1 (any directional trend)
+  2. 15m taker buy/sell ratio confirms direction: >1.05 for buys, <0.95 for sells
+  3. Top trader positioning NOT crowded in our direction: long_account < 0.58 (buy) or short_account < 0.58 (sell)
+- Confidence boosts: +5% for strong flow imbalance (>1.10/<0.90), +5% for contrarian positioning alignment (<48%)
+- SL 1.5x ATR(15m), TP 3.0x ATR(15m), R:R 2:1
+- Max hold 6h, risk 2%/trade, capital $750
+- MEDIUM frequency expected (2-5/day)
+
+**Why this is different from breakout/pullback**:
+- Breakout enters on **price structure** (break above highs)
+- Pullback enters on **RSI reversion** (dip to SMA)
+- Order flow enters on **aggressive taker volume** + **non-crowded positioning**
+- All three use HTF trend as common filter but capture completely different edges
+
+**Capital rebalance (4 strategies, $3,000 total)**:
+- funding_reversion: $500 (0.5x, rare-event)
+- trend_breakout: $1,000 (1.0x, proven)
+- trend_pullback: $750 (0.75x, new)
+- order_flow: $750 (0.75x, new)
+
+**Dashboard**: Added order_flow to strategy selector, badges, comparison table, signal source labels. Updated version to v6.2.
+
 ## v6.1 — Replace oi_momentum with trend_pullback (2026-03-13)
 
 **Problem**: oi_momentum lost money across EVERY version that generated trades. v6.0.2: 33 trades, 39% WR, -$85. v6.0.3 widened TP but the core thesis (RSI momentum zone + OI rising) is too weak — RSI 55-75 is where RSI *normally sits* in a trending market, producing 89% buy bias and 622 signals in 7 days. The signal is too common to have edge.
