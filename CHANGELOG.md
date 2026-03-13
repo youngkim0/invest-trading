@@ -1,5 +1,27 @@
 # Paper Trader Changelog
 
+## v6.3 — Fast reversal detection + circuit breaker (2026-03-14)
+
+**Problem**: On Mar 13, all 3 active strategies kept buying into a bearish reversal because they all depend on the 1h HTF trend (SMA20 vs SMA50), which takes hours to flip. Result: 5 winners (+$174) followed by 9 consecutive stop losses (-$179). The daily SL limit (2 per strategy) eventually stopped trading, but by then the damage was done.
+
+**Root cause**: `determine_htf_trend()` uses 1h SMA20/SMA50 cross. When market reverses on 15m, the 1h SMAs don't cross for hours. All strategies (breakout, pullback, order_flow) are gated on HTF direction, so they're structurally blind to reversals.
+
+**Fix 1 — Fast 15m reversal override** (`apply_fast_reversal_override`):
+- After computing 1h HTF trend, check 15m data for reversal signals
+- Override to bearish when: HTF says bullish BUT 15m price < SMA20 AND 15m RSI < 40
+- Override to bullish when: HTF says bearish BUT 15m price > SMA20 AND 15m RSI > 60
+- Override strength is halved (0.5x) since it's an early/unconfirmed signal
+- Only triggers on conflict (HTF vs 15m disagree) — no effect when they agree
+
+**Fix 2 — Global circuit breaker**:
+- Track SL timestamps across ALL strategies globally
+- After 3 SLs within 2 hours → pause ALL entries for 1 hour
+- Prevents the "9 consecutive SL" scenario — would have triggered after the 3rd SL at 13:31 UTC and saved 6 subsequent losses (~$112)
+- Per-strategy daily SL limit (2/day) still active as secondary protection
+- Circuit breaker resets after the pause expires
+
+**Bug fix**: Added `"flow"` to `needs_derivatives` check for robustness (was working via `"funding"` but would break if funding_reversion disabled).
+
 ## v6.2 — Add order_flow strategy using taker ratio + top trader data (2026-03-13)
 
 **Rationale**: Two derivatives data sources fetched every cycle but never used: taker buy/sell ratio (15m) and top trader long/short account ratio. Academic research shows order flow has permanent price impact (Sharpe 3.63 in Anastasopoulos 2025). Backtesting at 1.05/0.95 thresholds returned 142% vs 101% B&H (CryptoCoffeeShop 2021-2024). Top trader positioning works as contrarian filter — skip when crowd is too one-sided (>58%).

@@ -1,13 +1,10 @@
 #!/usr/bin/env python
 """Multi-strategy paper trading script using Binance real-time data and Supabase.
 
-v6.1 — Evidence-based strategy redesign:
-- funding_reversion: Funding rate mean reversion (strongest academic evidence)
-- trend_breakout: 1h trend + 15m breakout (our only proven edge)
-- trend_pullback: Buy dips in uptrends, sell rallies in downtrends (trend continuation)
-- order_flow: Taker buy/sell ratio + top trader positioning (aggressive flow + crowding filter)
-- ATR-based dynamic stops (replaces fixed %)
-- Risk-based position sizing (replaces flat 20% margin)
+v6.3 — Reversal adaptation:
+- Fast 15m reversal override: overrides lagging 1h HTF when 15m shows clear reversal
+- Global circuit breaker: 3 SLs in 2h → pause all trading for 1h
+- Fixes blind spot where all strategies kept buying into bearish reversal
 """
 
 import asyncio
@@ -113,6 +110,60 @@ def determine_htf_trend(df_1h: pd.DataFrame) -> dict:
         direction = "neutral"
 
     return {"direction": direction, "strength": round(strength, 3), "slope": round(slope, 5)}
+
+
+def apply_fast_reversal_override(htf_trend: dict, df_15m: pd.DataFrame) -> dict:
+    """Override lagging 1h HTF trend when 15m data shows clear reversal.
+
+    The 1h SMA20/SMA50 cross takes hours to flip direction after a reversal.
+    This function detects reversals on the 15m timeframe and overrides the HTF
+    direction early to avoid trading into a reversal.
+
+    Override conditions (all must be true):
+    - 15m price below SMA20 AND 15m RSI < 40 → override to bearish
+    - 15m price above SMA20 AND 15m RSI > 60 → override to bullish
+    - Only overrides when HTF says the opposite direction (conflict detection)
+    """
+    if df_15m is None or len(df_15m) < 25:
+        return htf_trend
+
+    htf_direction = htf_trend.get("direction", "neutral")
+    if htf_direction == "neutral":
+        return htf_trend  # Nothing to override
+
+    prices = df_15m["close"]
+    current_price = float(prices.iloc[-1])
+    sma20 = float(prices.rolling(20).mean().iloc[-1])
+    rsi_data = calculate_rsi(prices)
+    rsi = rsi_data["value"]
+
+    # Check for bearish reversal (HTF says bullish but 15m shows bearish)
+    if htf_direction == "bullish" and current_price < sma20 and rsi < 40:
+        logger.info(
+            f"⚡ Fast reversal override: HTF bullish → BEARISH "
+            f"(15m price ${current_price:,.2f} < SMA20 ${sma20:,.2f}, RSI {rsi:.0f})"
+        )
+        return {
+            "direction": "bearish",
+            "strength": htf_trend.get("strength", 0.0) * 0.5,  # Reduce strength (early signal)
+            "slope": htf_trend.get("slope", 0.0),
+            "overridden": True,
+        }
+
+    # Check for bullish reversal (HTF says bearish but 15m shows bullish)
+    if htf_direction == "bearish" and current_price > sma20 and rsi > 60:
+        logger.info(
+            f"⚡ Fast reversal override: HTF bearish → BULLISH "
+            f"(15m price ${current_price:,.2f} > SMA20 ${sma20:,.2f}, RSI {rsi:.0f})"
+        )
+        return {
+            "direction": "bullish",
+            "strength": htf_trend.get("strength", 0.0) * 0.5,
+            "slope": htf_trend.get("slope", 0.0),
+            "overridden": True,
+        }
+
+    return htf_trend
 
 
 def hold_signal(reasoning: str = "No signal", htf_trend: dict = None) -> dict:
@@ -728,6 +779,13 @@ class SimplePaperTrader:
         self.max_daily_stop_losses = 2
         self.last_reset_date: str = ""
 
+        # Global circuit breaker: pause ALL strategies after N consecutive SLs
+        self.global_sl_timestamps: list[datetime] = []  # timestamps of recent SLs
+        self.circuit_breaker_window_hours = 2  # Look at SLs within this window
+        self.circuit_breaker_threshold = 3     # N consecutive SLs to trigger
+        self.circuit_breaker_pause_minutes = 60  # How long to pause
+        self.circuit_breaker_until: datetime | None = None  # When the pause ends
+
     @property
     def total_capital(self):
         return sum(s["capital"] for s in self.strategy_stats.values())
@@ -868,6 +926,7 @@ class SimplePaperTrader:
             )
         logger.info("-" * 70)
         logger.info(f"   SL cooldown: {self.stop_loss_cooldown_minutes}min | Max daily SL: {self.max_daily_stop_losses}")
+        logger.info(f"   Circuit breaker: {self.circuit_breaker_threshold} SLs in {self.circuit_breaker_window_hours}h → pause {self.circuit_breaker_pause_minutes}min")
         logger.info("=" * 70)
 
         collector = MarketDataCollector()
@@ -908,7 +967,7 @@ class SimplePaperTrader:
         """Fetch all needed data for a symbol (candles + derivatives)."""
         try:
             # Parallel fetch: 1m, 5m, 15m, 1h candles + ticker + derivatives
-            needs_derivatives = any(s.strategy_type in ("funding", "oi") for s in self.strategies)
+            needs_derivatives = any(s.strategy_type in ("funding", "oi", "flow") for s in self.strategies)
 
             tasks = [
                 collector.get_binance_klines(symbol, "1m", 100),
@@ -963,6 +1022,11 @@ class SimplePaperTrader:
             htf_trend = {"direction": "neutral", "strength": 0.0, "slope": 0.0}
             if not df_1h.empty:
                 htf_trend = determine_htf_trend(df_1h)
+
+            # Fast reversal override: use 15m data to catch reversals early
+            df_15m = market_data.get("15m", pd.DataFrame())
+            if not df_15m.empty:
+                htf_trend = apply_fast_reversal_override(htf_trend, df_15m)
 
             # Compute ATR for this strategy's timeframe
             atr_df_map = {
@@ -1040,6 +1104,16 @@ class SimplePaperTrader:
 
         if signal["confidence"] < 0.65:
             return
+
+        # Check global circuit breaker
+        if self.circuit_breaker_until:
+            remaining = (self.circuit_breaker_until - datetime.now(timezone.utc)).total_seconds() / 60
+            if remaining > 0:
+                logger.info(f"   🔌 Circuit breaker active ({remaining:.0f}min left) — all entries paused")
+                return
+            else:
+                logger.info("   🔌 Circuit breaker lifted — resuming trading")
+                self.circuit_breaker_until = None
 
         # Reset daily stop loss counter at midnight UTC
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1125,10 +1199,24 @@ class SimplePaperTrader:
             should_exit = True
             roe = pnl_pct * self.leverage * 100
             exit_reason = f"Stop loss ({pnl_pct:.2%} = {roe:.0f}% ROE)"
-            # Activate cooldown
+            # Activate per-strategy cooldown
             self.stop_loss_cooldowns[pos_key] = datetime.now(timezone.utc) + timedelta(minutes=self.stop_loss_cooldown_minutes)
             self.daily_stop_losses[pos_key] = self.daily_stop_losses.get(pos_key, 0) + 1
             logger.info(f"   [{strategy.name}] SL cooldown activated. Daily: {self.daily_stop_losses[pos_key]}/{self.max_daily_stop_losses}")
+
+            # Global circuit breaker: track SL timestamps across all strategies
+            now = datetime.now(timezone.utc)
+            self.global_sl_timestamps.append(now)
+            # Prune old timestamps outside the window
+            cutoff = now - timedelta(hours=self.circuit_breaker_window_hours)
+            self.global_sl_timestamps = [t for t in self.global_sl_timestamps if t > cutoff]
+            # Check if threshold reached
+            if len(self.global_sl_timestamps) >= self.circuit_breaker_threshold:
+                self.circuit_breaker_until = now + timedelta(minutes=self.circuit_breaker_pause_minutes)
+                logger.warning(
+                    f"🔌 CIRCUIT BREAKER: {len(self.global_sl_timestamps)} SLs in {self.circuit_breaker_window_hours}h "
+                    f"— ALL trading paused for {self.circuit_breaker_pause_minutes}min"
+                )
 
         # 4. TIME-BASED EXIT
         elif self._is_stale_position(position, pnl_pct, strategy):
