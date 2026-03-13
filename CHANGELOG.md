@@ -1,5 +1,34 @@
 # Paper Trader Changelog
 
+## v6.1 — Replace oi_momentum with trend_pullback (2026-03-13)
+
+**Problem**: oi_momentum lost money across EVERY version that generated trades. v6.0.2: 33 trades, 39% WR, -$85. v6.0.3 widened TP but the core thesis (RSI momentum zone + OI rising) is too weak — RSI 55-75 is where RSI *normally sits* in a trending market, producing 89% buy bias and 622 signals in 7 days. The signal is too common to have edge.
+
+**Solution**: Replace oi_momentum with **trend_pullback** — a complementary strategy to trend_breakout. While breakout catches the START of trend moves, pullback catches CONTINUATION by buying dips in uptrends and selling rallies in downtrends.
+
+**New Strategy — Trend Pullback** (`trend_pullback`):
+- Entry requires ALL 3 conditions:
+  1. HTF trend established: strength > 0.15 (moderate trend, lower bar than breakout's 0.3)
+  2. 15m RSI shows pullback: 30-45 in uptrend (dip) or 55-70 in downtrend (rally)
+  3. Price within 1.0x ATR(15m) of SMA20(15m) — pulled back to the mean
+- Direction follows HTF trend (no directional bias like oi_momentum's 89% buy)
+- SL 1.5x ATR(15m), TP 3.0x ATR(15m), R:R 2:1
+- Max hold 8h, risk 2%/trade, capital $1,000
+- Uses 15m timeframe (same as trend_breakout, less noisy than oi_momentum's 5m)
+- MEDIUM frequency expected (2-5/day)
+
+**Why this should work**:
+- Uses our proven edge: 1h HTF trend filter (the ONLY consistently profitable edge across all versions)
+- Entry at better prices than breakout (buying the dip, not the breakout)
+- Naturally limited: only fires in trending markets with actual pullbacks to SMA
+- Complementary: breakout enters on strength, pullback enters on weakness within same trend
+- No derivatives dependency (OI, funding) — pure price action with trend confirmation
+
+**Other changes**:
+- Removed `OIMomentumGenerator` class and "oi" strategy type
+- Capital unchanged: funding $500, trend_breakout $1,500, trend_pullback $1,000 (total $3,000)
+- Dashboard: updated strategy selector, badge mappings, comparison table for v6.1
+
 ## v6.0.3 — Improve oi_momentum R:R, Rebalance Capital (2026-03-13)
 
 **Problem**: v6.0.2 ran 2 days (65 trades, 36.9% WR, -$218). Strategy breakdown:

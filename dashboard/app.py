@@ -125,8 +125,9 @@ def fetch_trades(limit: int = 100):
 STRATEGY_SOURCE_MAP = {
     "funding_reversion": "funding",
     "trend_breakout": "breakout",
-    "oi_momentum": "oi",
+    "trend_pullback": "pullback",
     # Legacy strategies
+    "oi_momentum": "oi",
     "funding_sentiment": "funding",
     "volatility_squeeze": "squeeze",
     "taker_flow": "taker",
@@ -138,8 +139,8 @@ STRATEGY_SOURCE_MAP = {
 
 # All known strategy names (for filtering)
 ALL_STRATEGY_NAMES = [
-    "funding_reversion", "trend_breakout", "oi_momentum",
-    "funding_sentiment", "volatility_squeeze", "taker_flow",
+    "funding_reversion", "trend_breakout", "trend_pullback",
+    "oi_momentum", "funding_sentiment", "volatility_squeeze", "taker_flow",
     "agreement_classic", "agreement_mtf", "momentum", "paper_technical",
 ]
 
@@ -460,7 +461,7 @@ Keep response under 500 words."""
 def main():
     st.title("📈 AI Trading Dashboard")
     kst_now = datetime.now(timezone.utc) + timedelta(hours=9)
-    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v6.0.3 started: Mar 13, 2026 | v6.0.3 (widen oi_momentum TP, rebalance capital to trend_breakout)")
+    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v6.1 started: Mar 13, 2026 | v6.1 (replace oi_momentum with trend_pullback, rebalance capital)")
 
     # Auto refresh + strategy selector
     col1, col2, col3 = st.columns([2.5, 1.5, 1])
@@ -469,7 +470,7 @@ def main():
             "All Strategies": None,
             "🔄 Funding Reversion": "funding_reversion",
             "📈 Trend Breakout": "trend_breakout",
-            "📊 OI Momentum": "oi_momentum",
+            "📉 Trend Pullback": "trend_pullback",
         }
         selected_label = st.selectbox("Strategy", list(strategy_options.keys()), key="strategy_select")
         strategy_filter = strategy_options[selected_label]
@@ -493,8 +494,8 @@ def main():
         st.markdown("---")
         st.header("⚖️ Strategy Comparison")
 
-        strat_names = ["funding_reversion", "trend_breakout", "oi_momentum"]
-        strat_labels = ["Funding Reversion", "Trend Breakout", "OI Momentum"]
+        strat_names = ["funding_reversion", "trend_breakout", "trend_pullback"]
+        strat_labels = ["Funding Reversion", "Trend Breakout", "Trend Pullback"]
         comp_cols = st.columns(len(strat_names))
 
         for col, sname, slabel in zip(comp_cols, strat_names, strat_labels):
@@ -628,6 +629,7 @@ def main():
         strat_badge = {
             "funding_reversion": "🔄 Funding",
             "trend_breakout": "📈 Breakout",
+            "trend_pullback": "📉 Pullback",
             "oi_momentum": "📊 OI Mom",
             "funding_sentiment": "💰 Funding(v5)",
             "volatility_squeeze": "📊 Squeeze(v5)",
@@ -804,6 +806,7 @@ def main():
             source_labels = {
                 'funding': '💰 Funding',
                 'breakout': '📈 Breakout',
+                'pullback': '📉 Pullback',
                 'oi': '⚡ OI Momentum',
                 'squeeze': '📊 Squeeze',
                 'taker': '🌊 Flow',
@@ -904,6 +907,7 @@ def main():
         trade_strat_badge = {
             "funding_reversion": "🔄 Funding",
             "trend_breakout": "📈 Breakout",
+            "trend_pullback": "📉 Pullback",
             "oi_momentum": "📊 OI Mom",
             "funding_sentiment": "💰 Funding(v5)",
             "volatility_squeeze": "📊 Squeeze(v5)",

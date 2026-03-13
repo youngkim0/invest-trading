@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """Multi-strategy paper trading script using Binance real-time data and Supabase.
 
-v6.0 — Evidence-based strategy redesign:
+v6.1 — Evidence-based strategy redesign:
 - funding_reversion: Funding rate mean reversion (strongest academic evidence)
 - trend_breakout: 1h trend + 15m breakout (our only proven edge)
-- oi_momentum: OI rising + RSI momentum zone (new money entering)
+- trend_pullback: Buy dips in uptrends, sell rallies in downtrends (trend continuation)
 - ATR-based dynamic stops (replaces fixed %)
 - Risk-based position sizing (replaces flat 20% margin)
 """
@@ -369,91 +369,92 @@ class TrendBreakoutGenerator:
 
 
 # =============================================================================
-# Strategy 3: OI Momentum (HIGH frequency, 3-8 trades/day)
+# Strategy 3: Trend Pullback (MEDIUM frequency, 2-5 trades/day)
 # =============================================================================
 
-class OIMomentumGenerator:
-    """OI rising + RSI momentum zone = new money entering in one direction.
+class TrendPullbackGenerator:
+    """Buy dips in uptrends, sell rallies in downtrends.
+
+    Complementary to TrendBreakout: breakouts catch the START of moves,
+    pullbacks catch CONTINUATION within established trends.
 
     Entry requires ALL 3 conditions (boolean, no scoring):
-    1. 5m RSI(14) in momentum zone: 55-75 (long) or 25-45 (short) — NOT extremes
-    2. OI rising > 0.5% over last 30min (lowered from 1% — too restrictive in ranging markets)
-    3. Price within 2x ATR(5m) of 20-bar SMA — not chasing extended moves
+    1. HTF trend established: strength > 0.15 (moderate trend, lower bar than breakout's 0.3)
+    2. 15m RSI shows pullback: 30-45 in uptrend (dip) or 55-70 in downtrend (rally)
+       — NOT extremes (<30 or >70 = potential reversal, not pullback)
+    3. Price within 1.0x ATR(15m) of SMA20(15m) — pulled back to the mean
 
-    No HTF filter — RSI already determines direction, OI confirms conviction.
+    Direction follows HTF trend. Better entry prices than breakout = better R:R.
     """
 
-    def generate_signal(self, df_5m: pd.DataFrame, htf_trend: dict,
-                        derivatives: dict = None, atr_5m: float = 0,
+    def generate_signal(self, df_15m: pd.DataFrame, htf_trend: dict,
                         **kwargs) -> dict:
-        """Generate signal from OI + RSI momentum."""
-        if df_5m is None or len(df_5m) < 30:
-            return hold_signal("Insufficient 5m data", htf_trend)
-        if not derivatives:
-            return hold_signal("No derivatives data", htf_trend)
-        if atr_5m <= 0:
-            return hold_signal("No ATR data", htf_trend)
+        """Generate signal from trend pullback."""
+        if df_15m is None or len(df_15m) < 30:
+            return hold_signal("Insufficient 15m data", htf_trend)
 
-        prices = df_5m["close"]
-        current_price = float(prices.iloc[-1])
+        direction = htf_trend.get("direction", "neutral")
+        strength = htf_trend.get("strength", 0.0)
         reasons = []
 
-        # === CONDITION 1: 5m RSI in momentum zone (NOT extremes) ===
+        # === CONDITION 1: HTF trend established (strength > 0.15) ===
+        if direction == "neutral" or strength < 0.15:
+            return hold_signal(f"HTF {direction} too weak for pullback (str={strength:.2f})", htf_trend)
+        reasons.append(f"HTF {direction} str={strength:.2f}")
+
+        prices = df_15m["close"]
+        current_price = float(prices.iloc[-1])
+
+        # === CONDITION 2: 15m RSI shows pullback (NOT extremes) ===
         rsi_data = calculate_rsi(prices)
         rsi = rsi_data["value"]
 
         signal_direction = None
-        if 55 <= rsi <= 75:
+        if direction == "bullish" and 30 <= rsi <= 45:
             signal_direction = "buy"
-            reasons.append(f"RSI {rsi:.0f} (bullish momentum zone)")
-        elif 25 <= rsi <= 45:
+            reasons.append(f"RSI {rsi:.0f} (pullback in uptrend)")
+        elif direction == "bearish" and 55 <= rsi <= 70:
             signal_direction = "sell"
-            reasons.append(f"RSI {rsi:.0f} (bearish momentum zone)")
+            reasons.append(f"RSI {rsi:.0f} (pullback in downtrend)")
         else:
-            return hold_signal(f"RSI {rsi:.0f} outside momentum zone", htf_trend)
+            if direction == "bullish":
+                return hold_signal(f"RSI {rsi:.0f} not in pullback zone (need 30-45 for uptrend)", htf_trend)
+            else:
+                return hold_signal(f"RSI {rsi:.0f} not in pullback zone (need 55-70 for downtrend)", htf_trend)
 
-        # === CONDITION 2: OI rising > 1% over last 30min ===
-        oi_history = derivatives.get("oi_history", [])
-        if len(oi_history) < 2:
-            return hold_signal("Insufficient OI data", htf_trend)
+        # === CONDITION 3: Price within 1.0x ATR of SMA20 (pulled back to mean) ===
+        atr_15m = calculate_atr(df_15m)
+        if atr_15m <= 0:
+            return hold_signal("No ATR data", htf_trend)
 
-        current_oi = oi_history[-1]["sum_open_interest_value"]
-        lookback_idx = max(0, len(oi_history) - 7)
-        earlier_oi = oi_history[lookback_idx]["sum_open_interest_value"]
-        oi_change_pct = (current_oi - earlier_oi) / earlier_oi * 100 if earlier_oi > 0 else 0
-
-        if oi_change_pct < 0.5:
-            return hold_signal(f"OI not rising enough ({oi_change_pct:.2f}%)", htf_trend)
-        reasons.append(f"OI +{oi_change_pct:.2f}% (30min)")
-
-        # === CONDITION 3: Price within 2x ATR of 20-bar SMA ===
         sma20 = float(prices.rolling(20).mean().iloc[-1])
         distance_from_sma = abs(current_price - sma20)
-        max_distance = 2.0 * atr_5m
+        max_distance = 1.0 * atr_15m
 
         if distance_from_sma > max_distance:
-            return hold_signal(f"Price too extended from SMA20 ({distance_from_sma/atr_5m:.1f}x ATR)", htf_trend)
-        reasons.append(f"Price {distance_from_sma/atr_5m:.1f}x ATR from SMA20")
+            return hold_signal(f"Price too far from SMA20 ({distance_from_sma/atr_15m:.1f}x ATR, need <1.0x)", htf_trend)
+        reasons.append(f"Price {distance_from_sma/atr_15m:.1f}x ATR from SMA20")
 
         # All 3 conditions met
-        confidence = 0.68
+        confidence = 0.70
 
-        # Apply HTF adjustment
-        signal_type = signal_direction
-        confidence = apply_htf_adjustment(signal_type, confidence, htf_trend, reasons)
+        # Boost for strong trend
+        if strength > 0.4:
+            confidence = min(0.85, confidence + 0.05)
+            reasons.append("Strong trend boost")
 
         return {
-            "signal": signal_type,
+            "signal": signal_direction,
             "confidence": confidence,
             "reasoning": ", ".join(reasons),
             "indicators": {
                 "price": current_price,
                 "rsi": rsi,
-                "oi_change_pct": oi_change_pct,
-                "distance_from_sma_atr": round(distance_from_sma / atr_5m, 2) if atr_5m > 0 else 0,
-                "atr_5m": atr_5m,
-                "htf_trend": htf_trend.get("direction", "neutral"),
-                "htf_strength": htf_trend.get("strength", 0),
+                "sma20": sma20,
+                "distance_from_sma_atr": round(distance_from_sma / atr_15m, 2),
+                "atr_15m": atr_15m,
+                "htf_trend": direction,
+                "htf_strength": strength,
             },
         }
 
@@ -465,8 +466,8 @@ class OIMomentumGenerator:
 @dataclass
 class StrategyConfig:
     """Configuration for a trading strategy."""
-    name: str                        # "funding_reversion", "trend_breakout", "oi_momentum"
-    strategy_type: str               # "funding", "breakout", "oi"
+    name: str                        # "funding_reversion", "trend_breakout", "trend_pullback"
+    strategy_type: str               # "funding", "breakout", "pullback"
     generator: object                # Signal generator instance
     sl_atr_mult: float               # SL as multiple of ATR
     tp_atr_mult: float               # TP as multiple of ATR
@@ -531,6 +532,7 @@ LEGACY_STRATEGY_MAP = {
     "funding_sentiment": "funding_sentiment",
     "volatility_squeeze": "volatility_squeeze",
     "taker_flow": "taker_flow",
+    "oi_momentum": "oi_momentum",
 }
 
 
@@ -866,20 +868,16 @@ class SimplePaperTrader:
                 signal_result = strategy.generator.generate_signal(
                     market_data.get("15m", pd.DataFrame()), htf_trend,
                 )
-            elif strategy.strategy_type == "oi":
-                df_5m = market_data.get("5m", pd.DataFrame())
-                atr_5m = calculate_atr(df_5m) if not df_5m.empty else 0
+            elif strategy.strategy_type == "pullback":
                 signal_result = strategy.generator.generate_signal(
-                    df_5m, htf_trend,
-                    derivatives=market_data.get("derivatives"),
-                    atr_5m=atr_5m,
+                    market_data.get("15m", pd.DataFrame()), htf_trend,
                 )
             else:
                 signal_result = {"signal": "hold", "confidence": 0.5,
                                  "reasoning": f"Unknown strategy type: {strategy.strategy_type}"}
 
             # Determine timeframe label for DB
-            tf_map = {"funding": "1h", "breakout": "15m", "oi": "5m"}
+            tf_map = {"funding": "1h", "breakout": "15m", "pullback": "15m"}
             timeframe = tf_map.get(strategy.strategy_type, "1m")
 
             # Save only actionable signals to DB (skip holds)
@@ -1459,8 +1457,8 @@ async def main():
     )
     parser.add_argument(
         "--strategies", nargs="+",
-        default=["funding_reversion", "trend_breakout", "oi_momentum"],
-        choices=["funding_reversion", "trend_breakout", "oi_momentum"],
+        default=["funding_reversion", "trend_breakout", "trend_pullback"],
+        choices=["funding_reversion", "trend_breakout", "trend_pullback"],
         help="Strategies to run (default: all three)"
     )
 
@@ -1485,8 +1483,8 @@ async def main():
     # Capital allocation: more to proven strategies, less to rare-event ones
     capital_allocation = {
         "funding_reversion": base_capital * 0.5,   # $500 — rare-event, mostly idle
-        "trend_breakout": base_capital * 1.5,      # $1500 — only profitable strategy
-        "oi_momentum": base_capital * 1.0,         # $1000 — unchanged
+        "trend_breakout": base_capital * 1.5,      # $1500 — proven profitable strategy
+        "trend_pullback": base_capital * 1.0,      # $1000 — new, complementary to breakout
     }
 
     strategy_configs = []
@@ -1521,21 +1519,20 @@ async def main():
                 atr_timeframe="15m",
                 trailing_enabled=False,
             ))
-        elif name == "oi_momentum":
+        elif name == "trend_pullback":
             strategy_configs.append(StrategyConfig(
-                name="oi_momentum",
-                strategy_type="oi",
-                generator=OIMomentumGenerator(),
+                name="trend_pullback",
+                strategy_type="pullback",
+                generator=TrendPullbackGenerator(),
                 sl_atr_mult=1.5,
-                tp_atr_mult=3.5,
-                trailing_atr_mult=2.0,
+                tp_atr_mult=3.0,
+                trailing_atr_mult=2.5,
                 trailing_dist_atr_mult=1.0,
-                max_position_hours=4.0,
-                risk_per_trade_pct=0.015,
+                max_position_hours=8.0,
+                risk_per_trade_pct=0.02,
                 capital=capital_allocation.get(name, base_capital),
-                atr_timeframe="5m",
+                atr_timeframe="15m",
                 trailing_enabled=False,
-                min_sl_pct=0.005,
             ))
 
     # Create trader
