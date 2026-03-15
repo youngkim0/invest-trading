@@ -1,5 +1,20 @@
 # Paper Trader Changelog
 
+## v6.3.1 — Fix sell losses: suppress instead of flip on HTF conflict (2026-03-15)
+
+**Problem**: v6.3's fast reversal override (`apply_fast_reversal_override`) was flipping HTF direction (bullish→bearish) on every normal 15m pullback (RSI<40 + price<SMA20). This forced ALL strategies into shorts simultaneously. Result: sell trades 12% WR, -$61.24 vs buy trades 50% WR, +$95.65. Market was ranging — shorts into sideways = stop losses.
+
+**Root cause**: Single-candle RSI/price condition fires on noise, not real reversals. Hard direction flip with 0.5x strength still passes every strategy threshold (breakout>0.1, pullback>0.15, flow>0.1). Creates whipsaw: rapid long/short reversals generating multiple SLs.
+
+**Fix — Conflict suppression instead of direction flip**:
+- When 15m conflicts with 1h, set direction to **neutral** instead of flipping to opposite
+- Strength reduced to 0.3x (was 0.5x) — ensures suppression is meaningful
+- `trend_pullback`: neutral direction → returns hold (blocked). No forced shorts.
+- `order_flow`: neutral direction → returns hold (blocked). No forced shorts.
+- `trend_breakout`: neutral = ranging mode → requires 1.5x volume for breakouts (existing logic). High-volume breakouts in either direction still allowed.
+- Circuit breaker unchanged — still active as secondary protection
+- Net effect: strategies **stop trading** when signals disagree, rather than **reversing**
+
 ## v6.3 — Fast reversal detection + circuit breaker (2026-03-14)
 
 **Problem**: On Mar 13, all 3 active strategies kept buying into a bearish reversal because they all depend on the 1h HTF trend (SMA20 vs SMA50), which takes hours to flip. Result: 5 winners (+$174) followed by 9 consecutive stop losses (-$179). The daily SL limit (2 per strategy) eventually stopped trading, but by then the damage was done.

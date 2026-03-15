@@ -113,23 +113,18 @@ def determine_htf_trend(df_1h: pd.DataFrame) -> dict:
 
 
 def apply_fast_reversal_override(htf_trend: dict, df_15m: pd.DataFrame) -> dict:
-    """Override lagging 1h HTF trend when 15m data shows clear reversal.
+    """Suppress HTF trend when 15m data conflicts (don't flip direction).
 
-    The 1h SMA20/SMA50 cross takes hours to flip direction after a reversal.
-    This function detects reversals on the 15m timeframe and overrides the HTF
-    direction early to avoid trading into a reversal.
-
-    Override conditions (all must be true):
-    - 15m price below SMA20 AND 15m RSI < 40 → override to bearish
-    - 15m price above SMA20 AND 15m RSI > 60 → override to bullish
-    - Only overrides when HTF says the opposite direction (conflict detection)
+    When 15m shows the opposite of 1h, set direction to neutral to STOP
+    trading rather than reversing into shorts. This prevents forced sells
+    during normal pullbacks while still protecting against blind trend-following.
     """
     if df_15m is None or len(df_15m) < 25:
         return htf_trend
 
     htf_direction = htf_trend.get("direction", "neutral")
     if htf_direction == "neutral":
-        return htf_trend  # Nothing to override
+        return htf_trend
 
     prices = df_15m["close"]
     current_price = float(prices.iloc[-1])
@@ -137,30 +132,30 @@ def apply_fast_reversal_override(htf_trend: dict, df_15m: pd.DataFrame) -> dict:
     rsi_data = calculate_rsi(prices)
     rsi = rsi_data["value"]
 
-    # Check for bearish reversal (HTF says bullish but 15m shows bearish)
+    # Bearish conflict: HTF bullish but 15m bearish → suppress to neutral
     if htf_direction == "bullish" and current_price < sma20 and rsi < 40:
         logger.info(
-            f"⚡ Fast reversal override: HTF bullish → BEARISH "
+            f"⚡ HTF conflict: bullish suppressed to NEUTRAL "
             f"(15m price ${current_price:,.2f} < SMA20 ${sma20:,.2f}, RSI {rsi:.0f})"
         )
         return {
-            "direction": "bearish",
-            "strength": htf_trend.get("strength", 0.0) * 0.5,  # Reduce strength (early signal)
+            "direction": "neutral",
+            "strength": htf_trend.get("strength", 0.0) * 0.3,
             "slope": htf_trend.get("slope", 0.0),
-            "overridden": True,
+            "suppressed": True,
         }
 
-    # Check for bullish reversal (HTF says bearish but 15m shows bullish)
+    # Bullish conflict: HTF bearish but 15m bullish → suppress to neutral
     if htf_direction == "bearish" and current_price > sma20 and rsi > 60:
         logger.info(
-            f"⚡ Fast reversal override: HTF bearish → BULLISH "
+            f"⚡ HTF conflict: bearish suppressed to NEUTRAL "
             f"(15m price ${current_price:,.2f} > SMA20 ${sma20:,.2f}, RSI {rsi:.0f})"
         )
         return {
-            "direction": "bullish",
-            "strength": htf_trend.get("strength", 0.0) * 0.5,
+            "direction": "neutral",
+            "strength": htf_trend.get("strength", 0.0) * 0.3,
             "slope": htf_trend.get("slope", 0.0),
-            "overridden": True,
+            "suppressed": True,
         }
 
     return htf_trend
