@@ -1,5 +1,24 @@
 # Paper Trader Changelog
 
+## v6.3.2 — Three loss-reduction fixes: sell floor + symbol cooldown + pileup block (2026-03-16)
+
+**Data basis**: 59 active-strategy trades (Mar 13-15, v6.3/v6.3.1).
+
+**Fix 1 — Higher HTF strength floor for sells**:
+- Sell signals now require HTF strength ≥ 0.3 for pullback (was 0.15) and flow (was 0.1)
+- Buy thresholds unchanged (0.15 / 0.1). Breakout unchanged (already has volume gate)
+- Evidence: Weak-HTF sells (strength < 0.3) had 0-12% WR, -$77 total. Strategies were shorting on barely-bearish noise.
+
+**Fix 2 — Cross-strategy symbol cooldown after SL**:
+- 30-min cooldown on the *symbol* (not strategy:symbol) after any SL hit
+- Prevents different strategies from immediately re-entering the same losing symbol
+- Evidence: 4 cross-strategy re-entries after SL on same symbol → -$43. E.g. breakout SL'd on ETHUSDT, flow re-entered immediately.
+
+**Fix 3 — One strategy per symbol per direction**:
+- If any strategy already has a long on ETHUSDT, other strategies blocked from also going long on ETHUSDT
+- Different directions still allowed (unlikely with current logic but safe)
+- Evidence: breakout + flow both bought ETH at 13:19 on Mar 13 → double exposure to same reversal, -$61 across 3 clusters.
+
 ## v6.3.1 — Fix sell losses: suppress instead of flip on HTF conflict (2026-03-15)
 
 **Problem**: v6.3's fast reversal override (`apply_fast_reversal_override`) was flipping HTF direction (bullish→bearish) on every normal 15m pullback (RSI<40 + price<SMA20). This forced ALL strategies into shorts simultaneously. Result: sell trades 12% WR, -$61.24 vs buy trades 50% WR, +$95.65. Market was ranging — shorts into sideways = stop losses.

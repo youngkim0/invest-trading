@@ -444,8 +444,9 @@ class TrendPullbackGenerator:
         strength = htf_trend.get("strength", 0.0)
         reasons = []
 
-        # === CONDITION 1: HTF trend established (strength > 0.15) ===
-        if direction == "neutral" or strength < 0.15:
+        # === CONDITION 1: HTF trend established (buys: 0.15, sells: 0.3) ===
+        min_strength = 0.15 if direction == "bullish" else 0.3
+        if direction == "neutral" or strength < min_strength:
             return hold_signal(f"HTF {direction} too weak for pullback (str={strength:.2f})", htf_trend)
         reasons.append(f"HTF {direction} str={strength:.2f}")
 
@@ -542,8 +543,9 @@ class OrderFlowGenerator:
         strength = htf_trend.get("strength", 0.0)
         reasons = []
 
-        # === CONDITION 1: HTF trend established (strength > 0.1) ===
-        if direction == "neutral" or strength < 0.1:
+        # === CONDITION 1: HTF trend established (buys: 0.1, sells: 0.3) ===
+        min_strength = 0.1 if direction == "bullish" else 0.3
+        if direction == "neutral" or strength < min_strength:
             return hold_signal(f"HTF {direction} too weak (str={strength:.2f})", htf_trend)
         reasons.append(f"HTF {direction} str={strength:.2f}")
 
@@ -769,6 +771,9 @@ class SimplePaperTrader:
         # Cooldown after stop loss: {strategy:symbol: datetime}
         self.stop_loss_cooldowns: dict[str, datetime] = {}
         self.stop_loss_cooldown_minutes = 60
+        # Cross-strategy symbol cooldown after any SL: {symbol: datetime}
+        self.symbol_sl_cooldowns: dict[str, datetime] = {}
+        self.symbol_sl_cooldown_minutes = 30
         # Max consecutive stop losses per strategy:symbol per day
         self.daily_stop_losses: dict[str, int] = {}
         self.max_daily_stop_losses = 2
@@ -1116,7 +1121,17 @@ class SimplePaperTrader:
             self.daily_stop_losses = {}
             self.last_reset_date = today
 
-        # Check stop loss cooldown
+        # Check cross-strategy symbol cooldown (any SL on this symbol blocks all strategies)
+        if symbol in self.symbol_sl_cooldowns:
+            cooldown_until = self.symbol_sl_cooldowns[symbol]
+            remaining = (cooldown_until - datetime.now(timezone.utc)).total_seconds() / 60
+            if remaining > 0:
+                logger.info(f"   [{strategy.name}] {symbol}: Symbol SL cooldown ({remaining:.0f}min left)")
+                return
+            else:
+                del self.symbol_sl_cooldowns[symbol]
+
+        # Check per-strategy stop loss cooldown
         cooldown_key = pos_key
         if cooldown_key in self.stop_loss_cooldowns:
             cooldown_until = self.stop_loss_cooldowns[cooldown_key]
@@ -1131,6 +1146,16 @@ class SimplePaperTrader:
         if self.daily_stop_losses.get(cooldown_key, 0) >= self.max_daily_stop_losses:
             logger.info(f"   [{strategy.name}] {symbol}: Max daily SL reached")
             return
+
+        # Check if another strategy already has same direction on this symbol
+        proposed_side = "long" if signal["signal"] in ["buy", "strong_buy"] else "short"
+        for existing_key, existing_pos in self.positions.items():
+            if existing_key == pos_key:
+                continue
+            _, existing_symbol = self._parse_pos_key(existing_key)
+            if existing_symbol == symbol and existing_pos.get("side") == proposed_side:
+                logger.info(f"   [{strategy.name}] {symbol}: Blocked — {existing_key} already {proposed_side}")
+                return
 
         if signal["signal"] in ["buy", "strong_buy"]:
             await self._open_position(pos_key, symbol, "long", price, signal, strategy, atr_value)
@@ -1196,6 +1221,8 @@ class SimplePaperTrader:
             exit_reason = f"Stop loss ({pnl_pct:.2%} = {roe:.0f}% ROE)"
             # Activate per-strategy cooldown
             self.stop_loss_cooldowns[pos_key] = datetime.now(timezone.utc) + timedelta(minutes=self.stop_loss_cooldown_minutes)
+            # Activate cross-strategy symbol cooldown
+            self.symbol_sl_cooldowns[symbol] = datetime.now(timezone.utc) + timedelta(minutes=self.symbol_sl_cooldown_minutes)
             self.daily_stop_losses[pos_key] = self.daily_stop_losses.get(pos_key, 0) + 1
             logger.info(f"   [{strategy.name}] SL cooldown activated. Daily: {self.daily_stop_losses[pos_key]}/{self.max_daily_stop_losses}")
 
