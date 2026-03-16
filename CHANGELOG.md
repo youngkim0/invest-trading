@@ -1,5 +1,23 @@
 # Paper Trader Changelog
 
+## v6.3.3 — Hold reason logging + smarter pileup block (2026-03-16)
+
+**Data basis**: v6.3.2 overnight (Mar 15-16). 7/7 trades won (+$228), but analysis showed:
+- Flow generated 574 buy signals, only took 1 trade — pileup block killed the rest
+- No post-hoc analysis possible because hold signals weren't logged to DB
+
+**Fix 1 — Hold reason logging to DB**:
+- Hold signals now saved to signals table (throttled: once per 15min per strategy:symbol, or on reason change)
+- Enables post-hoc analysis of *why* strategies didn't trade during specific periods
+- ~96 samples/day per strategy:symbol (vs 0 before), minimal DB load
+
+**Fix 2 — Time-aware pileup block**:
+- Old: if ANY strategy has same direction on symbol → block (killed flow all night)
+- New: only block if existing position was opened within last 30 minutes
+- Prevents simultaneous pileup (the Mar 13 problem: breakout+flow both entering at 13:19)
+- Allows sequential entries (flow can enter BTC after pullback has held for 2+ hours)
+- Flow gets independent entries when its taker ratio + top trader signals fire independently
+
 ## v6.3.2 — Three loss-reduction fixes: sell floor + symbol cooldown + pileup block (2026-03-16)
 
 **Data basis**: 59 active-strategy trades (Mar 13-15, v6.3/v6.3.1).

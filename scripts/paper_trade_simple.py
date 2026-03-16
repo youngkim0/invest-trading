@@ -774,6 +774,12 @@ class SimplePaperTrader:
         # Cross-strategy symbol cooldown after any SL: {symbol: datetime}
         self.symbol_sl_cooldowns: dict[str, datetime] = {}
         self.symbol_sl_cooldown_minutes = 30
+        # Hold signal logging: track last hold reason per strategy:symbol to avoid spam
+        self.last_hold_reasons: dict[str, str] = {}  # {strategy:symbol: reasoning}
+        self.last_hold_save_times: dict[str, datetime] = {}  # {strategy:symbol: last_save_time}
+        self.hold_save_interval_minutes = 15  # Save hold to DB at most once per 15min per key
+        # Pileup block: only block if existing position opened recently
+        self.pileup_block_minutes = 30  # Positions older than this don't block new entries
         # Max consecutive stop losses per strategy:symbol per day
         self.daily_stop_losses: dict[str, int] = {}
         self.max_daily_stop_losses = 2
@@ -1064,11 +1070,11 @@ class SimplePaperTrader:
             tf_map = {"funding": "1h", "breakout": "15m", "pullback": "15m", "flow": "15m"}
             timeframe = tf_map.get(strategy.strategy_type, "1m")
 
-            # Save only actionable signals to DB (skip holds)
+            # Save signals to DB (holds are throttled: once per 15min or on reason change)
             if signal_result.get("signal", "hold") != "hold":
                 await self._save_signal(symbol, signal_result, current_price, strategy, timeframe)
             else:
-                logger.debug(f"   [{strategy.name}] {symbol}: hold signal (not saved to DB)")
+                await self._maybe_save_hold(symbol, signal_result, current_price, strategy, timeframe)
 
             # Trading logic — pass ATR for position sizing
             pos_key = self._pos_key(strategy.name, symbol)
@@ -1147,15 +1153,21 @@ class SimplePaperTrader:
             logger.info(f"   [{strategy.name}] {symbol}: Max daily SL reached")
             return
 
-        # Check if another strategy already has same direction on this symbol
+        # Check if another strategy recently entered same direction on this symbol
+        # Only block if the existing position was opened within the last 30 minutes
+        # (prevents simultaneous pileup but allows independent sequential entries)
         proposed_side = "long" if signal["signal"] in ["buy", "strong_buy"] else "short"
+        now = datetime.now(timezone.utc)
         for existing_key, existing_pos in self.positions.items():
             if existing_key == pos_key:
                 continue
             _, existing_symbol = self._parse_pos_key(existing_key)
             if existing_symbol == symbol and existing_pos.get("side") == proposed_side:
-                logger.info(f"   [{strategy.name}] {symbol}: Blocked — {existing_key} already {proposed_side}")
-                return
+                entry_time = existing_pos.get("entry_time")
+                if entry_time and (now - entry_time).total_seconds() < self.pileup_block_minutes * 60:
+                    age_min = (now - entry_time).total_seconds() / 60
+                    logger.info(f"   [{strategy.name}] {symbol}: Blocked — {existing_key} already {proposed_side} ({age_min:.0f}min ago)")
+                    return
 
         if signal["signal"] in ["buy", "strong_buy"]:
             await self._open_position(pos_key, symbol, "long", price, signal, strategy, atr_value)
@@ -1559,6 +1571,27 @@ class SimplePaperTrader:
             })
         except Exception as e:
             logger.debug(f"Failed to save signal: {e}")
+
+    async def _maybe_save_hold(self, symbol: str, signal: dict, price: float,
+                               strategy: StrategyConfig, timeframe: str):
+        """Save hold signal to DB, throttled: only on reason change or every 15 min."""
+        hold_key = f"{strategy.name}:{symbol}"
+        reasoning = signal.get("reasoning", "")
+        now = datetime.now(timezone.utc)
+
+        last_reason = self.last_hold_reasons.get(hold_key)
+        last_save = self.last_hold_save_times.get(hold_key)
+
+        reason_changed = (last_reason != reasoning)
+        interval_elapsed = (
+            last_save is None or
+            (now - last_save).total_seconds() >= self.hold_save_interval_minutes * 60
+        )
+
+        if reason_changed or interval_elapsed:
+            self.last_hold_reasons[hold_key] = reasoning
+            self.last_hold_save_times[hold_key] = now
+            await self._save_signal(symbol, signal, price, strategy, timeframe)
 
     async def _save_performance_snapshots(self):
         """Save performance snapshot for each strategy."""
