@@ -503,8 +503,10 @@ def main():
         st.markdown("---")
         st.header("⚖️ Strategy Comparison")
 
-        strat_names = ["funding_reversion", "trend_breakout", "trend_pullback", "order_flow"]
-        strat_labels = ["Funding Rev.", "Trend Break.", "Trend Pull.", "Order Flow"]
+        strat_names = ["funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
+                       "liquidation_cascade", "panic_momentum", "breakdown_reversal"]
+        strat_labels = ["Funding Rev.", "Trend Break.", "Trend Pull.", "Order Flow",
+                        "Liq. Cascade", "Panic Mom.", "Breakdown Rev."]
         comp_cols = st.columns(len(strat_names))
 
         for col, sname, slabel in zip(comp_cols, strat_names, strat_labels):
