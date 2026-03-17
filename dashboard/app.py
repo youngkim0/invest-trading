@@ -127,6 +127,9 @@ STRATEGY_SOURCE_MAP = {
     "trend_breakout": "breakout",
     "trend_pullback": "pullback",
     "order_flow": "flow",
+    "liquidation_cascade": "liq_cascade",
+    "panic_momentum": "panic_momentum",
+    "breakdown_reversal": "breakdown",
     # Legacy strategies
     "oi_momentum": "oi",
     "funding_sentiment": "funding",
@@ -141,6 +144,7 @@ STRATEGY_SOURCE_MAP = {
 # All known strategy names (for filtering)
 ALL_STRATEGY_NAMES = [
     "funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
+    "liquidation_cascade", "panic_momentum", "breakdown_reversal",
     "oi_momentum", "funding_sentiment", "volatility_squeeze", "taker_flow",
     "agreement_classic", "agreement_mtf", "momentum", "paper_technical",
 ]
@@ -540,16 +544,20 @@ def main():
     # PORTFOLIO VALUE BANNER (at the top)
     # ============================================
     # Only count active strategies for portfolio calculation
-    ACTIVE_STRATEGIES = {"funding_reversion", "trend_breakout", "trend_pullback", "order_flow"}
+    ACTIVE_STRATEGIES = {"funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
+                          "liquidation_cascade", "panic_momentum", "breakdown_reversal"}
     STRATEGY_CAPITAL = {
         "funding_reversion": 500.0,
         "trend_breakout": 1000.0,
         "trend_pullback": 750.0,
         "order_flow": 750.0,
+        "liquidation_cascade": 500.0,
+        "panic_momentum": 350.0,
+        "breakdown_reversal": 500.0,
     }
 
     if strategy_filter is None:
-        STARTING_CAPITAL = 3000.0
+        STARTING_CAPITAL = 4350.0
         # Filter trades to active strategies only
         active_trades = [t for t in trades if t.get('strategy_name') in ACTIVE_STRATEGIES]
     else:
