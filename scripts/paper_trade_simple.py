@@ -792,6 +792,12 @@ class SimplePaperTrader:
         self.circuit_breaker_pause_minutes = 60  # How long to pause
         self.circuit_breaker_until: datetime | None = None  # When the pause ends
 
+        # Reversal close: close losing non-pullback positions when reversal persists 2+ cycles
+        # Key: "symbol" → count of consecutive main-loop cycles with reversal override active
+        self.reversal_override_counts: dict[str, int] = {}
+        self.reversal_close_min_cycles = 2  # Must persist 2 consecutive cycles before closing
+        self._reversal_counted_this_cycle: set[str] = set()  # Prevent multi-counting per cycle
+
     @property
     def total_capital(self):
         return sum(s["capital"] for s in self.strategy_stats.values())
@@ -939,6 +945,7 @@ class SimplePaperTrader:
 
         try:
             while self.running:
+                self._reversal_counted_this_cycle.clear()
                 for symbol in self.symbols:
                     # Fetch all market data once per symbol
                     market_data = await self._fetch_market_data(symbol, collector)
@@ -1034,6 +1041,18 @@ class SimplePaperTrader:
             if not df_15m.empty:
                 htf_trend = apply_fast_reversal_override(htf_trend, df_15m)
 
+            # Reversal close: count once per symbol per main-loop cycle
+            if symbol not in self._reversal_counted_this_cycle:
+                self._reversal_counted_this_cycle.add(symbol)
+                if htf_trend.get("suppressed"):
+                    self.reversal_override_counts[symbol] = self.reversal_override_counts.get(symbol, 0) + 1
+                else:
+                    self.reversal_override_counts[symbol] = 0
+
+            # Close losing non-pullback positions when reversal persists 2+ cycles
+            if self.reversal_override_counts.get(symbol, 0) >= self.reversal_close_min_cycles:
+                await self._close_on_reversal(strategy, symbol, current_price, htf_trend)
+
             # Compute ATR for this strategy's timeframe
             atr_df_map = {
                 "1h": df_1h,
@@ -1085,6 +1104,44 @@ class SimplePaperTrader:
 
         except Exception as e:
             logger.error(f"Error processing [{strategy.name}] {symbol}: {e}")
+
+    async def _close_on_reversal(self, strategy: StrategyConfig, symbol: str,
+                                  current_price: float, htf_trend: dict):
+        """Close losing non-pullback positions when reversal override persists.
+
+        Conditions (all must be true):
+        1. Reversal override active for 2+ consecutive cycles
+        2. Position is in loss (don't cut winners)
+        3. Strategy is NOT pullback (pullback expects counter-trend dips)
+        4. Position direction conflicts with the reversal
+        """
+        if strategy.strategy_type == "pullback":
+            return
+
+        pos_key = self._pos_key(strategy.name, symbol)
+        position = self.positions.get(pos_key)
+        if not position:
+            return
+
+        # Check if position direction conflicts with the reversal
+        # Suppressed from bullish → market turning bearish → longs are at risk
+        # Suppressed from bearish → market turning bullish → shorts are at risk
+        side = position.get("side")
+        original_direction = "bullish" if side == "long" else "bearish"
+
+        # The reversal override only fires when HTF was in the SAME direction as our position
+        # and 15m shows the opposite. So if suppressed=True, it means our position's direction
+        # is being challenged. We only need to check we're in loss.
+        pnl_pct = self._calculate_pnl_pct(position, current_price)
+        if pnl_pct >= 0:
+            return  # Position is profitable — let it run
+
+        cycles = self.reversal_override_counts.get(symbol, 0)
+        logger.info(
+            f"⚡ REVERSAL CLOSE [{strategy.name}] {symbol}: {side} in loss "
+            f"({pnl_pct:.2%}), reversal persisted {cycles} cycles"
+        )
+        await self._close_position(pos_key, current_price, f"Reversal override ({cycles} cycles, {pnl_pct:.2%})", strategy)
 
     async def _check_entry(self, pos_key: str, symbol: str, signal: dict, price: float,
                            strategy: StrategyConfig, atr_value: float):
