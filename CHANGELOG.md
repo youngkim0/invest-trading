@@ -1,5 +1,23 @@
 # Paper Trader Changelog
 
+## v6.3.4 — SL bug fix + reversal close (2026-03-17)
+
+**Data basis**: Mar 17 session. 5 long positions entered during bullish trend (01:10-02:31 UTC), market reversed at ~03:30. Positions lost $233 instead of ~$50-80 from proper SL exits.
+
+**Bug fix — _check_exit undefined `symbol` variable**:
+- `_check_exit()` used `symbol` without extracting it from pos_key
+- NameError was silently caught by outer try/except in `_process_strategy_symbol`
+- Result: SL exits NEVER executed — positions bled until liquidation or session end
+- Fix: extract `_, symbol = self._parse_pos_key(pos_key)` at method start
+
+**Feature — Reversal close for losing positions**:
+- Previously, fast reversal override only blocked new entries
+- Now: when reversal persists 2+ consecutive cycles (~2min), closes positions that are:
+  - In loss (profitable positions keep running)
+  - NOT pullback strategy (pullback expects counter-trend dips by design)
+- Today's scenario: 5 longs sat underwater for 70+ min through reversal. With this fix, they would have been closed within ~2min of reversal detection, saving ~$150+.
+- Tracking: `reversal_override_counts` per symbol, incremented once per main-loop cycle (not per strategy). `_reversal_counted_this_cycle` set prevents multi-counting.
+
 ## v6.3.3 — Hold reason logging + smarter pileup block (2026-03-16)
 
 **Data basis**: v6.3.2 overnight (Mar 15-16). 7/7 trades won (+$228), but analysis showed:
