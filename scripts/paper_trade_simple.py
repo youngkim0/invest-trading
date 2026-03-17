@@ -1186,6 +1186,7 @@ class SimplePaperTrader:
         5. RSI-based profit taking
         6. Signal-based exit
         """
+        _, symbol = self._parse_pos_key(pos_key)
         position = self.positions.get(pos_key)
         if not position:
             return
