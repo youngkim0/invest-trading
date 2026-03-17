@@ -462,7 +462,7 @@ Keep response under 500 words."""
 def main():
     st.title("📈 AI Trading Dashboard")
     kst_now = datetime.now(timezone.utc) + timedelta(hours=9)
-    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v6.3.5 started: Mar 17, 2026 | v6.3.5 (long-only mode — shorts disabled)")
+    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v6.4 started: Mar 17, 2026 | v6.4 (4 long + 3 short-only strategies)")
 
     # Auto refresh + strategy selector
     col1, col2, col3 = st.columns([2.5, 1.5, 1])
@@ -473,6 +473,9 @@ def main():
             "📈 Trend Breakout": "trend_breakout",
             "📉 Trend Pullback": "trend_pullback",
             "🌊 Order Flow": "order_flow",
+            "💥 Liquidation Cascade": "liquidation_cascade",
+            "😱 Panic Momentum": "panic_momentum",
+            "⬇️ Breakdown Reversal": "breakdown_reversal",
         }
         selected_label = st.selectbox("Strategy", list(strategy_options.keys()), key="strategy_select")
         strategy_filter = strategy_options[selected_label]

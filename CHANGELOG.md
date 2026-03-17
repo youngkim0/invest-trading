@@ -1,5 +1,42 @@
 # Paper Trader Changelog
 
+## v6.4 — Short-only strategies (2026-03-17)
+
+**Rationale**: Previous shorts failed (38 trades, 18.4% WR, -$262) because they mirrored long logic — same HTF trend dependency, same R:R, same thresholds. The 1h SMA20/SMA50 HTF trend is the proven long edge but the biggest short liability: crypto crashes happen in minutes-hours; by the time 1h SMAs cross bearish, the move is 60-80% done.
+
+**3 new short-only strategies** (derivatives-based, no HTF dependency):
+
+### `liquidation_cascade` ($500 capital)
+- **Concept**: Over-leveraged longs + weakening price + rising OI = liquidation fuel
+- **Entry**: Funding rate > 0.01% AND OI rising + price falling (30min divergence) AND 15m price < SMA20 + RSI < 45 + RSI falling
+- **Config**: SL 1.2x ATR(15m), TP 4.0x ATR, R:R 3.33:1, max hold 4h, trailing ON (activate 2.0x, trail 0.8x)
+- **Frequency**: 1-3/day
+
+### `panic_momentum` ($350 capital)
+- **Concept**: Multi-TF taker selling + negative futures premium = self-reinforcing panic
+- **Entry**: 5m taker ratio < 0.90 AND 15m taker ratio < 0.95 AND futures premium <= 0 AND top traders < 55% short
+- **Config**: SL 1.0x ATR(15m), TP 3.5x ATR, R:R 3.5:1, max hold 3h, trailing ON (activate 1.5x, trail 0.6x)
+- **Frequency**: 0-2/day
+
+### `breakdown_reversal` ($500 capital)
+- **Concept**: Price breaks below 20-bar low with volume + rising OI confirms real breakdown
+- **Entry**: 15m close < 20-bar low AND volume > 2.0x avg AND OI rising > 0.1% over 15min
+- **Config**: SL 1.3x ATR(15m), TP 3.5x ATR, R:R 2.69:1, max hold 5h, trailing ON (activate 2.0x, trail 0.8x)
+- **Frequency**: 1-3/day
+
+**Key design differences from failed shorts**:
+| Aspect | Old shorts | New short strategies |
+|---|---|---|
+| HTF dependency | Required 1h SMA bearish (too slow) | Zero HTF — derivatives-based |
+| R:R | 2:1 (same as longs) | 2.7-3.5:1 (wider TP for cascades) |
+| SL | 1.5x ATR | 1.0-1.3x ATR (tighter — cut fast) |
+| Trailing stop | Disabled | Enabled (lock profits in fast moves) |
+| Max hold | 6-12h | 3-5h (short moves resolve quickly) |
+
+**Safety**: Circuit breaker, cross-strategy cooldown, pileup block all shared with longs. Reversal close won't affect shorts (checks HTF suppression which shorts don't use).
+
+**Capital**: $3,000 (4 long) + $1,350 (3 short) = $4,350 total.
+
 ## v6.3.5 — Long-only mode (2026-03-17)
 
 **Data basis**: All 156 closed trades. Sell side: 38 trades, 18.4% WR, -$262. Buy side: 118 trades, 55.9% WR, +$698.
