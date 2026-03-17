@@ -1,6 +1,11 @@
 #!/usr/bin/env python
 """Multi-strategy paper trading script using Binance real-time data and Supabase.
 
+v6.3.5 — Long-only mode:
+- Disabled all short/sell signals across all 4 strategies
+- Evidence: 38 short trades had 18.4% WR, -$262 total. No strategy had short edge.
+- Buys: 55.9% WR, +$698. Removing shorts eliminates $262 drag.
+
 v6.3 — Reversal adaptation:
 - Fast 15m reversal override: overrides lagging 1h HTF when 15m shows clear reversal
 - Global circuit breaker: 3 SLs in 2h → pause all trading for 1h
@@ -256,8 +261,8 @@ class FundingMeanReversionGenerator:
         # Determine direction from funding
         direction = None
         if rate > 0.0003:  # > 0.03% → short (contrarian)
-            direction = "sell"
-            reasons.append(f"Funding elevated+ {rate*100:.3f}% → short")
+            # Shorts disabled — 18.4% WR across 38 trades, no edge
+            return hold_signal(f"Funding short disabled (rate {rate*100:.3f}%)", htf_trend)
         elif rate < -0.0002:  # < -0.02% → long (contrarian)
             direction = "buy"
             reasons.append(f"Funding elevated- {rate*100:.3f}% → long")
@@ -361,16 +366,15 @@ class TrendBreakoutGenerator:
             signal_direction = "buy"
             reasons.append(f"15m break above 10-bar high ${high_10:,.2f}")
         elif direction == "bearish" and current_price < low_10:
-            signal_direction = "sell"
-            reasons.append(f"15m break below 10-bar low ${low_10:,.2f}")
+            # Shorts disabled — 10% WR on breakout shorts, no edge
+            return hold_signal(f"Bearish breakout short disabled", htf_trend)
         elif direction == "neutral":
-            # Ranging: trade whichever direction breaks out
+            # Ranging: only trade long breakouts (shorts disabled)
             if current_price > high_10:
                 signal_direction = "buy"
                 reasons.append(f"15m range break above ${high_10:,.2f}")
             elif current_price < low_10:
-                signal_direction = "sell"
-                reasons.append(f"15m range break below ${low_10:,.2f}")
+                return hold_signal(f"Range short breakout disabled", htf_trend)
             else:
                 return hold_signal(f"No breakout (${current_price:,.2f} in range ${low_10:,.2f}-${high_10:,.2f})", htf_trend)
         else:
@@ -462,8 +466,8 @@ class TrendPullbackGenerator:
             signal_direction = "buy"
             reasons.append(f"RSI {rsi:.0f} (pullback in uptrend)")
         elif direction == "bearish" and 55 <= rsi <= 70:
-            signal_direction = "sell"
-            reasons.append(f"RSI {rsi:.0f} (pullback in downtrend)")
+            # Shorts disabled — 0% WR on pullback shorts, no edge
+            return hold_signal(f"Pullback short disabled (RSI {rsi:.0f})", htf_trend)
         else:
             if direction == "bullish":
                 return hold_signal(f"RSI {rsi:.0f} not in pullback zone (need 30-45 for uptrend)", htf_trend)
@@ -562,8 +566,8 @@ class OrderFlowGenerator:
             signal_direction = "buy"
             reasons.append(f"Taker ratio {taker_ratio:.3f} (aggressive buying)")
         elif direction == "bearish" and taker_ratio < 0.95:
-            signal_direction = "sell"
-            reasons.append(f"Taker ratio {taker_ratio:.3f} (aggressive selling)")
+            # Shorts disabled — 14.3% WR on order flow shorts, no edge
+            return hold_signal(f"Order flow short disabled (taker {taker_ratio:.3f})", htf_trend)
         else:
             return hold_signal(
                 f"Taker ratio {taker_ratio:.3f} not confirming {direction} (need >1.05 or <0.95)",

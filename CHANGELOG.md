@@ -1,5 +1,24 @@
 # Paper Trader Changelog
 
+## v6.3.5 — Long-only mode (2026-03-17)
+
+**Data basis**: All 156 closed trades. Sell side: 38 trades, 18.4% WR, -$262. Buy side: 118 trades, 55.9% WR, +$698.
+
+**Sell performance by strategy**:
+- `trend_breakout` shorts: 10 trades, 10% WR, -$68
+- `taker_flow` shorts: 13 trades, 23.1% WR, -$138
+- `order_flow` shorts: 7 trades, 14.3% WR, -$17
+- `trend_pullback` shorts: 3 trades, 0% WR, -$16
+- `oi_momentum` shorts: 5 trades, 40% WR, -$22
+
+**Root causes identified**:
+- HTF strength thresholds 2-3x higher for sells (0.3 vs 0.1-0.15 for buys), forcing entries only at marginal conditions
+- Sell avg HTF strength at entry: 0.389 (barely above threshold) vs buy: 0.523 (well above)
+- Counter-trend confidence penalty (-10-25%) caps sell confidence at 0.45
+- Strategies designed and tuned for long bias; shorts bolted on as afterthought
+
+**Change**: Disabled all sell/short signals across all 4 strategies. Each generator now returns hold_signal when sell conditions are met. Long-only mode eliminates $262 drag from losing shorts.
+
 ## v6.3.4 — SL bug fix + reversal close (2026-03-17)
 
 **Data basis**: Mar 17 session. 5 long positions entered during bullish trend (01:10-02:31 UTC), market reversed at ~03:30. Positions lost $233 instead of ~$50-80 from proper SL exits.
