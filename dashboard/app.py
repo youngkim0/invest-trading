@@ -130,6 +130,7 @@ STRATEGY_SOURCE_MAP = {
     "regime_short": "regime_short",
     "failed_breakout_short": "failed_bkout_short",
     "refined_liq_cascade": "refined_cascade",
+    "crash_momentum": "crash_momentum",
     # Legacy strategies (v6.4 and older)
     "liquidation_cascade": "liq_cascade",
     "panic_momentum": "panic_momentum",
@@ -147,7 +148,7 @@ STRATEGY_SOURCE_MAP = {
 # All known strategy names (for filtering)
 ALL_STRATEGY_NAMES = [
     "funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
-    "regime_short", "failed_breakout_short", "refined_liq_cascade",
+    "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum",
     "liquidation_cascade", "panic_momentum", "breakdown_reversal",
     "oi_momentum", "funding_sentiment", "volatility_squeeze", "taker_flow",
     "agreement_classic", "agreement_mtf", "momentum", "paper_technical",
@@ -470,7 +471,7 @@ Keep response under 500 words."""
 def main():
     st.title("📈 AI Trading Dashboard")
     kst_now = datetime.now(timezone.utc) + timedelta(hours=9)
-    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v6.5 started: Mar 18, 2026 | v6.5 (4 long + 3 regime-filtered short strategies)")
+    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v6.6 started: Mar 18, 2026 | v6.6 (4 long + 4 short strategies, fast regime gate)")
 
     # Auto refresh + strategy selector
     col1, col2, col3 = st.columns([2.5, 1.5, 1])
@@ -484,6 +485,7 @@ def main():
             "🔻 Regime Short": "regime_short",
             "🪤 Failed Breakout Short": "failed_breakout_short",
             "💥 Refined Liq Cascade": "refined_liq_cascade",
+            "📉 Crash Momentum": "crash_momentum",
         }
         selected_label = st.selectbox("Strategy", list(strategy_options.keys()), key="strategy_select")
         strategy_filter = strategy_options[selected_label]
@@ -508,9 +510,9 @@ def main():
         st.header("⚖️ Strategy Comparison")
 
         strat_names = ["funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
-                       "regime_short", "failed_breakout_short", "refined_liq_cascade"]
+                       "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum"]
         strat_labels = ["Funding Rev.", "Trend Break.", "Trend Pull.", "Order Flow",
-                        "Regime Short", "Failed Bkout", "Liq Cascade"]
+                        "Regime Short", "Failed Bkout", "Liq Cascade", "Crash Mom."]
         comp_cols = st.columns(len(strat_names))
 
         for col, sname, slabel in zip(comp_cols, strat_names, strat_labels):
@@ -551,19 +553,20 @@ def main():
     # ============================================
     # Only count active strategies for portfolio calculation
     ACTIVE_STRATEGIES = {"funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
-                          "regime_short", "failed_breakout_short", "refined_liq_cascade"}
+                          "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum"}
     STRATEGY_CAPITAL = {
         "funding_reversion": 500.0,
         "trend_breakout": 1000.0,
         "trend_pullback": 750.0,
         "order_flow": 750.0,
-        "regime_short": 500.0,
-        "failed_breakout_short": 400.0,
-        "refined_liq_cascade": 450.0,
+        "regime_short": 400.0,
+        "failed_breakout_short": 350.0,
+        "refined_liq_cascade": 400.0,
+        "crash_momentum": 500.0,
     }
 
     if strategy_filter is None:
-        STARTING_CAPITAL = 4350.0
+        STARTING_CAPITAL = 4650.0
         # Filter trades to active strategies only
         active_trades = [t for t in trades if t.get('strategy_name') in ACTIVE_STRATEGIES]
     else:
@@ -664,6 +667,7 @@ def main():
             "regime_short": "🔻 Regime Short",
             "failed_breakout_short": "🪤 Failed Bkout",
             "refined_liq_cascade": "💥 Liq Cascade",
+            "crash_momentum": "📉 Crash Mom.",
             # Legacy
             "liquidation_cascade": "💥 Liq Cascade(v6.4)",
             "panic_momentum": "😱 Panic(v6.4)",
@@ -849,6 +853,7 @@ def main():
                 'regime_short': '🔻 Regime Short',
                 'failed_bkout_short': '🪤 Failed Bkout',
                 'refined_cascade': '💥 Liq Cascade',
+                'crash_momentum': '📉 Crash Mom.',
                 'liq_cascade': '💥 Liq Cascade(v6.4)',
                 'panic_momentum': '😱 Panic(v6.4)',
                 'breakdown': '⬇️ Breakdown(v6.4)',
@@ -957,6 +962,7 @@ def main():
             "regime_short": "🔻 Regime Short",
             "failed_breakout_short": "🪤 Failed Bkout",
             "refined_liq_cascade": "💥 Liq Cascade",
+            "crash_momentum": "📉 Crash Mom.",
             # Legacy
             "liquidation_cascade": "💥 Liq Cascade(v6.4)",
             "panic_momentum": "😱 Panic(v6.4)",

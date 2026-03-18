@@ -1,5 +1,44 @@
 # Paper Trader Changelog
 
+## v6.6 — Fast regime gate + crash momentum strategy (2026-03-18)
+
+**Problem**: v6.5 short strategies never fired despite market crashing (BTC -5%, ETH -6.5%, XRP -9%). Root cause: **two-layer failure**.
+
+1. **Regime gate too slow**: Used 4h SMA200 (33 days of data) + SMA50 slope. During a selloff, price remains above SMA200 and SMA50 slope stays positive from prior uptrend. Gate blocked ALL shorts.
+2. **Strategies designed for pre-crash only**: Even with gate open, existing strategies require positive funding, rising OI, and selling pressure (taker <0.95). During actual crashes, funding goes negative (longs liquidated), OI drops (positions unwound), and taker ratio >1.0 (dip buyers stepping in). The conditions flip.
+
+**Fix 1: Faster regime gate** (3 triggers, any one = bearish):
+- Price below 4h SMA50 (~8 days responsive vs ~33 days for SMA200)
+- 4h SMA20 slope negative over last 3 candles (~3 days responsive)
+- Price dropped >3% from 5-day high (30 4h-candles) — catches sudden selloffs immediately
+
+**Fix 2: New `crash_momentum` strategy** — pure price action, no derivatives:
+- Designed for the "during crash" phase that existing strategies miss
+- Uses ONLY price action (no funding/OI/taker that flip during crashes)
+- Entry: price < 15m SMA20 AND RSI 20-45 (not oversold) AND 2/3 red candles AND lower low vs 5 bars ago
+- Fires after initial panic subsides and bounce fails — catches second leg down
+- Config: SL 1.5x ATR, TP 3.0x ATR (2:1 R:R), max hold 6h, trailing ON (1.5x/0.8x), 1.5% risk
+- Research: Dead cat bounces fail ~70% in first 48h of trend break (Jegadeesh & Titman)
+
+**Capital reallocation** ($4,650 total, was $4,350):
+| Strategy | v6.5 | v6.6 | Change |
+|---|---|---|---|
+| funding_reversion | $500 | $500 | — |
+| trend_breakout | $1,000 | $1,000 | — |
+| trend_pullback | $750 | $750 | — |
+| order_flow | $750 | $750 | — |
+| regime_short | $500 | $400 | -$100 (pre-crash, reduced) |
+| failed_breakout_short | $400 | $350 | -$50 (pre-crash, reduced) |
+| refined_liq_cascade | $450 | $400 | -$50 (pre-crash, reduced) |
+| crash_momentum | — | $500 | NEW |
+
+**Short strategy coverage by market phase**:
+- **Pre-crash** (topping, crowded longs): regime_short, failed_breakout, refined_cascade
+- **During crash** (active selloff, bounce failures): crash_momentum
+- **Bull market**: all shorts disabled by regime gate (by design)
+
+---
+
 ## v6.5 — Research-based short strategies with regime filter (2026-03-18)
 
 **Problem**: v6.4 short strategies didn't work — liquidation_cascade had 0 trades ever (0.01% funding threshold never reached), panic_momentum had 12 trades/-$22 (taker 5m<0.90 too extreme), breakdown_reversal had 1 trade/-$7 (2.0x volume never met). $1,350 capital sitting idle while market dropped.

@@ -236,71 +236,72 @@ def check_bearish_regime(df_4h: pd.DataFrame) -> dict:
     Regime gate prevents shorting in bull markets (structural long bias = negative EV).
     Research: shorts only work when macro trend is bearish (BIS Working Paper 1087).
 
+    Uses three fast-responding triggers (any one = bearish):
+    1. Price below 4h SMA50 — sustained downtrend (~8 days)
+    2. 4h SMA20 slope negative (last 3 candles) — trend change (~3 days)
+    3. Price dropped >3% from 5-day high (30 candles) — catches sudden selloffs
+
     Returns dict with:
     - is_bearish: True if regime allows shorting
     - reason: Human-readable explanation
     - sma50_slope: 4h SMA50 slope (negative = bearish)
-    - price_vs_sma200: price position relative to SMA200
+    - price_vs_sma200: price position relative to SMA200 (if available)
     """
-    if df_4h is None or len(df_4h) < 200:
-        # Not enough data for SMA200 — use SMA50 only
-        if df_4h is not None and len(df_4h) >= 55:
-            prices = df_4h["close"]
-            sma50 = prices.rolling(50).mean()
-            sma50_val = float(sma50.iloc[-1])
-            sma50_5ago = float(sma50.iloc[-5]) if len(sma50) >= 5 else sma50_val
-            slope = (sma50_val - sma50_5ago) / sma50_5ago if sma50_5ago > 0 else 0
-            current_price = float(prices.iloc[-1])
-
-            if slope < 0 or current_price < sma50_val:
-                return {
-                    "is_bearish": True,
-                    "reason": f"4h SMA50 slope {slope*100:+.3f}%, price {'below' if current_price < sma50_val else 'above'} SMA50",
-                    "sma50_slope": slope,
-                    "price_vs_sma200": None,
-                }
-            return {
-                "is_bearish": False,
-                "reason": f"Bullish regime: 4h SMA50 rising ({slope*100:+.3f}%), price above SMA50",
-                "sma50_slope": slope,
-                "price_vs_sma200": None,
-            }
+    if df_4h is None or len(df_4h) < 30:
         return {"is_bearish": False, "reason": "Insufficient 4h data for regime check",
                 "sma50_slope": 0, "price_vs_sma200": None}
 
     prices = df_4h["close"]
+    highs = df_4h["high"]
     current_price = float(prices.iloc[-1])
-    sma50 = prices.rolling(50).mean()
-    sma200 = prices.rolling(200).mean()
-    sma50_val = float(sma50.iloc[-1])
-    sma200_val = float(sma200.iloc[-1])
+    reasons = []
 
-    # SMA50 slope over last 5 bars (~20h)
-    sma50_5ago = float(sma50.iloc[-5]) if len(sma50) >= 5 else sma50_val
-    slope = (sma50_val - sma50_5ago) / sma50_5ago if sma50_5ago > 0 else 0
+    # === Trigger 1: Price below 4h SMA50 ===
+    sma50_val = None
+    slope = 0
+    if len(df_4h) >= 50:
+        sma50 = prices.rolling(50).mean()
+        sma50_val = float(sma50.iloc[-1])
+        sma50_5ago = float(sma50.iloc[-5]) if len(sma50) >= 5 else sma50_val
+        slope = (sma50_val - sma50_5ago) / sma50_5ago if sma50_5ago > 0 else 0
+        if current_price < sma50_val:
+            reasons.append(f"price below 4h SMA50 ({current_price:.2f} < {sma50_val:.2f})")
 
-    # Bearish if: SMA50 slope negative OR price below SMA200
-    below_sma200 = current_price < sma200_val
-    slope_negative = slope < 0
+    # === Trigger 2: 4h SMA20 slope negative (last 3 candles) ===
+    if len(df_4h) >= 23:
+        sma20 = prices.rolling(20).mean()
+        sma20_now = float(sma20.iloc[-1])
+        sma20_3ago = float(sma20.iloc[-3])
+        sma20_slope = (sma20_now - sma20_3ago) / sma20_3ago if sma20_3ago > 0 else 0
+        if sma20_slope < 0:
+            reasons.append(f"4h SMA20 slope negative ({sma20_slope*100:+.3f}%)")
 
-    if below_sma200 or slope_negative:
-        reasons = []
-        if below_sma200:
-            reasons.append(f"price below 4h SMA200 ({current_price:.2f} < {sma200_val:.2f})")
-        if slope_negative:
-            reasons.append(f"4h SMA50 slope negative ({slope*100:+.3f}%)")
+    # === Trigger 3: Price dropped >3% from 5-day high (30 candles) ===
+    lookback = min(30, len(highs))
+    high_5d = float(highs.iloc[-lookback:].max())
+    drop_pct = (current_price - high_5d) / high_5d * 100
+    if drop_pct < -3.0:
+        reasons.append(f"price dropped {drop_pct:.1f}% from 5-day high ({high_5d:.2f})")
+
+    # Optional: compute SMA200 for metadata
+    price_vs_sma200 = None
+    if len(df_4h) >= 200:
+        sma200_val = float(prices.rolling(200).mean().iloc[-1])
+        price_vs_sma200 = (current_price - sma200_val) / sma200_val
+
+    if reasons:
         return {
             "is_bearish": True,
             "reason": "Bearish regime: " + ", ".join(reasons),
             "sma50_slope": slope,
-            "price_vs_sma200": (current_price - sma200_val) / sma200_val,
+            "price_vs_sma200": price_vs_sma200,
         }
 
     return {
         "is_bearish": False,
-        "reason": f"Bullish regime: price above SMA200, SMA50 rising ({slope*100:+.3f}%)",
+        "reason": f"Bullish regime: price above SMA50, SMA20 rising, no recent drop",
         "sma50_slope": slope,
-        "price_vs_sma200": (current_price - sma200_val) / sma200_val,
+        "price_vs_sma200": price_vs_sma200,
     }
 
 
@@ -1033,14 +1034,110 @@ class RefinedLiqCascadeGenerator:
 
 
 # =============================================================================
+# Strategy 8: Crash Momentum Short (SHORT-ONLY, 2-5 trades/day during crashes)
+# =============================================================================
+
+class CrashMomentumShortGenerator:
+    """Trend continuation short during active selloffs — pure price action.
+
+    Designed for the scenario existing short strategies miss: when the crash is
+    already underway, derivatives data flips (funding goes negative, OI drops,
+    taker ratio rises as dip-buyers step in). This strategy uses ONLY price
+    action to catch continuation moves after a bounce fails.
+
+    Research: momentum continuation has highest edge in first 24-48h of a
+    selloff before mean reversion kicks in. Dead cat bounces fail ~70% of the
+    time in the first 2 days of a trend break (Jegadeesh & Titman, 1993).
+
+    REGIME GATE: 4h bearish regime required (checked externally).
+
+    Entry requires ALL 4 conditions (boolean, no scoring):
+    1. Price below 15m SMA20 (confirmed downtrend)
+    2. RSI between 20-45 (not at absolute bottom, but still weak — room to fall)
+    3. At least 2 of last 3 candles are red (selling momentum present)
+    4. Price made a lower low vs 5 candles ago (trend continuing, not consolidating)
+    """
+
+    def generate_signal(self, df_15m: pd.DataFrame, htf_trend: dict,
+                        derivatives: dict = None, regime: dict = None, **kwargs) -> dict:
+        """Generate short signal from crash momentum conditions."""
+        if df_15m is None or len(df_15m) < 30:
+            return hold_signal("Insufficient 15m data", htf_trend)
+
+        # === REGIME GATE ===
+        if not regime or not regime.get("is_bearish"):
+            reason = regime.get("reason", "No regime data") if regime else "No regime data"
+            return hold_signal(f"Short blocked: {reason}", htf_trend)
+
+        prices = df_15m["close"]
+        opens = df_15m["open"]
+        lows = df_15m["low"]
+        current_price = float(prices.iloc[-1])
+        reasons = [f"Regime: {regime['reason'][:60]}"]
+
+        # === CONDITION 1: Price below 15m SMA20 ===
+        sma20 = float(prices.rolling(20).mean().iloc[-1])
+        if current_price >= sma20:
+            return hold_signal(f"Price above SMA20 ({current_price:.2f} >= {sma20:.2f})", htf_trend)
+        reasons.append(f"Price below SMA20")
+
+        # === CONDITION 2: RSI between 20-45 ===
+        rsi_data = calculate_rsi(prices)
+        rsi = rsi_data["value"]
+        if rsi < 20:
+            return hold_signal(f"RSI too low ({rsi:.0f}), oversold bounce risk", htf_trend)
+        if rsi >= 45:
+            return hold_signal(f"RSI too high ({rsi:.0f}, need <45)", htf_trend)
+        reasons.append(f"RSI {rsi:.0f} (weak but not oversold)")
+
+        # === CONDITION 3: At least 2 of last 3 candles are red ===
+        red_count = 0
+        for i in range(-3, 0):
+            if float(prices.iloc[i]) < float(opens.iloc[i]):
+                red_count += 1
+        if red_count < 2:
+            return hold_signal(f"Only {red_count}/3 red candles (need 2+)", htf_trend)
+        reasons.append(f"{red_count}/3 red candles")
+
+        # === CONDITION 4: Lower low vs 5 candles ago ===
+        low_5ago = float(lows.iloc[-5])
+        current_low = float(lows.iloc[-1])
+        if current_low >= low_5ago:
+            return hold_signal(f"No lower low ({current_low:.2f} >= {low_5ago:.2f} from 5 bars ago)", htf_trend)
+        reasons.append(f"Lower low ({current_low:.2f} < {low_5ago:.2f})")
+
+        # All 4 conditions met — short signal
+        # Strong if deep below SMA20 and RSI declining
+        pct_below_sma = (sma20 - current_price) / sma20 * 100
+        is_strong = pct_below_sma > 1.0 and rsi < 30 and red_count == 3
+        signal_type = "strong_sell" if is_strong else "sell"
+        confidence = 0.75 if is_strong else 0.70
+
+        return {
+            "signal": signal_type,
+            "confidence": confidence,
+            "reasoning": ", ".join(reasons),
+            "indicators": {
+                "price": current_price,
+                "sma20": sma20,
+                "rsi": rsi,
+                "red_count": red_count,
+                "current_low": current_low,
+                "low_5ago": low_5ago,
+                "pct_below_sma": pct_below_sma,
+            },
+        }
+
+
+# =============================================================================
 # Strategy Config + Position Sizing
 # =============================================================================
 
 @dataclass
 class StrategyConfig:
     """Configuration for a trading strategy."""
-    name: str                        # "funding_reversion", "trend_breakout", "trend_pullback", "order_flow", "regime_short", "failed_breakout_short", "refined_liq_cascade"
-    strategy_type: str               # "funding", "breakout", "pullback", "flow", "regime_short", "failed_bkout_short", "refined_cascade"
+    name: str                        # "funding_reversion", "trend_breakout", etc.
+    strategy_type: str               # "funding", "breakout", "pullback", "flow", "regime_short", "failed_bkout_short", "refined_cascade", "crash_momentum"
     generator: object                # Signal generator instance
     sl_atr_mult: float               # SL as multiple of ATR
     tp_atr_mult: float               # TP as multiple of ATR
@@ -1391,7 +1488,7 @@ class SimplePaperTrader:
         try:
             # Parallel fetch: 1m, 5m, 15m, 1h candles + ticker + derivatives
             needs_derivatives = any(s.strategy_type in ("funding", "oi", "flow", "regime_short", "failed_bkout_short", "refined_cascade") for s in self.strategies)
-            needs_4h = any(s.strategy_type in ("regime_short", "failed_bkout_short", "refined_cascade") for s in self.strategies)
+            needs_4h = any(s.strategy_type in ("regime_short", "failed_bkout_short", "refined_cascade", "crash_momentum") for s in self.strategies)
 
             tasks = [
                 collector.get_binance_klines(symbol, "1m", 100),
@@ -1497,7 +1594,7 @@ class SimplePaperTrader:
                     market_data.get("15m", pd.DataFrame()), htf_trend,
                     derivatives=market_data.get("derivatives"),
                 )
-            elif strategy.strategy_type in ("regime_short", "failed_bkout_short", "refined_cascade"):
+            elif strategy.strategy_type in ("regime_short", "failed_bkout_short", "refined_cascade", "crash_momentum"):
                 # Compute regime gate from 4h data (shared across short strategies)
                 df_4h = market_data.get("4h", pd.DataFrame())
                 regime = check_bearish_regime(df_4h) if not df_4h.empty else {"is_bearish": False, "reason": "No 4h data"}
@@ -1512,7 +1609,8 @@ class SimplePaperTrader:
 
             # Determine timeframe label for DB
             tf_map = {"funding": "1h", "breakout": "15m", "pullback": "15m", "flow": "15m",
-                      "regime_short": "15m", "failed_bkout_short": "15m", "refined_cascade": "15m"}
+                      "regime_short": "15m", "failed_bkout_short": "15m", "refined_cascade": "15m",
+                      "crash_momentum": "15m"}
             timeframe = tf_map.get(strategy.strategy_type, "1m")
 
             # Save signals to DB (holds are throttled: once per 15min or on reason change)
@@ -2205,10 +2303,10 @@ async def main():
     parser.add_argument(
         "--strategies", nargs="+",
         default=["funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
-                 "regime_short", "failed_breakout_short", "refined_liq_cascade"],
+                 "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum"],
         choices=["funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
-                 "regime_short", "failed_breakout_short", "refined_liq_cascade"],
-        help="Strategies to run (default: all 7)"
+                 "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum"],
+        help="Strategies to run (default: all 8)"
     )
 
     args = parser.parse_args()
@@ -2236,9 +2334,10 @@ async def main():
         "trend_breakout": base_capital * 1.0,          # $1000 — proven profitable strategy
         "trend_pullback": base_capital * 0.75,         # $750 — proven, complementary to breakout
         "order_flow": base_capital * 0.75,             # $750 — proven, uses taker ratio + L/S data
-        "regime_short": base_capital * 0.5,            # $500 — multi-condition confluence short
-        "failed_breakout_short": base_capital * 0.4,   # $400 — price action exhaustion short
-        "refined_liq_cascade": base_capital * 0.45,    # $450 — derivatives-based, rare events
+        "regime_short": base_capital * 0.4,            # $400 — multi-condition confluence short (pre-crash)
+        "failed_breakout_short": base_capital * 0.35,  # $350 — price action exhaustion short (pre-crash)
+        "refined_liq_cascade": base_capital * 0.4,     # $400 — derivatives-based, rare events (pre-crash)
+        "crash_momentum": base_capital * 0.5,          # $500 — price action continuation during crashes
     }
 
     strategy_configs = []
@@ -2344,6 +2443,21 @@ async def main():
                 trailing_dist_atr_mult=1.0,
                 max_position_hours=8.0,  # Time stop: 8h
                 risk_per_trade_pct=0.015,
+                capital=capital_allocation.get(name, base_capital),
+                atr_timeframe="15m",
+                trailing_enabled=True,
+            ))
+        elif name == "crash_momentum":
+            strategy_configs.append(StrategyConfig(
+                name="crash_momentum",
+                strategy_type="crash_momentum",
+                generator=CrashMomentumShortGenerator(),
+                sl_atr_mult=1.5,       # Tighter SL — momentum trades should work fast
+                tp_atr_mult=3.0,       # 2:1 R:R
+                trailing_atr_mult=1.5, # Start trailing at 1.5x ATR profit
+                trailing_dist_atr_mult=0.8,  # Tight trail to lock in crash profits
+                max_position_hours=6.0,  # Time stop: 6h (momentum fades quickly)
+                risk_per_trade_pct=0.015,  # 1.5% risk
                 capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="15m",
                 trailing_enabled=True,
