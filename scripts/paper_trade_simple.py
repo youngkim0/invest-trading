@@ -1,13 +1,23 @@
 #!/usr/bin/env python
 """Multi-strategy paper trading script using Binance real-time data and Supabase.
 
-v6.4 — Short-only strategies:
-- 3 new short-only strategies using derivatives data (no HTF dependency):
-  - liquidation_cascade: crowded longs (funding>0.01%) + OI/price divergence + 15m weakness
-  - panic_momentum: multi-TF taker selling + negative futures premium + uncrowded shorts
-  - breakdown_reversal: 15m breakdown below 20-bar low + high volume + rising OI
-- Designed differently from failed v6.3.5 shorts: no HTF, tighter SL, wider TP, trailing stops
-- Existing 4 long-only strategies unchanged
+v6.5 — Research-based short strategies (regime-filtered):
+- All short strategies gated by 4h bearish regime (SMA50 slope negative OR price < SMA200)
+- 3 new short strategies replacing v6.4's non-firing derivatives-only shorts:
+  - regime_short_confluence: moderate thresholds on 4+ conditions (funding>0.03% + taker<0.95 +
+    top traders >55% long + price<SMA20). Research: multi-condition confluence > single extreme.
+  - failed_breakout_short: price action exhaustion (new 20-bar high + long upper wick +
+    high volume + failure candle). No derivatives dependency.
+  - refined_liq_cascade: derivatives-based with realistic thresholds (funding>0.05% +
+    OI rising>1% 4h + sustained taker selling + RSI<45).
+- Key changes from v6.4: wider SL (2.0x ATR), smaller position size (1.5% risk),
+  time stops (8-12h), regime gate prevents shorting in bull markets.
+- Research basis: BIS Working Paper 1087, QuantJourney funding analysis, PocketOption Z-score study
+
+v6.4 — Short-only strategies (REPLACED by v6.5):
+- liquidation_cascade: 0 trades ever (funding threshold 0.01% never reached)
+- panic_momentum: 12 trades, -$22 (taker 5m<0.90 too extreme)
+- breakdown_reversal: 1 trade, -$7 (volume 2.0x threshold too strict)
 
 v6.3.5 — Long-only mode:
 - Disabled all short/sell signals across all 4 strategies
@@ -218,6 +228,80 @@ def apply_htf_adjustment(signal_type: str, confidence: float, htf_trend: dict, r
             reasons.append(f"HTF bearish -{penalty:.0%} conf for buy")
 
     return confidence
+
+
+def check_bearish_regime(df_4h: pd.DataFrame) -> dict:
+    """Check if market is in a bearish regime suitable for shorting.
+
+    Regime gate prevents shorting in bull markets (structural long bias = negative EV).
+    Research: shorts only work when macro trend is bearish (BIS Working Paper 1087).
+
+    Returns dict with:
+    - is_bearish: True if regime allows shorting
+    - reason: Human-readable explanation
+    - sma50_slope: 4h SMA50 slope (negative = bearish)
+    - price_vs_sma200: price position relative to SMA200
+    """
+    if df_4h is None or len(df_4h) < 200:
+        # Not enough data for SMA200 — use SMA50 only
+        if df_4h is not None and len(df_4h) >= 55:
+            prices = df_4h["close"]
+            sma50 = prices.rolling(50).mean()
+            sma50_val = float(sma50.iloc[-1])
+            sma50_5ago = float(sma50.iloc[-5]) if len(sma50) >= 5 else sma50_val
+            slope = (sma50_val - sma50_5ago) / sma50_5ago if sma50_5ago > 0 else 0
+            current_price = float(prices.iloc[-1])
+
+            if slope < 0 or current_price < sma50_val:
+                return {
+                    "is_bearish": True,
+                    "reason": f"4h SMA50 slope {slope*100:+.3f}%, price {'below' if current_price < sma50_val else 'above'} SMA50",
+                    "sma50_slope": slope,
+                    "price_vs_sma200": None,
+                }
+            return {
+                "is_bearish": False,
+                "reason": f"Bullish regime: 4h SMA50 rising ({slope*100:+.3f}%), price above SMA50",
+                "sma50_slope": slope,
+                "price_vs_sma200": None,
+            }
+        return {"is_bearish": False, "reason": "Insufficient 4h data for regime check",
+                "sma50_slope": 0, "price_vs_sma200": None}
+
+    prices = df_4h["close"]
+    current_price = float(prices.iloc[-1])
+    sma50 = prices.rolling(50).mean()
+    sma200 = prices.rolling(200).mean()
+    sma50_val = float(sma50.iloc[-1])
+    sma200_val = float(sma200.iloc[-1])
+
+    # SMA50 slope over last 5 bars (~20h)
+    sma50_5ago = float(sma50.iloc[-5]) if len(sma50) >= 5 else sma50_val
+    slope = (sma50_val - sma50_5ago) / sma50_5ago if sma50_5ago > 0 else 0
+
+    # Bearish if: SMA50 slope negative OR price below SMA200
+    below_sma200 = current_price < sma200_val
+    slope_negative = slope < 0
+
+    if below_sma200 or slope_negative:
+        reasons = []
+        if below_sma200:
+            reasons.append(f"price below 4h SMA200 ({current_price:.2f} < {sma200_val:.2f})")
+        if slope_negative:
+            reasons.append(f"4h SMA50 slope negative ({slope*100:+.3f}%)")
+        return {
+            "is_bearish": True,
+            "reason": "Bearish regime: " + ", ".join(reasons),
+            "sma50_slope": slope,
+            "price_vs_sma200": (current_price - sma200_val) / sma200_val,
+        }
+
+    return {
+        "is_bearish": False,
+        "reason": f"Bullish regime: price above SMA200, SMA50 rising ({slope*100:+.3f}%)",
+        "sma50_slope": slope,
+        "price_vs_sma200": (current_price - sma200_val) / sma200_val,
+    }
 
 
 # =============================================================================
@@ -635,82 +719,303 @@ class OrderFlowGenerator:
 
 
 # =============================================================================
-# Strategy 5: Liquidation Cascade (SHORT-ONLY, 1-3 trades/day)
+# Strategy 5: Regime Short Confluence (SHORT-ONLY, 2-5 trades/day)
 # =============================================================================
 
-class LiquidationCascadeGenerator:
-    """Over-leveraged longs + weakening price + rising OI = liquidation fuel.
+class RegimeShortConfluenceGenerator:
+    """Multi-condition short using moderate thresholds on 4+ signals.
 
-    Short-only. No HTF dependency — uses derivatives data instead.
+    Research-based: no single derivatives indicator works alone. The edge is in
+    moderate thresholds on multiple indicators firing simultaneously.
+    (QuantJourney funding analysis, BIS Working Paper 1087)
 
-    Entry requires ALL 3 conditions (boolean, no scoring):
-    1. Funding rate > 0.01% — longs paying shorts, crowded leverage
-    2. OI rising + price falling (divergence) — OI change 30min > 0%, price change 30min < -0.15%
-    3. 15m price < SMA20 AND RSI < 45 AND RSI falling — momentum confirms weakness
+    REGIME GATE: 4h bearish regime required (checked externally).
+
+    Entry requires ALL 4 conditions (boolean, no scoring):
+    1. Funding rate > +0.03% (longs paying, crowded but not extreme)
+    2. Taker buy/sell ratio (15m) < 0.95 (active selling pressure)
+    3. Top traders > 55% long accounts (crowd is long = contrarian short)
+    4. 15m price < SMA20 (bearish price action confirmation)
     """
 
     def generate_signal(self, df_15m: pd.DataFrame, htf_trend: dict,
-                        derivatives: dict = None, **kwargs) -> dict:
-        """Generate short signal from liquidation cascade conditions."""
+                        derivatives: dict = None, regime: dict = None, **kwargs) -> dict:
+        """Generate short signal from multi-condition confluence."""
         if df_15m is None or len(df_15m) < 30:
             return hold_signal("Insufficient 15m data", htf_trend)
         if not derivatives:
             return hold_signal("No derivatives data", htf_trend)
 
+        # === REGIME GATE ===
+        if not regime or not regime.get("is_bearish"):
+            reason = regime.get("reason", "No regime data") if regime else "No regime data"
+            return hold_signal(f"Short blocked: {reason}", htf_trend)
+
         prices = df_15m["close"]
         current_price = float(prices.iloc[-1])
-        reasons = []
+        reasons = [f"Regime: {regime['reason'][:60]}"]
 
-        # === CONDITION 1: Funding rate > 0.01% (crowded longs) ===
+        # === CONDITION 1: Funding rate > +0.03% ===
         funding_data = derivatives.get("funding_rate", [])
         if not funding_data:
-            return hold_signal("No funding data for cascade", htf_trend)
+            return hold_signal("No funding data", htf_trend)
 
         rate = funding_data[-1]["funding_rate"]
-        if rate <= 0.0001:  # > 0.01%
-            return hold_signal(f"Funding too low for cascade ({rate*100:.3f}%)", htf_trend)
-        reasons.append(f"Funding +{rate*100:.3f}% (crowded longs)")
+        if rate <= 0.0003:  # > 0.03%
+            return hold_signal(f"Funding too low ({rate*100:.3f}%, need >0.03%)", htf_trend)
+        reasons.append(f"Funding +{rate*100:.3f}%")
 
-        # === CONDITION 2: OI rising + price falling (divergence) ===
-        oi_history = derivatives.get("oi_history", [])
-        if len(oi_history) < 7:
-            return hold_signal("Insufficient OI history for cascade", htf_trend)
+        # === CONDITION 2: 15m taker ratio < 0.95 ===
+        taker_data = derivatives.get("taker_ratio_15m", [])
+        if not taker_data:
+            return hold_signal("No taker ratio data", htf_trend)
 
-        current_oi = oi_history[-1]["sum_open_interest_value"]
-        lookback_idx = max(0, len(oi_history) - 7)  # ~30min ago (6 x 5min)
-        earlier_oi = oi_history[lookback_idx]["sum_open_interest_value"]
-        oi_change_pct = (current_oi - earlier_oi) / earlier_oi * 100 if earlier_oi > 0 else 0
+        taker_entry = taker_data[0] if isinstance(taker_data, list) else taker_data
+        taker_ratio = float(taker_entry.get("buy_sell_ratio", 1.0))
 
-        if oi_change_pct <= 0:
-            return hold_signal(f"OI not rising ({oi_change_pct:+.2f}%)", htf_trend)
+        if taker_ratio >= 0.95:
+            return hold_signal(f"Taker ratio not bearish ({taker_ratio:.3f}, need <0.95)", htf_trend)
+        reasons.append(f"Taker {taker_ratio:.3f} (selling)")
 
-        # Price change over ~30min (2 x 15m candles)
-        price_30m_ago = float(prices.iloc[-3]) if len(prices) >= 3 else float(prices.iloc[0])
-        price_change_30m = (current_price - price_30m_ago) / price_30m_ago * 100
+        # === CONDITION 3: Top traders > 55% long (crowd is long) ===
+        ls_data = derivatives.get("top_long_short", [])
+        if not ls_data:
+            return hold_signal("No L/S ratio data", htf_trend)
 
-        if price_change_30m >= -0.15:
-            return hold_signal(f"Price not falling enough ({price_change_30m:+.2f}%, need <-0.15%)", htf_trend)
-        reasons.append(f"OI +{oi_change_pct:.2f}% / price {price_change_30m:+.2f}% (divergence)")
+        ls_entry = ls_data[0] if isinstance(ls_data, list) else ls_data
+        long_account = float(ls_entry.get("long_account", 0.5))
 
-        # === CONDITION 3: 15m momentum confirms weakness ===
+        if long_account <= 0.55:
+            return hold_signal(f"Top traders not crowded long ({long_account:.0%}, need >55%)", htf_trend)
+        reasons.append(f"Top traders {long_account:.0%} long (crowded)")
+
+        # === CONDITION 4: Price below 15m SMA20 ===
         sma20 = float(prices.rolling(20).mean().iloc[-1])
+        if current_price >= sma20:
+            return hold_signal(f"Price above SMA20 ({current_price:.2f} >= {sma20:.2f})", htf_trend)
+        reasons.append(f"Price below SMA20")
+
+        # All 4 conditions met — short signal
         rsi_data = calculate_rsi(prices)
         rsi = rsi_data["value"]
-
-        if current_price >= sma20:
-            return hold_signal(f"Price above SMA20 (${current_price:,.2f} >= ${sma20:,.2f})", htf_trend)
-        if rsi >= 45:
-            return hold_signal(f"RSI too high for cascade ({rsi:.0f}, need <45)", htf_trend)
-        if not rsi_data["falling"]:
-            return hold_signal(f"RSI not falling ({rsi:.0f})", htf_trend)
-        reasons.append(f"15m weak: price<SMA20, RSI {rsi:.0f} falling")
-
-        # All 3 conditions met — short signal
-        is_strong = rate > 0.0005 and oi_change_pct > 1.0  # Very extreme
+        is_strong = rate > 0.0005 and taker_ratio < 0.90 and long_account > 0.60
         signal_type = "strong_sell" if is_strong else "sell"
         confidence = 0.75 if is_strong else 0.70
 
-        # No apply_htf_adjustment() — shorts don't use HTF
+        return {
+            "signal": signal_type,
+            "confidence": confidence,
+            "reasoning": ", ".join(reasons),
+            "indicators": {
+                "price": current_price,
+                "funding_rate": rate,
+                "taker_ratio": taker_ratio,
+                "long_account": long_account,
+                "sma20": sma20,
+                "rsi": rsi,
+                "regime_slope": regime.get("sma50_slope", 0),
+            },
+        }
+
+
+# =============================================================================
+# Strategy 6: Failed Breakout Short (SHORT-ONLY, 1-3 trades/day)
+# =============================================================================
+
+class FailedBreakoutShortGenerator:
+    """Price exhaustion pattern — breakout above resistance fails and reverses.
+
+    Research: Volume exhaustion + failed breakout = liquidity sweep reversal.
+    (PocketOption Z-score study: Z>2.0 + RSI>78 = 78% success rate)
+
+    REGIME GATE: 4h bearish regime required (checked externally).
+
+    Entry requires ALL 4 conditions (boolean, no scoring):
+    1. 15m candle made new 20-bar high (breakout attempt)
+    2. Volume on breakout candle > 1.5x average (exhaustion volume)
+    3. Breakout candle has long upper wick (closes in lower 40% of range)
+    4. Next candle (current) closes below breakout candle's midpoint (failure)
+    """
+
+    def generate_signal(self, df_15m: pd.DataFrame, htf_trend: dict,
+                        derivatives: dict = None, regime: dict = None, **kwargs) -> dict:
+        """Generate short signal from failed breakout exhaustion."""
+        if df_15m is None or len(df_15m) < 25:
+            return hold_signal("Insufficient 15m data", htf_trend)
+
+        # === REGIME GATE ===
+        if not regime or not regime.get("is_bearish"):
+            reason = regime.get("reason", "No regime data") if regime else "No regime data"
+            return hold_signal(f"Short blocked: {reason}", htf_trend)
+
+        prices = df_15m["close"]
+        highs = df_15m["high"]
+        lows = df_15m["low"]
+        opens = df_15m["open"]
+        volumes = df_15m["volume"]
+        reasons = [f"Regime bearish"]
+
+        # We look at the PREVIOUS candle as the breakout candle, current as confirmation
+        if len(prices) < 22:
+            return hold_signal("Need 22+ candles", htf_trend)
+
+        # Previous candle (potential breakout)
+        prev_high = float(highs.iloc[-2])
+        prev_low = float(lows.iloc[-2])
+        prev_close = float(prices.iloc[-2])
+        prev_open = float(opens.iloc[-2])
+        prev_vol = float(volumes.iloc[-2])
+        prev_range = prev_high - prev_low
+
+        # Current candle (confirmation)
+        current_price = float(prices.iloc[-1])
+
+        # === CONDITION 1: Previous candle made new 20-bar high ===
+        high_20 = float(highs.iloc[-22:-2].max())  # 20 bars before prev candle
+        if prev_high <= high_20:
+            return hold_signal(f"No breakout (prev high {prev_high:.2f} <= 20-bar {high_20:.2f})", htf_trend)
+        reasons.append(f"Prev candle broke 20-bar high {high_20:.2f}")
+
+        # === CONDITION 2: Volume > 1.5x average ===
+        avg_vol = float(volumes.iloc[-22:-2].mean())
+        vol_ratio = prev_vol / avg_vol if avg_vol > 0 else 0
+        if vol_ratio < 1.5:
+            return hold_signal(f"Breakout volume too low ({vol_ratio:.2f}x, need 1.5x)", htf_trend)
+        reasons.append(f"Breakout vol {vol_ratio:.1f}x")
+
+        # === CONDITION 3: Long upper wick (close in lower 40% of range) ===
+        if prev_range <= 0:
+            return hold_signal("Zero range candle", htf_trend)
+        close_position = (prev_close - prev_low) / prev_range  # 0=closed at low, 1=closed at high
+        if close_position > 0.40:
+            return hold_signal(f"No rejection wick (close at {close_position:.0%} of range, need <40%)", htf_trend)
+        reasons.append(f"Rejection wick (close at {close_position:.0%} of range)")
+
+        # === CONDITION 4: Current candle closes below prev candle midpoint ===
+        prev_midpoint = (prev_high + prev_low) / 2
+        if current_price >= prev_midpoint:
+            return hold_signal(f"No follow-through ({current_price:.2f} >= midpoint {prev_midpoint:.2f})", htf_trend)
+        reasons.append(f"Failed: price {current_price:.2f} < midpoint {prev_midpoint:.2f}")
+
+        # All 4 conditions met — short signal
+        # RSI divergence as bonus (not required)
+        rsi_data = calculate_rsi(prices)
+        rsi = rsi_data["value"]
+        is_strong = vol_ratio > 2.0 and close_position < 0.20
+        signal_type = "strong_sell" if is_strong else "sell"
+        confidence = 0.75 if is_strong else 0.70
+
+        # Boost if RSI was overbought on breakout candle
+        if rsi > 65:
+            confidence = min(0.85, confidence + 0.05)
+            reasons.append(f"RSI {rsi:.0f} (overbought)")
+
+        return {
+            "signal": signal_type,
+            "confidence": confidence,
+            "reasoning": ", ".join(reasons),
+            "indicators": {
+                "price": current_price,
+                "breakout_high": prev_high,
+                "high_20": high_20,
+                "vol_ratio": vol_ratio,
+                "close_position": close_position,
+                "prev_midpoint": prev_midpoint,
+                "rsi": rsi,
+            },
+        }
+
+
+# =============================================================================
+# Strategy 7: Refined Liquidation Cascade (SHORT-ONLY, 0-2 trades/day)
+# =============================================================================
+
+class RefinedLiqCascadeGenerator:
+    """Derivatives-based short with realistic thresholds (v6.4 cascade redesigned).
+
+    v6.4 had funding > 0.01% which never fired. Research shows 0.05%+ is the
+    actionable threshold. Also uses longer OI lookback (4h vs 30min) and
+    sustained taker selling instead of instant snapshot.
+
+    REGIME GATE: 4h bearish regime required (checked externally).
+
+    Entry requires ALL 4 conditions (boolean, no scoring):
+    1. Funding rate > +0.05% (genuinely elevated, not normal noise)
+    2. OI rising > 1% over last 4h while price flat/falling (trapped longs adding)
+    3. Taker buy/sell ratio (15m) < 0.93 (sustained selling, not just a blip)
+    4. 15m RSI < 45 (momentum confirms weakness, not buying the dip)
+    """
+
+    def generate_signal(self, df_15m: pd.DataFrame, htf_trend: dict,
+                        derivatives: dict = None, regime: dict = None, **kwargs) -> dict:
+        """Generate short signal from refined liquidation cascade conditions."""
+        if df_15m is None or len(df_15m) < 30:
+            return hold_signal("Insufficient 15m data", htf_trend)
+        if not derivatives:
+            return hold_signal("No derivatives data", htf_trend)
+
+        # === REGIME GATE ===
+        if not regime or not regime.get("is_bearish"):
+            reason = regime.get("reason", "No regime data") if regime else "No regime data"
+            return hold_signal(f"Short blocked: {reason}", htf_trend)
+
+        prices = df_15m["close"]
+        current_price = float(prices.iloc[-1])
+        reasons = [f"Regime bearish"]
+
+        # === CONDITION 1: Funding rate > +0.05% ===
+        funding_data = derivatives.get("funding_rate", [])
+        if not funding_data:
+            return hold_signal("No funding data", htf_trend)
+
+        rate = funding_data[-1]["funding_rate"]
+        if rate <= 0.0005:  # > 0.05%
+            return hold_signal(f"Funding not elevated ({rate*100:.3f}%, need >0.05%)", htf_trend)
+        reasons.append(f"Funding +{rate*100:.3f}% (elevated)")
+
+        # === CONDITION 2: OI rising > 1% (use full available history) ===
+        oi_history = derivatives.get("oi_history", [])
+        if len(oi_history) < 7:
+            return hold_signal("Insufficient OI history", htf_trend)
+
+        current_oi = oi_history[-1]["sum_open_interest_value"]
+        earliest_oi = oi_history[0]["sum_open_interest_value"]  # Use full lookback
+        oi_change_pct = (current_oi - earliest_oi) / earliest_oi * 100 if earliest_oi > 0 else 0
+
+        if oi_change_pct <= 1.0:
+            return hold_signal(f"OI not rising enough ({oi_change_pct:+.2f}%, need >1%)", htf_trend)
+
+        # Price should be flat or falling while OI rises (divergence)
+        price_start = float(prices.iloc[0]) if len(prices) > 0 else current_price
+        price_change = (current_price - price_start) / price_start * 100
+        if price_change > 0.5:
+            return hold_signal(f"Price rising with OI ({price_change:+.2f}%), no divergence", htf_trend)
+        reasons.append(f"OI +{oi_change_pct:.2f}% / price {price_change:+.2f}% (divergence)")
+
+        # === CONDITION 3: Taker ratio < 0.93 (sustained selling) ===
+        taker_data = derivatives.get("taker_ratio_15m", [])
+        if not taker_data:
+            return hold_signal("No taker ratio data", htf_trend)
+
+        taker_entry = taker_data[0] if isinstance(taker_data, list) else taker_data
+        taker_ratio = float(taker_entry.get("buy_sell_ratio", 1.0))
+
+        if taker_ratio >= 0.93:
+            return hold_signal(f"Taker not selling ({taker_ratio:.3f}, need <0.93)", htf_trend)
+        reasons.append(f"Taker {taker_ratio:.3f} (sustained selling)")
+
+        # === CONDITION 4: 15m RSI < 45 ===
+        rsi_data = calculate_rsi(prices)
+        rsi = rsi_data["value"]
+
+        if rsi >= 45:
+            return hold_signal(f"RSI too high ({rsi:.0f}, need <45)", htf_trend)
+        reasons.append(f"RSI {rsi:.0f} (weak)")
+
+        # All 4 conditions met — short signal
+        is_strong = rate > 0.001 and oi_change_pct > 2.0 and taker_ratio < 0.88
+        signal_type = "strong_sell" if is_strong else "sell"
+        confidence = 0.75 if is_strong else 0.70
 
         return {
             "signal": signal_type,
@@ -720,178 +1025,9 @@ class LiquidationCascadeGenerator:
                 "price": current_price,
                 "funding_rate": rate,
                 "oi_change_pct": oi_change_pct,
-                "price_change_30m": price_change_30m,
+                "price_change_pct": price_change,
+                "taker_ratio": taker_ratio,
                 "rsi": rsi,
-                "sma20": sma20,
-            },
-        }
-
-
-# =============================================================================
-# Strategy 6: Panic Momentum (SHORT-ONLY, 0-2 trades/day)
-# =============================================================================
-
-class PanicMomentumGenerator:
-    """Multi-TF taker selling + negative premium = self-reinforcing panic.
-
-    Short-only. No HTF dependency — uses derivatives data instead.
-
-    Entry requires ALL 3 conditions (boolean, no scoring):
-    1. Multi-TF taker selling: 5m ratio < 0.90 AND 15m ratio < 0.95
-    2. Futures premium <= 0 (futures below spot = genuine fear)
-    3. Top traders < 55% short (room to run, not crowded)
-    """
-
-    def generate_signal(self, df_15m: pd.DataFrame, htf_trend: dict,
-                        derivatives: dict = None, **kwargs) -> dict:
-        """Generate short signal from panic momentum conditions."""
-        if df_15m is None or len(df_15m) < 20:
-            return hold_signal("Insufficient 15m data", htf_trend)
-        if not derivatives:
-            return hold_signal("No derivatives data", htf_trend)
-
-        current_price = float(df_15m["close"].iloc[-1])
-        reasons = []
-
-        # === CONDITION 1: Multi-TF taker selling ===
-        taker_5m = derivatives.get("taker_ratio_5m", [])
-        taker_15m = derivatives.get("taker_ratio_15m", [])
-        if not taker_5m or not taker_15m:
-            return hold_signal("No taker ratio data for panic", htf_trend)
-
-        ratio_5m = (taker_5m[0] if isinstance(taker_5m, list) else taker_5m).get("buy_sell_ratio", 1.0)
-        ratio_15m = (taker_15m[0] if isinstance(taker_15m, list) else taker_15m).get("buy_sell_ratio", 1.0)
-
-        if ratio_5m >= 0.90:
-            return hold_signal(f"5m taker ratio not extreme enough ({ratio_5m:.3f}, need <0.90)", htf_trend)
-        if ratio_15m >= 0.95:
-            return hold_signal(f"15m taker ratio not extreme enough ({ratio_15m:.3f}, need <0.95)", htf_trend)
-        reasons.append(f"Taker selling: 5m={ratio_5m:.3f} 15m={ratio_15m:.3f}")
-
-        # === CONDITION 2: Futures premium <= 0 ===
-        premium_data = derivatives.get("premium_index", {})
-        if not premium_data:
-            return hold_signal("No premium index data for panic", htf_trend)
-
-        mark_price = premium_data.get("mark_price", 0)
-        index_price = premium_data.get("index_price", 0)
-        if index_price <= 0:
-            return hold_signal("Invalid index price", htf_trend)
-
-        premium_pct = (mark_price - index_price) / index_price * 100
-        if premium_pct > 0:
-            return hold_signal(f"Premium positive ({premium_pct:+.4f}%, need <=0)", htf_trend)
-        reasons.append(f"Premium {premium_pct:+.4f}% (futures < spot)")
-
-        # === CONDITION 3: Top traders not crowded short (<55%) ===
-        ls_data = derivatives.get("top_long_short", [])
-        if not ls_data:
-            return hold_signal("No L/S ratio data for panic", htf_trend)
-
-        ls_entry = ls_data[0] if isinstance(ls_data, list) else ls_data
-        short_account = ls_entry.get("short_account", 0.5)
-        if short_account >= 0.55:
-            return hold_signal(f"Top traders too crowded short ({short_account:.0%}, need <55%)", htf_trend)
-        reasons.append(f"Top traders {short_account:.0%} short (not crowded)")
-
-        # All 3 conditions met — short signal
-        is_strong = ratio_5m < 0.85 and premium_pct < -0.01
-        signal_type = "strong_sell" if is_strong else "sell"
-        confidence = 0.75 if is_strong else 0.70
-
-        # No apply_htf_adjustment() — shorts don't use HTF
-
-        return {
-            "signal": signal_type,
-            "confidence": confidence,
-            "reasoning": ", ".join(reasons),
-            "indicators": {
-                "price": current_price,
-                "taker_ratio_5m": ratio_5m,
-                "taker_ratio_15m": ratio_15m,
-                "premium_pct": premium_pct,
-                "short_account": short_account,
-            },
-        }
-
-
-# =============================================================================
-# Strategy 7: Breakdown Reversal (SHORT-ONLY, 1-3 trades/day)
-# =============================================================================
-
-class BreakdownReversalGenerator:
-    """Price breaks below 20-bar low with volume + rising OI = real breakdown.
-
-    Short-only. No HTF dependency — OI replaces HTF as conviction filter.
-
-    Entry requires ALL 3 conditions (boolean, no scoring):
-    1. 15m close < 20-bar low (longer lookback than breakout's 10-bar)
-    2. Volume > 2.0x avg (higher bar — false breakdowns common in crypto)
-    3. OI rising > 0.1% over last 15min (new shorts entering with conviction)
-    """
-
-    def generate_signal(self, df_15m: pd.DataFrame, htf_trend: dict,
-                        derivatives: dict = None, **kwargs) -> dict:
-        """Generate short signal from breakdown conditions."""
-        if df_15m is None or len(df_15m) < 30:
-            return hold_signal("Insufficient 15m data", htf_trend)
-        if not derivatives:
-            return hold_signal("No derivatives data", htf_trend)
-
-        prices = df_15m["close"]
-        lows = df_15m["low"]
-        volumes = df_15m["volume"]
-        current_price = float(prices.iloc[-1])
-        reasons = []
-
-        # === CONDITION 1: 15m close < 20-bar low ===
-        low_20 = float(lows.iloc[-21:-1].min())  # 20 bars before current
-        if current_price >= low_20:
-            return hold_signal(
-                f"No breakdown (${current_price:,.2f} >= 20-bar low ${low_20:,.2f})", htf_trend
-            )
-        reasons.append(f"15m break below 20-bar low ${low_20:,.2f}")
-
-        # === CONDITION 2: Volume > 2.0x avg ===
-        avg_vol = float(volumes.iloc[-21:-1].mean())
-        current_vol = float(volumes.iloc[-1])
-        vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
-
-        if vol_ratio < 2.0:
-            return hold_signal(f"Volume too low for breakdown ({vol_ratio:.2f}x, need 2.0x)", htf_trend)
-        reasons.append(f"Volume {vol_ratio:.1f}x avg")
-
-        # === CONDITION 3: OI rising > 0.1% over last 15min ===
-        oi_history = derivatives.get("oi_history", [])
-        if len(oi_history) < 4:
-            return hold_signal("Insufficient OI history for breakdown", htf_trend)
-
-        current_oi = oi_history[-1]["sum_open_interest_value"]
-        # ~15min ago (3 x 5min intervals)
-        lookback_idx = max(0, len(oi_history) - 4)
-        earlier_oi = oi_history[lookback_idx]["sum_open_interest_value"]
-        oi_change_pct = (current_oi - earlier_oi) / earlier_oi * 100 if earlier_oi > 0 else 0
-
-        if oi_change_pct <= 0.1:
-            return hold_signal(f"OI not rising enough ({oi_change_pct:+.2f}%, need >0.1%)", htf_trend)
-        reasons.append(f"OI +{oi_change_pct:.2f}% (15min, new conviction)")
-
-        # All 3 conditions met — short signal
-        is_strong = vol_ratio > 3.0 and oi_change_pct > 0.5
-        signal_type = "strong_sell" if is_strong else "sell"
-        confidence = 0.75 if is_strong else 0.70
-
-        # No apply_htf_adjustment() — shorts don't use HTF
-
-        return {
-            "signal": signal_type,
-            "confidence": confidence,
-            "reasoning": ", ".join(reasons),
-            "indicators": {
-                "price": current_price,
-                "low_20": low_20,
-                "vol_ratio": vol_ratio,
-                "oi_change_pct": oi_change_pct,
             },
         }
 
@@ -903,8 +1039,8 @@ class BreakdownReversalGenerator:
 @dataclass
 class StrategyConfig:
     """Configuration for a trading strategy."""
-    name: str                        # "funding_reversion", "trend_breakout", "trend_pullback", "order_flow", "liquidation_cascade", "panic_momentum", "breakdown_reversal"
-    strategy_type: str               # "funding", "breakout", "pullback", "flow", "liq_cascade", "panic_momentum", "breakdown"
+    name: str                        # "funding_reversion", "trend_breakout", "trend_pullback", "order_flow", "regime_short", "failed_breakout_short", "refined_liq_cascade"
+    strategy_type: str               # "funding", "breakout", "pullback", "flow", "regime_short", "failed_bkout_short", "refined_cascade"
     generator: object                # Signal generator instance
     sl_atr_mult: float               # SL as multiple of ATR
     tp_atr_mult: float               # TP as multiple of ATR
@@ -1254,7 +1390,8 @@ class SimplePaperTrader:
         """Fetch all needed data for a symbol (candles + derivatives)."""
         try:
             # Parallel fetch: 1m, 5m, 15m, 1h candles + ticker + derivatives
-            needs_derivatives = any(s.strategy_type in ("funding", "oi", "flow", "liq_cascade", "panic_momentum", "breakdown") for s in self.strategies)
+            needs_derivatives = any(s.strategy_type in ("funding", "oi", "flow", "regime_short", "failed_bkout_short", "refined_cascade") for s in self.strategies)
+            needs_4h = any(s.strategy_type in ("regime_short", "failed_bkout_short", "refined_cascade") for s in self.strategies)
 
             tasks = [
                 collector.get_binance_klines(symbol, "1m", 100),
@@ -1265,6 +1402,8 @@ class SimplePaperTrader:
             ]
             if needs_derivatives:
                 tasks.append(collector.get_derivatives_data(symbol))
+            if needs_4h:
+                tasks.append(collector.get_binance_klines(symbol, "4h", 210))
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -1289,9 +1428,12 @@ class SimplePaperTrader:
                 "current_price": current_price,
             }
 
+            idx = 5
             if needs_derivatives:
-                idx = 5
                 market_data["derivatives"] = results[idx] if not isinstance(results[idx], Exception) else {}
+                idx += 1
+            if needs_4h:
+                market_data["4h"] = results[idx] if not isinstance(results[idx], Exception) else pd.DataFrame()
 
             return market_data
         except Exception as e:
@@ -1355,10 +1497,14 @@ class SimplePaperTrader:
                     market_data.get("15m", pd.DataFrame()), htf_trend,
                     derivatives=market_data.get("derivatives"),
                 )
-            elif strategy.strategy_type in ("liq_cascade", "panic_momentum", "breakdown"):
+            elif strategy.strategy_type in ("regime_short", "failed_bkout_short", "refined_cascade"):
+                # Compute regime gate from 4h data (shared across short strategies)
+                df_4h = market_data.get("4h", pd.DataFrame())
+                regime = check_bearish_regime(df_4h) if not df_4h.empty else {"is_bearish": False, "reason": "No 4h data"}
                 signal_result = strategy.generator.generate_signal(
                     market_data.get("15m", pd.DataFrame()), htf_trend,
                     derivatives=market_data.get("derivatives"),
+                    regime=regime,
                 )
             else:
                 signal_result = {"signal": "hold", "confidence": 0.5,
@@ -1366,7 +1512,7 @@ class SimplePaperTrader:
 
             # Determine timeframe label for DB
             tf_map = {"funding": "1h", "breakout": "15m", "pullback": "15m", "flow": "15m",
-                      "liq_cascade": "15m", "panic_momentum": "15m", "breakdown": "15m"}
+                      "regime_short": "15m", "failed_bkout_short": "15m", "refined_cascade": "15m"}
             timeframe = tf_map.get(strategy.strategy_type, "1m")
 
             # Save signals to DB (holds are throttled: once per 15min or on reason change)
@@ -2046,7 +2192,7 @@ async def main():
     )
     parser.add_argument(
         "--capital", type=float, default=1000.0,
-        help="Base capital unit (long: funding 0.5x, breakout 1.0x, pullback 0.75x, flow 0.75x; short: liq_cascade 0.5x, panic 0.35x, breakdown 0.5x)"
+        help="Base capital unit (long: funding 0.5x, breakout 1.0x, pullback 0.75x, flow 0.75x; short: regime 0.5x, failed_bkout 0.4x, cascade 0.45x)"
     )
     parser.add_argument(
         "--leverage", type=int, default=10,
@@ -2059,9 +2205,9 @@ async def main():
     parser.add_argument(
         "--strategies", nargs="+",
         default=["funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
-                 "liquidation_cascade", "panic_momentum", "breakdown_reversal"],
+                 "regime_short", "failed_breakout_short", "refined_liq_cascade"],
         choices=["funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
-                 "liquidation_cascade", "panic_momentum", "breakdown_reversal"],
+                 "regime_short", "failed_breakout_short", "refined_liq_cascade"],
         help="Strategies to run (default: all 7)"
     )
 
@@ -2083,15 +2229,16 @@ async def main():
     selected = args.strategies
     base_capital = args.capital
 
-    # Capital allocation: more to proven strategies, less to new/rare ones
+    # Capital allocation: more to proven strategies, less to new/experimental
+    # Short strategies sized at 50-70% of long equivalents (research: asymmetric risk)
     capital_allocation = {
-        "funding_reversion": base_capital * 0.5,   # $500 — rare-event, mostly idle
-        "trend_breakout": base_capital * 1.0,      # $1000 — proven profitable strategy
-        "trend_pullback": base_capital * 0.75,     # $750 — new, complementary to breakout
-        "order_flow": base_capital * 0.75,         # $750 — new, uses taker ratio + L/S data
-        "liquidation_cascade": base_capital * 0.5, # $500 — short-only, crowded-long liquidations
-        "panic_momentum": base_capital * 0.35,     # $350 — short-only, rare panic events
-        "breakdown_reversal": base_capital * 0.5,  # $500 — short-only, breakdown with OI conviction
+        "funding_reversion": base_capital * 0.5,       # $500 — rare-event, mostly idle
+        "trend_breakout": base_capital * 1.0,          # $1000 — proven profitable strategy
+        "trend_pullback": base_capital * 0.75,         # $750 — proven, complementary to breakout
+        "order_flow": base_capital * 0.75,             # $750 — proven, uses taker ratio + L/S data
+        "regime_short": base_capital * 0.5,            # $500 — multi-condition confluence short
+        "failed_breakout_short": base_capital * 0.4,   # $400 — price action exhaustion short
+        "refined_liq_cascade": base_capital * 0.45,    # $450 — derivatives-based, rare events
     }
 
     strategy_configs = []
@@ -2156,47 +2303,47 @@ async def main():
                 atr_timeframe="15m",
                 trailing_enabled=False,
             ))
-        elif name == "liquidation_cascade":
+        elif name == "regime_short":
             strategy_configs.append(StrategyConfig(
-                name="liquidation_cascade",
-                strategy_type="liq_cascade",
-                generator=LiquidationCascadeGenerator(),
-                sl_atr_mult=1.2,
-                tp_atr_mult=4.0,
-                trailing_atr_mult=2.0,
-                trailing_dist_atr_mult=0.8,
-                max_position_hours=4.0,
-                risk_per_trade_pct=0.02,
+                name="regime_short",
+                strategy_type="regime_short",
+                generator=RegimeShortConfluenceGenerator(),
+                sl_atr_mult=2.0,       # Wider SL for shorts (research: violent bounces)
+                tp_atr_mult=3.0,       # 1.5:1 R:R
+                trailing_atr_mult=1.5, # Start trailing at 1.5x ATR profit
+                trailing_dist_atr_mult=1.0,  # Trail at 1.0x ATR
+                max_position_hours=12.0,  # Time stop: 12h max
+                risk_per_trade_pct=0.015,  # 1.5% risk (smaller than longs)
                 capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="15m",
                 trailing_enabled=True,
             ))
-        elif name == "panic_momentum":
+        elif name == "failed_breakout_short":
             strategy_configs.append(StrategyConfig(
-                name="panic_momentum",
-                strategy_type="panic_momentum",
-                generator=PanicMomentumGenerator(),
-                sl_atr_mult=1.0,
-                tp_atr_mult=3.5,
+                name="failed_breakout_short",
+                strategy_type="failed_bkout_short",
+                generator=FailedBreakoutShortGenerator(),
+                sl_atr_mult=2.0,       # SL above the failed breakout high
+                tp_atr_mult=2.5,       # 1.25:1 R:R (tighter since pattern is quick)
                 trailing_atr_mult=1.5,
-                trailing_dist_atr_mult=0.6,
-                max_position_hours=3.0,
-                risk_per_trade_pct=0.02,
+                trailing_dist_atr_mult=0.8,
+                max_position_hours=6.0,  # Time stop: 6h (failed breakouts resolve fast)
+                risk_per_trade_pct=0.015,
                 capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="15m",
                 trailing_enabled=True,
             ))
-        elif name == "breakdown_reversal":
+        elif name == "refined_liq_cascade":
             strategy_configs.append(StrategyConfig(
-                name="breakdown_reversal",
-                strategy_type="breakdown",
-                generator=BreakdownReversalGenerator(),
-                sl_atr_mult=1.3,
-                tp_atr_mult=3.5,
+                name="refined_liq_cascade",
+                strategy_type="refined_cascade",
+                generator=RefinedLiqCascadeGenerator(),
+                sl_atr_mult=2.0,       # Wide SL
+                tp_atr_mult=4.0,       # 2:1 R:R (rare but high conviction)
                 trailing_atr_mult=2.0,
-                trailing_dist_atr_mult=0.8,
-                max_position_hours=5.0,
-                risk_per_trade_pct=0.02,
+                trailing_dist_atr_mult=1.0,
+                max_position_hours=8.0,  # Time stop: 8h
+                risk_per_trade_pct=0.015,
                 capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="15m",
                 trailing_enabled=True,

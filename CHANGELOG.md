@@ -1,5 +1,57 @@
 # Paper Trader Changelog
 
+## v6.5 — Research-based short strategies with regime filter (2026-03-18)
+
+**Problem**: v6.4 short strategies didn't work — liquidation_cascade had 0 trades ever (0.01% funding threshold never reached), panic_momentum had 12 trades/-$22 (taker 5m<0.90 too extreme), breakdown_reversal had 1 trade/-$7 (2.0x volume never met). $1,350 capital sitting idle while market dropped.
+
+**Research findings** (BIS Working Paper 1087, QuantJourney, PocketOption studies):
+1. Crypto funding rates are positive 92% of the time — structural long bias means mirroring long strategies for shorts has negative EV
+2. No single derivatives indicator works alone — need moderate thresholds on 4+ conditions simultaneously
+3. Shorts only work in bearish regimes — must be disabled during bull markets
+4. Shorts need wider SL (2.0x ATR vs 1.0-1.3x), smaller size (1.5% risk vs 2%), and time stops
+
+**3 new regime-filtered short strategies** (replace v6.4 shorts):
+
+### Regime gate (shared by all shorts)
+- 4h SMA50 slope negative OR price below 4h SMA200 → bearish regime → shorts enabled
+- Bull regime → all shorts disabled, capital idle (by design)
+- Fetches 4h candles (210 bars = ~35 days for SMA200)
+
+### `regime_short` ($500 capital) — replaces liquidation_cascade
+- **Concept**: Multi-condition derivatives confluence with moderate thresholds
+- **Entry**: Funding > 0.03% AND taker 15m < 0.95 AND top traders > 55% long AND price < SMA20
+- **Config**: SL 2.0x ATR(15m), TP 3.0x ATR, R:R 1.5:1, max hold 12h, trailing ON (1.5x/1.0x), 1.5% risk
+- **Frequency**: 2-5/day (in bearish regime)
+- **Why different**: 4 moderate conditions vs 3 extreme ones. Funding 0.03% vs 0.01%. Adds crowd positioning filter.
+
+### `failed_breakout_short` ($400 capital) — replaces panic_momentum
+- **Concept**: Price action exhaustion — breakout above resistance fails with rejection wick
+- **Entry**: Prev candle made new 20-bar high AND volume > 1.5x avg AND close in lower 40% of range (rejection) AND current candle below prev midpoint (failure)
+- **Config**: SL 2.0x ATR(15m), TP 2.5x ATR, R:R 1.25:1, max hold 6h, trailing ON (1.5x/0.8x), 1.5% risk
+- **Frequency**: 1-3/day (in bearish regime)
+- **Why different**: Pure price action (no derivatives dependency). Catches liquidity sweep reversals.
+
+### `refined_liq_cascade` ($450 capital) — replaces breakdown_reversal
+- **Concept**: Derivatives-based with realistic thresholds (v6.4 cascade redesigned)
+- **Entry**: Funding > 0.05% AND OI rising > 1% (full lookback) + price flat/falling AND taker 15m < 0.93 AND RSI < 45
+- **Config**: SL 2.0x ATR(15m), TP 4.0x ATR, R:R 2:1, max hold 8h, trailing ON (2.0x/1.0x), 1.5% risk
+- **Frequency**: 0-2/day (rare but high conviction)
+- **Why different**: Funding 0.05% (vs 0.01%), longer OI lookback (full history vs 30min), realistic taker threshold.
+
+**Key changes from v6.4**:
+| Aspect | v6.4 shorts | v6.5 shorts |
+|---|---|---|
+| Regime filter | None (always on) | 4h bearish regime required |
+| Stop loss | 1.0-1.3x ATR (too tight) | 2.0x ATR (research: violent bounces) |
+| Risk per trade | 2% | 1.5% (smaller for shorts) |
+| Time stops | 3-5h | 6-12h |
+| Conditions | 3 extreme thresholds | 4+ moderate thresholds |
+| Funding threshold | 0.01% (never reached) | 0.03%/0.05% (actionable) |
+| Price action | None | Failed breakout wick pattern |
+| Capital | $1,350 | $1,350 (same total) |
+
+---
+
 ## v6.4 — Short-only strategies (2026-03-17)
 
 **Rationale**: Previous shorts failed (38 trades, 18.4% WR, -$262) because they mirrored long logic — same HTF trend dependency, same R:R, same thresholds. The 1h SMA20/SMA50 HTF trend is the proven long edge but the biggest short liability: crypto crashes happen in minutes-hours; by the time 1h SMAs cross bearish, the move is 60-80% done.
