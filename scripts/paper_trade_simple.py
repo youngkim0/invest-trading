@@ -1034,16 +1034,19 @@ class RefinedLiqCascadeGenerator:
 
 
 # =============================================================================
-# Strategy 8: Crash Momentum Short (SHORT-ONLY, 2-5 trades/day during crashes)
+# Strategy 8: Crash Momentum Short (SHORT-ONLY, 1-3 trades/day during crashes)
 # =============================================================================
 
 class CrashMomentumShortGenerator:
-    """Trend continuation short during active selloffs — pure price action.
+    """Trend continuation short during active selloffs — 1h price action.
 
     Designed for the scenario existing short strategies miss: when the crash is
     already underway, derivatives data flips (funding goes negative, OI drops,
-    taker ratio rises as dip-buyers step in). This strategy uses ONLY price
-    action to catch continuation moves after a bounce fails.
+    taker ratio rises as dip-buyers step in). This strategy uses ONLY 1h price
+    action to catch continuation moves with less noise than 15m.
+
+    Uses 1h candles instead of 15m because 15m is too noisy during crashes —
+    small bounces trigger SL before the real move. 1h captures the macro trend.
 
     Research: momentum continuation has highest edge in first 24-48h of a
     selloff before mean reversion kicks in. Dead cat bounces fail ~70% of the
@@ -1051,65 +1054,64 @@ class CrashMomentumShortGenerator:
 
     REGIME GATE: 4h bearish regime required (checked externally).
 
-    Entry requires ALL 4 conditions (boolean, no scoring):
-    1. Price below 15m SMA20 (confirmed downtrend)
-    2. RSI between 20-45 (not at absolute bottom, but still weak — room to fall)
+    Entry requires ALL 4 conditions on 1h candles (boolean, no scoring):
+    1. Price below 1h SMA20 (confirmed downtrend)
+    2. RSI between 25-45 (not at absolute bottom, but weak — room to fall)
     3. At least 2 of last 3 candles are red (selling momentum present)
-    4. Price made a lower low vs 5 candles ago (trend continuing, not consolidating)
+    4. Price made a lower low vs 3 candles ago (trend continuing, not consolidating)
     """
 
-    def generate_signal(self, df_15m: pd.DataFrame, htf_trend: dict,
+    def generate_signal(self, df_1h: pd.DataFrame, htf_trend: dict,
                         derivatives: dict = None, regime: dict = None, **kwargs) -> dict:
-        """Generate short signal from crash momentum conditions."""
-        if df_15m is None or len(df_15m) < 30:
-            return hold_signal("Insufficient 15m data", htf_trend)
+        """Generate short signal from 1h crash momentum conditions."""
+        if df_1h is None or len(df_1h) < 25:
+            return hold_signal("Insufficient 1h data", htf_trend)
 
         # === REGIME GATE ===
         if not regime or not regime.get("is_bearish"):
             reason = regime.get("reason", "No regime data") if regime else "No regime data"
             return hold_signal(f"Short blocked: {reason}", htf_trend)
 
-        prices = df_15m["close"]
-        opens = df_15m["open"]
-        lows = df_15m["low"]
+        prices = df_1h["close"]
+        opens = df_1h["open"]
+        lows = df_1h["low"]
         current_price = float(prices.iloc[-1])
         reasons = [f"Regime: {regime['reason'][:60]}"]
 
-        # === CONDITION 1: Price below 15m SMA20 ===
+        # === CONDITION 1: Price below 1h SMA20 ===
         sma20 = float(prices.rolling(20).mean().iloc[-1])
         if current_price >= sma20:
-            return hold_signal(f"Price above SMA20 ({current_price:.2f} >= {sma20:.2f})", htf_trend)
-        reasons.append(f"Price below SMA20")
+            return hold_signal(f"Price above 1h SMA20 ({current_price:.2f} >= {sma20:.2f})", htf_trend)
+        reasons.append(f"Price below 1h SMA20")
 
-        # === CONDITION 2: RSI between 20-45 ===
+        # === CONDITION 2: RSI between 25-45 ===
         rsi_data = calculate_rsi(prices)
         rsi = rsi_data["value"]
-        if rsi < 20:
+        if rsi < 25:
             return hold_signal(f"RSI too low ({rsi:.0f}), oversold bounce risk", htf_trend)
         if rsi >= 45:
             return hold_signal(f"RSI too high ({rsi:.0f}, need <45)", htf_trend)
         reasons.append(f"RSI {rsi:.0f} (weak but not oversold)")
 
-        # === CONDITION 3: At least 2 of last 3 candles are red ===
+        # === CONDITION 3: At least 2 of last 3 1h candles are red ===
         red_count = 0
         for i in range(-3, 0):
             if float(prices.iloc[i]) < float(opens.iloc[i]):
                 red_count += 1
         if red_count < 2:
-            return hold_signal(f"Only {red_count}/3 red candles (need 2+)", htf_trend)
-        reasons.append(f"{red_count}/3 red candles")
+            return hold_signal(f"Only {red_count}/3 red 1h candles (need 2+)", htf_trend)
+        reasons.append(f"{red_count}/3 red 1h candles")
 
-        # === CONDITION 4: Lower low vs 5 candles ago ===
-        low_5ago = float(lows.iloc[-5])
+        # === CONDITION 4: Lower low vs 3 candles ago (3h lookback) ===
+        low_3ago = float(lows.iloc[-3])
         current_low = float(lows.iloc[-1])
-        if current_low >= low_5ago:
-            return hold_signal(f"No lower low ({current_low:.2f} >= {low_5ago:.2f} from 5 bars ago)", htf_trend)
-        reasons.append(f"Lower low ({current_low:.2f} < {low_5ago:.2f})")
+        if current_low >= low_3ago:
+            return hold_signal(f"No lower low ({current_low:.2f} >= {low_3ago:.2f} from 3h ago)", htf_trend)
+        reasons.append(f"Lower low ({current_low:.2f} < {low_3ago:.2f})")
 
         # All 4 conditions met — short signal
-        # Strong if deep below SMA20 and RSI declining
         pct_below_sma = (sma20 - current_price) / sma20 * 100
-        is_strong = pct_below_sma > 1.0 and rsi < 30 and red_count == 3
+        is_strong = pct_below_sma > 1.5 and rsi < 35 and red_count == 3
         signal_type = "strong_sell" if is_strong else "sell"
         confidence = 0.75 if is_strong else 0.70
 
@@ -1123,7 +1125,7 @@ class CrashMomentumShortGenerator:
                 "rsi": rsi,
                 "red_count": red_count,
                 "current_low": current_low,
-                "low_5ago": low_5ago,
+                "low_3ago": low_3ago,
                 "pct_below_sma": pct_below_sma,
             },
         }
@@ -1594,13 +1596,21 @@ class SimplePaperTrader:
                     market_data.get("15m", pd.DataFrame()), htf_trend,
                     derivatives=market_data.get("derivatives"),
                 )
-            elif strategy.strategy_type in ("regime_short", "failed_bkout_short", "refined_cascade", "crash_momentum"):
+            elif strategy.strategy_type in ("regime_short", "failed_bkout_short", "refined_cascade"):
                 # Compute regime gate from 4h data (shared across short strategies)
                 df_4h = market_data.get("4h", pd.DataFrame())
                 regime = check_bearish_regime(df_4h) if not df_4h.empty else {"is_bearish": False, "reason": "No 4h data"}
                 signal_result = strategy.generator.generate_signal(
                     market_data.get("15m", pd.DataFrame()), htf_trend,
                     derivatives=market_data.get("derivatives"),
+                    regime=regime,
+                )
+            elif strategy.strategy_type == "crash_momentum":
+                # Crash momentum uses 1h candles (less noise than 15m during crashes)
+                df_4h = market_data.get("4h", pd.DataFrame())
+                regime = check_bearish_regime(df_4h) if not df_4h.empty else {"is_bearish": False, "reason": "No 4h data"}
+                signal_result = strategy.generator.generate_signal(
+                    market_data.get("1h", pd.DataFrame()), htf_trend,
                     regime=regime,
                 )
             else:
@@ -1610,7 +1620,7 @@ class SimplePaperTrader:
             # Determine timeframe label for DB
             tf_map = {"funding": "1h", "breakout": "15m", "pullback": "15m", "flow": "15m",
                       "regime_short": "15m", "failed_bkout_short": "15m", "refined_cascade": "15m",
-                      "crash_momentum": "15m"}
+                      "crash_momentum": "1h"}
             timeframe = tf_map.get(strategy.strategy_type, "1m")
 
             # Save signals to DB (holds are throttled: once per 15min or on reason change)
@@ -1729,9 +1739,10 @@ class SimplePaperTrader:
             else:
                 del self.stop_loss_cooldowns[cooldown_key]
 
-        # Check max daily stop losses
-        if self.daily_stop_losses.get(cooldown_key, 0) >= self.max_daily_stop_losses:
-            logger.info(f"   [{strategy.name}] {symbol}: Max daily SL reached")
+        # Check max daily stop losses (crash_momentum gets 3, others get 2)
+        max_sl = 3 if strategy.strategy_type == "crash_momentum" else self.max_daily_stop_losses
+        if self.daily_stop_losses.get(cooldown_key, 0) >= max_sl:
+            logger.info(f"   [{strategy.name}] {symbol}: Max daily SL reached ({max_sl})")
             return
 
         # Check if another strategy recently entered same direction on this symbol
@@ -2452,14 +2463,14 @@ async def main():
                 name="crash_momentum",
                 strategy_type="crash_momentum",
                 generator=CrashMomentumShortGenerator(),
-                sl_atr_mult=1.5,       # Tighter SL — momentum trades should work fast
-                tp_atr_mult=3.0,       # 2:1 R:R
-                trailing_atr_mult=1.5, # Start trailing at 1.5x ATR profit
-                trailing_dist_atr_mult=0.8,  # Tight trail to lock in crash profits
-                max_position_hours=6.0,  # Time stop: 6h (momentum fades quickly)
+                sl_atr_mult=2.0,       # Wide SL — crash bounces are violent on 1h
+                tp_atr_mult=4.0,       # 2:1 R:R (bigger moves on 1h)
+                trailing_atr_mult=2.0, # Start trailing at 2x ATR profit
+                trailing_dist_atr_mult=1.0,  # Trail at 1x ATR
+                max_position_hours=12.0,  # Time stop: 12h (1h candles need more time)
                 risk_per_trade_pct=0.015,  # 1.5% risk
                 capital=capital_allocation.get(name, base_capital),
-                atr_timeframe="15m",
+                atr_timeframe="1h",
                 trailing_enabled=True,
             ))
 

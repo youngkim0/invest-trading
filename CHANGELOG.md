@@ -1,5 +1,27 @@
 # Paper Trader Changelog
 
+## v6.6.1 — Switch crash_momentum to 1h candles (2026-03-18)
+
+**Problem**: crash_momentum on 15m was too noisy — 89 signals in 24h, constant SL hits from small bounces. Backtest showed -$59 without cooldowns, -$15 with cooldowns.
+
+**Fix**: Switch to 1h candles. Less noise, fewer false entries, bigger moves per candle.
+- 1h SMA20 and RSI instead of 15m
+- Lower low check vs 3 candles ago (3h) instead of 5 (75min on 15m)
+- RSI floor raised to 25 (from 20) — 1h RSI rarely goes as low
+- SL widened to 2.0x ATR(1h) (from 1.5x ATR(15m)) — crash bounces are violent
+- TP widened to 4.0x ATR(1h) (from 3.0x) — bigger moves on 1h, 2:1 R:R
+- Time stop 12h (from 6h) — 1h candles need more time
+- Daily SL limit raised to 3 (from 2) — crashes are fast, need more chances
+
+**Backtest result** (last 24h of crash):
+| Version | Trades | PnL |
+|---|---|---|
+| 15m no cooldowns | 89 | -$59.72 |
+| 15m with cooldowns | 10 | -$15.29 |
+| **1h with cooldowns** | **10** | **+$22.63** |
+
+---
+
 ## v6.6 — Fast regime gate + crash momentum strategy (2026-03-18)
 
 **Problem**: v6.5 short strategies never fired despite market crashing (BTC -5%, ETH -6.5%, XRP -9%). Root cause: **two-layer failure**.
