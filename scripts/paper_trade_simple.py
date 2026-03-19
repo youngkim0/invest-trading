@@ -1315,6 +1315,36 @@ class SimplePaperTrader:
     def total_pnl(self):
         return sum(s["total_pnl"] for s in self.strategy_stats.values())
 
+    def _get_available_capital(self, strategy: 'StrategyConfig') -> float:
+        """Get available capital for a strategy from the shared pool.
+
+        Instead of fixed per-strategy buckets, all strategies share one pool.
+        Each strategy is capped at its max allocation, but can use capital
+        that idle strategies aren't using.
+
+        Available = min(strategy_max_cap, total_pool - margin_in_use_by_others)
+        """
+        stats = self.strategy_stats[strategy.name]
+        strategy_cap = stats["capital"]  # This strategy's max allocation (grows/shrinks with PnL)
+
+        # Calculate total margin currently locked in open positions
+        total_margin_in_use = 0.0
+        my_margin_in_use = 0.0
+        for pos_key, pos in self.positions.items():
+            margin = pos.get("margin", 0)
+            strat_name = pos_key.split(":")[0]
+            total_margin_in_use += margin
+            if strat_name == strategy.name:
+                my_margin_in_use += margin
+
+        # Pool available = total capital - margin used by ALL strategies
+        pool_available = self.total_capital - total_margin_in_use
+
+        # This strategy can use: min(its own cap, pool available)
+        # But don't count margin it already has in use (it's already "spent")
+        available = min(strategy_cap - my_margin_in_use, pool_available)
+        return max(available, 0.0)
+
     @property
     def total_trades(self):
         return sum(s["trade_count"] for s in self.strategy_stats.values())
@@ -1979,9 +2009,13 @@ class SimplePaperTrader:
             trailing_act_pct *= scale
             trailing_dist_pct *= scale
 
-        # Risk-based position sizing
+        # Risk-based position sizing (shared capital pool)
+        available_capital = self._get_available_capital(strategy)
+        if available_capital <= 0:
+            logger.info(f"   [{strategy.name}] {symbol}: No capital available (pool fully allocated)")
+            return
         quantity, margin = calculate_position_size(
-            capital=stats["capital"],
+            capital=available_capital,
             risk_pct=strategy.risk_per_trade_pct,
             sl_distance_pct=sl_pct,
             leverage=self.leverage,
@@ -2035,7 +2069,7 @@ class SimplePaperTrader:
         logger.info(
             f"   └─ SL: ${stop_price:,.2f} ({sl_pct:.2%}) | "
             f"TP: ${take_profit_price:,.2f} ({tp_pct:.2%}) | "
-            f"ATR: ${atr_value:,.2f} | Risk: ${stats['capital'] * strategy.risk_per_trade_pct:,.2f}"
+            f"ATR: ${atr_value:,.2f} | Risk: ${available_capital * strategy.risk_per_trade_pct:,.2f} | Pool: ${available_capital:,.0f}"
         )
 
         # Log to Supabase
