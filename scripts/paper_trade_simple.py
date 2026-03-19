@@ -1649,7 +1649,7 @@ class SimplePaperTrader:
         3. Strategy is NOT pullback (pullback expects counter-trend dips)
         4. Position direction conflicts with the reversal
         """
-        if strategy.strategy_type == "pullback":
+        if strategy.strategy_type in ("pullback", "crash_momentum"):
             return
 
         pos_key = self._pos_key(strategy.name, symbol)
