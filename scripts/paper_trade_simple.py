@@ -1297,7 +1297,7 @@ class SimplePaperTrader:
         # Global circuit breaker: pause ALL strategies after N consecutive SLs
         self.global_sl_timestamps: list[datetime] = []  # timestamps of recent SLs
         self.circuit_breaker_window_hours = 2  # Look at SLs within this window
-        self.circuit_breaker_threshold = 3     # N consecutive SLs to trigger
+        self.circuit_breaker_threshold = 2     # N SLs to trigger (was 3, tightened: 13-loss streaks)
         self.circuit_breaker_pause_minutes = 60  # How long to pause
         self.circuit_breaker_until: datetime | None = None  # When the pause ends
 
@@ -2454,8 +2454,8 @@ async def main():
                 generator=RegimeShortConfluenceGenerator(),
                 sl_atr_mult=2.0,       # Wider SL for shorts (research: violent bounces)
                 tp_atr_mult=3.0,       # 1.5:1 R:R
-                trailing_atr_mult=1.5, # Start trailing at 1.5x ATR profit
-                trailing_dist_atr_mult=1.0,  # Trail at 1.0x ATR
+                trailing_atr_mult=2.5, # Start trailing at 2.5x ATR (was 1.5 — let winners run)
+                trailing_dist_atr_mult=1.5,  # Trail at 1.5x ATR (was 1.0 — wider to avoid noise clips)
                 max_position_hours=12.0,  # Time stop: 12h max
                 risk_per_trade_pct=0.015,  # 1.5% risk (smaller than longs)
                 capital=capital_allocation.get(name, base_capital),
@@ -2469,8 +2469,8 @@ async def main():
                 generator=FailedBreakoutShortGenerator(),
                 sl_atr_mult=2.0,       # SL above the failed breakout high
                 tp_atr_mult=2.5,       # 1.25:1 R:R (tighter since pattern is quick)
-                trailing_atr_mult=1.5,
-                trailing_dist_atr_mult=0.8,
+                trailing_atr_mult=2.0, # Was 1.5 — let winners run
+                trailing_dist_atr_mult=1.0, # Was 0.8 — wider to avoid noise clips
                 max_position_hours=6.0,  # Time stop: 6h (failed breakouts resolve fast)
                 risk_per_trade_pct=0.015,
                 capital=capital_allocation.get(name, base_capital),
@@ -2484,8 +2484,8 @@ async def main():
                 generator=RefinedLiqCascadeGenerator(),
                 sl_atr_mult=2.0,       # Wide SL
                 tp_atr_mult=4.0,       # 2:1 R:R (rare but high conviction)
-                trailing_atr_mult=2.0,
-                trailing_dist_atr_mult=1.0,
+                trailing_atr_mult=2.5, # Was 2.0 — let winners run
+                trailing_dist_atr_mult=1.5, # Was 1.0 — wider to avoid noise clips
                 max_position_hours=8.0,  # Time stop: 8h
                 risk_per_trade_pct=0.015,
                 capital=capital_allocation.get(name, base_capital),
@@ -2499,8 +2499,8 @@ async def main():
                 generator=CrashMomentumShortGenerator(),
                 sl_atr_mult=2.0,       # Wide SL — crash bounces are violent on 1h
                 tp_atr_mult=4.0,       # 2:1 R:R (bigger moves on 1h)
-                trailing_atr_mult=2.0, # Start trailing at 2x ATR profit
-                trailing_dist_atr_mult=1.0,  # Trail at 1x ATR
+                trailing_atr_mult=2.5, # Start trailing at 2.5x ATR (was 2.0 — let crash profits run)
+                trailing_dist_atr_mult=1.5,  # Trail at 1.5x ATR (was 1.0 — wider for crash volatility)
                 max_position_hours=12.0,  # Time stop: 12h (1h candles need more time)
                 risk_per_trade_pct=0.015,  # 1.5% risk
                 capital=capital_allocation.get(name, base_capital),
