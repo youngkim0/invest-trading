@@ -1054,11 +1054,12 @@ class CrashMomentumShortGenerator:
 
     REGIME GATE: 4h bearish regime required (checked externally).
 
-    Entry requires ALL 4 conditions on 1h candles (boolean, no scoring):
-    1. Price below 1h SMA20 (confirmed downtrend)
-    2. RSI between 25-45 (not at absolute bottom, but weak — room to fall)
-    3. At least 2 of last 3 candles are red (selling momentum present)
-    4. Price made a lower low vs 3 candles ago (trend continuing, not consolidating)
+    Entry requires ALL 6 conditions on 1h candles (boolean, no scoring):
+    1. Price below 1h SMA20 by >0.3% (confirmed downtrend, not just touching)
+    2. 1h SMA20 slope negative (crash still active, not consolidating)
+    3. RSI between 25-45 (not at absolute bottom, but weak — room to fall)
+    4. At least 2 of last 3 candles are red (selling momentum present)
+    5. Price made a lower low vs 3 candles ago (trend continuing, not consolidating)
     """
 
     def generate_signal(self, df_1h: pd.DataFrame, htf_trend: dict,
@@ -1078,11 +1079,22 @@ class CrashMomentumShortGenerator:
         current_price = float(prices.iloc[-1])
         reasons = [f"Regime: {regime['reason'][:60]}"]
 
-        # === CONDITION 1: Price below 1h SMA20 ===
-        sma20 = float(prices.rolling(20).mean().iloc[-1])
+        # === CONDITION 1: Price below 1h SMA20 by >0.3% (not just barely touching) ===
+        sma20_series = prices.rolling(20).mean()
+        sma20 = float(sma20_series.iloc[-1])
         if current_price >= sma20:
             return hold_signal(f"Price above 1h SMA20 ({current_price:.2f} >= {sma20:.2f})", htf_trend)
-        reasons.append(f"Price below 1h SMA20")
+        pct_below_sma = (sma20 - current_price) / sma20 * 100
+        if pct_below_sma < 0.3:
+            return hold_signal(f"Price only {pct_below_sma:.2f}% below SMA20 (need >0.3%)", htf_trend)
+        reasons.append(f"Price {pct_below_sma:.1f}% below 1h SMA20")
+
+        # === CONDITION 2: 1h SMA20 slope negative (crash still active) ===
+        sma20_3ago = float(sma20_series.iloc[-3])
+        sma20_slope = (sma20 - sma20_3ago) / sma20_3ago if sma20_3ago > 0 else 0
+        if sma20_slope >= 0:
+            return hold_signal(f"1h SMA20 not falling ({sma20_slope*100:+.3f}%), crash may be over", htf_trend)
+        reasons.append(f"SMA20 falling ({sma20_slope*100:.3f}%)")
 
         # === CONDITION 2: RSI between 25-45 ===
         rsi_data = calculate_rsi(prices)
@@ -1109,8 +1121,7 @@ class CrashMomentumShortGenerator:
             return hold_signal(f"No lower low ({current_low:.2f} >= {low_3ago:.2f} from 3h ago)", htf_trend)
         reasons.append(f"Lower low ({current_low:.2f} < {low_3ago:.2f})")
 
-        # All 4 conditions met — short signal
-        pct_below_sma = (sma20 - current_price) / sma20 * 100
+        # All conditions met — short signal
         is_strong = pct_below_sma > 1.5 and rsi < 35 and red_count == 3
         signal_type = "strong_sell" if is_strong else "sell"
         confidence = 0.75 if is_strong else 0.70
@@ -1127,6 +1138,7 @@ class CrashMomentumShortGenerator:
                 "current_low": current_low,
                 "low_3ago": low_3ago,
                 "pct_below_sma": pct_below_sma,
+                "sma20_slope": sma20_slope,
             },
         }
 
