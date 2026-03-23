@@ -1,5 +1,40 @@
 # Paper Trader Changelog
 
+## v6.7 — More assets + adaptive position sizing (2026-03-22)
+
+**Two improvements targeting better monthly returns:**
+
+### 1. Expanded to 6 symbols (was 3)
+- Added SOL, DOGE, AVAX to default trading list (BTC/ETH/XRP unchanged)
+- More assets = more signal opportunities with same strategy logic
+- OrderManager now supports any USDT-M pair dynamically (no hardcoded map)
+- Dashboard auto-detects traded symbols from DB (no more hardcoded lists)
+- Rate limit safe: 6 symbols × ~14 API calls = 84/cycle, well under Binance 1200/min
+
+### 2. Adaptive position sizing (opt-in: `--adaptive-sizing`)
+Replaces fixed 2%/1.5% risk with dynamic sizing based on 4 factors:
+
+| Factor | Logic | Range |
+|--------|-------|-------|
+| **Confidence** | Signal confidence 0.45→0.5x, 0.90→1.0x | 0.5x – 1.0x |
+| **Performance** | 2+ consecutive losses → reduce 25%/loss. 3+ wins → boost 10%/win | 0.5x – 1.3x |
+| **Regime alignment** | HTF aligned + strong → up to +15%. Misaligned → 0.75x | 0.75x – 1.15x |
+| **Multi-strategy agreement** | 2+ strategies same direction+symbol → 1.1x | 1.0x – 1.1x |
+
+- Hard floor: 0.5% risk minimum. Hard cap: 3% risk maximum.
+- Worst case compound: ~0.19x base risk. Best case: ~1.65x, clamped by 3% cap.
+- Default OFF (`--adaptive-sizing` flag to enable). Zero behavior change without flag.
+- Works for both paper and live trading.
+- Effective risk logged in trade indicators for analysis.
+
+### Files changed
+- `core/engine/order_manager.py` — dynamic symbol conversion
+- `scripts/paper_trade_simple.py` — adaptive sizing, 6 symbols, performance tracking
+- `scripts/live_trade.py` — adaptive sizing integration
+- `dashboard/app.py` — dynamic symbols from DB, CoinGecko maps for 6 coins
+
+---
+
 ## v6.6.1 — Switch crash_momentum to 1h candles (2026-03-18)
 
 **Problem**: crash_momentum on 15m was too noisy — 89 signals in 24h, constant SL hits from small bounces. Backtest showed -$59 without cooldowns, -$15 with cooldowns.

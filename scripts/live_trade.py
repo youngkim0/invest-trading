@@ -412,12 +412,13 @@ class LiveTrader(SimplePaperTrader):
     # =========================================================================
 
     async def _open_position(self, pos_key: str, symbol: str, side: str, price: float,
-                              signal: dict, strategy: StrategyConfig, atr_value: float):
+                              signal: dict, strategy: StrategyConfig, atr_value: float,
+                              htf_trend: dict = None):
         """Open a position with real exchange execution (or dry-run simulation)."""
 
         if self.dry_run:
             # Dry run: use paper trader simulation
-            await super()._open_position(pos_key, symbol, side, price, signal, strategy, atr_value)
+            await super()._open_position(pos_key, symbol, side, price, signal, strategy, atr_value, htf_trend)
             return
 
         stats = self.strategy_stats[strategy.name]
@@ -443,9 +444,10 @@ class LiveTrader(SimplePaperTrader):
             trailing_act_pct *= scale
             trailing_dist_pct *= scale
 
+        effective_risk = self._get_effective_risk_pct(strategy, signal, symbol, side, htf_trend)
         quantity, margin = calculate_position_size(
             capital=stats["capital"],
-            risk_pct=strategy.risk_per_trade_pct,
+            risk_pct=effective_risk,
             sl_distance_pct=sl_pct,
             leverage=self.leverage,
             price=price,

@@ -14,13 +14,6 @@ from loguru import logger
 class OrderManager:
     """Manages order execution on Binance USDT-M Futures."""
 
-    # Binance raw format -> CCXT format
-    SYMBOL_MAP = {
-        "BTCUSDT": "BTC/USDT",
-        "ETHUSDT": "ETH/USDT",
-        "XRPUSDT": "XRP/USDT",
-    }
-
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
         self.api_key = api_key
         self.api_secret = api_secret
@@ -31,8 +24,10 @@ class OrderManager:
         self._default_leverage = 10
 
     def ccxt_symbol(self, symbol: str) -> str:
-        """Convert BTCUSDT -> BTC/USDT for CCXT."""
-        return self.SYMBOL_MAP.get(symbol, symbol)
+        """Convert BTCUSDT -> BTC/USDT for CCXT (any USDT-M pair)."""
+        if symbol.endswith("USDT"):
+            return f"{symbol[:-4]}/USDT"
+        return symbol
 
     async def connect(self, leverage: int = 10) -> None:
         """Connect to Binance Futures."""

@@ -1163,6 +1163,10 @@ class StrategyConfig:
     atr_timeframe: str = "1h"        # Which timeframe to compute ATR on
     trailing_enabled: bool = False   # Whether trailing stops are active
     min_sl_pct: float = 0.0         # Floor for SL % (0 = no floor)
+    # Adaptive sizing (opt-in, default preserves current behavior)
+    adaptive_sizing: bool = False    # Master toggle
+    min_risk_pct: float = 0.005     # Floor: 0.5% risk minimum
+    max_risk_pct: float = 0.03      # Ceiling: 3% risk maximum
 
     @property
     def rr_ratio(self) -> float:
@@ -1205,6 +1209,52 @@ def calculate_position_size(capital: float, risk_pct: float, sl_distance_pct: fl
 
     quantity = position_value / price
     return quantity, margin
+
+
+def calculate_adaptive_risk_pct(
+    base_risk_pct: float,
+    confidence: float,
+    consecutive_losses: int,
+    consecutive_wins: int,
+    regime_strength: float = 0.0,
+    regime_aligned: bool = True,
+    multi_strategy_count: int = 0,
+    min_risk_pct: float = 0.005,
+    max_risk_pct: float = 0.03,
+) -> float:
+    """Calculate adaptive risk percentage based on multiple factors.
+
+    Returns adjusted risk_pct, clamped between min and max.
+    """
+    risk = base_risk_pct
+
+    # 1. Confidence scaling: linear interpolation
+    #    confidence 0.45 -> 50% of base, 0.90 -> 100% of base
+    conf_floor, conf_ceil = 0.45, 0.90
+    conf_scale = max(0.5, min(1.0, (confidence - conf_floor) / (conf_ceil - conf_floor)))
+    risk *= conf_scale
+
+    # 2. Performance scaling (simplified Kelly-inspired)
+    #    After 2+ consecutive losses, reduce by 25% per loss (floor at 50%)
+    #    After 3+ consecutive wins, boost by 10% per win (cap at 130%)
+    if consecutive_losses >= 2:
+        loss_factor = max(0.5, 1.0 - 0.25 * (consecutive_losses - 1))
+        risk *= loss_factor
+    elif consecutive_wins >= 3:
+        win_factor = min(1.3, 1.0 + 0.10 * (consecutive_wins - 2))
+        risk *= win_factor
+
+    # 3. Regime alignment: boost when strongly aligned, reduce when misaligned
+    if regime_aligned and regime_strength > 0.5:
+        risk *= 1.0 + 0.15 * regime_strength  # up to +15%
+    elif not regime_aligned:
+        risk *= 0.75  # 25% reduction for counter-regime
+
+    # 4. Multi-strategy agreement: small boost when 2+ strategies agree
+    if multi_strategy_count >= 2:
+        risk *= 1.1  # 10% boost
+
+    return max(min_risk_pct, min(max_risk_pct, risk))
 
 
 # Strategy name mapping for backward compat with old trades
@@ -1276,6 +1326,10 @@ class SimplePaperTrader:
                 "trade_count": 0,
                 "winning_trades": 0,
                 "total_pnl": 0.0,
+                # Rolling performance for adaptive sizing
+                "recent_results": [],
+                "consecutive_losses": 0,
+                "consecutive_wins": 0,
             }
             self.initial_capital += s.capital
 
@@ -1676,7 +1730,7 @@ class SimplePaperTrader:
             if pos_key in self.positions:
                 await self._check_exit(pos_key, signal_result, current_price, strategy)
             else:
-                await self._check_entry(pos_key, symbol, signal_result, current_price, strategy, atr_value)
+                await self._check_entry(pos_key, symbol, signal_result, current_price, strategy, atr_value, htf_trend)
 
         except Exception as e:
             logger.error(f"Error processing [{strategy.name}] {symbol}: {e}")
@@ -1720,7 +1774,7 @@ class SimplePaperTrader:
         await self._close_position(pos_key, current_price, f"Reversal override ({cycles} cycles, {pnl_pct:.2%})", strategy)
 
     async def _check_entry(self, pos_key: str, symbol: str, signal: dict, price: float,
-                           strategy: StrategyConfig, atr_value: float):
+                           strategy: StrategyConfig, atr_value: float, htf_trend: dict = None):
         """Check if should enter a position for a given strategy."""
         if pos_key in self.positions:
             return
@@ -1804,9 +1858,9 @@ class SimplePaperTrader:
                     return
 
         if signal["signal"] in ["buy", "strong_buy"]:
-            await self._open_position(pos_key, symbol, "long", price, signal, strategy, atr_value)
+            await self._open_position(pos_key, symbol, "long", price, signal, strategy, atr_value, htf_trend)
         elif signal["signal"] in ["sell", "strong_sell"]:
-            await self._open_position(pos_key, symbol, "short", price, signal, strategy, atr_value)
+            await self._open_position(pos_key, symbol, "short", price, signal, strategy, atr_value, htf_trend)
 
     async def _check_exit(self, pos_key: str, signal: dict, price: float, strategy: StrategyConfig):
         """Check if should exit a leveraged position.
@@ -1992,8 +2046,55 @@ class SimplePaperTrader:
         else:
             return (entry_price - current_price) / entry_price
 
+    def _count_agreeing_strategies(self, symbol: str, side: str) -> int:
+        """Count how many strategies have open positions on this symbol in the same direction."""
+        count = 0
+        for pos_key, pos in self.positions.items():
+            if pos_key.endswith(f":{symbol}") and pos.get("side") == side:
+                count += 1
+        return count
+
+    def _check_regime_alignment(self, side: str, htf_trend: dict | None) -> bool:
+        """Check if trade direction aligns with HTF regime."""
+        if not htf_trend:
+            return True  # Assume aligned if no data
+        direction = htf_trend.get("direction", "neutral")
+        if side == "long" and direction == "bullish":
+            return True
+        if side == "short" and direction == "bearish":
+            return True
+        if direction == "neutral":
+            return True  # Neutral doesn't penalize
+        return False
+
+    def _get_effective_risk_pct(self, strategy: StrategyConfig, signal: dict,
+                                 symbol: str, side: str, htf_trend: dict | None) -> float:
+        """Calculate effective risk percentage (adaptive or fixed)."""
+        if not strategy.adaptive_sizing:
+            return strategy.risk_per_trade_pct
+
+        stats = self.strategy_stats[strategy.name]
+        effective_risk = calculate_adaptive_risk_pct(
+            base_risk_pct=strategy.risk_per_trade_pct,
+            confidence=signal.get("confidence", 0.7),
+            consecutive_losses=stats["consecutive_losses"],
+            consecutive_wins=stats["consecutive_wins"],
+            regime_strength=htf_trend.get("strength", 0) if htf_trend else 0,
+            regime_aligned=self._check_regime_alignment(side, htf_trend),
+            multi_strategy_count=self._count_agreeing_strategies(symbol, side),
+            min_risk_pct=strategy.min_risk_pct,
+            max_risk_pct=strategy.max_risk_pct,
+        )
+        logger.info(
+            f"   [{strategy.name}] Adaptive risk: {strategy.risk_per_trade_pct:.1%} → {effective_risk:.1%} "
+            f"(conf={signal.get('confidence', 0):.0%}, losses={stats['consecutive_losses']}, "
+            f"wins={stats['consecutive_wins']}, regime={htf_trend.get('strength', 0) if htf_trend else 0:.2f})"
+        )
+        return effective_risk
+
     async def _open_position(self, pos_key: str, symbol: str, side: str, price: float,
-                              signal: dict, strategy: StrategyConfig, atr_value: float):
+                              signal: dict, strategy: StrategyConfig, atr_value: float,
+                              htf_trend: dict = None):
         """Open a leveraged position with ATR-based stops and risk-based sizing."""
         stats = self.strategy_stats[strategy.name]
 
@@ -2026,9 +2127,10 @@ class SimplePaperTrader:
         if available_capital <= 0:
             logger.info(f"   [{strategy.name}] {symbol}: No capital available (pool fully allocated)")
             return
+        effective_risk = self._get_effective_risk_pct(strategy, signal, symbol, side, htf_trend)
         quantity, margin = calculate_position_size(
             capital=available_capital,
-            risk_pct=strategy.risk_per_trade_pct,
+            risk_pct=effective_risk,
             sl_distance_pct=sl_pct,
             leverage=self.leverage,
             price=price,
@@ -2093,6 +2195,7 @@ class SimplePaperTrader:
             indicators["trailing_act_pct"] = trailing_act_pct
             indicators["trailing_dist_pct"] = trailing_dist_pct
             indicators["atr_value"] = atr_value
+            indicators["effective_risk_pct"] = effective_risk
 
             await self.trade_repo.log_trade({
                 "position_id": self.positions[pos_key]["position_id"],
@@ -2136,6 +2239,14 @@ class SimplePaperTrader:
         stats["trade_count"] += 1
         if pnl > 0:
             stats["winning_trades"] += 1
+            stats["consecutive_wins"] += 1
+            stats["consecutive_losses"] = 0
+        else:
+            stats["consecutive_losses"] += 1
+            stats["consecutive_wins"] = 0
+        stats["recent_results"].append(pnl)
+        if len(stats["recent_results"]) > 20:
+            stats["recent_results"].pop(0)
 
         duration = (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
 
@@ -2342,7 +2453,7 @@ async def main():
 
     parser = argparse.ArgumentParser(description="v6.0 Evidence-Based Paper Trading")
     parser.add_argument(
-        "--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT", "XRPUSDT"],
+        "--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "DOGEUSDT", "AVAXUSDT"],
         help="Symbols to trade"
     )
     parser.add_argument(
@@ -2364,6 +2475,10 @@ async def main():
         choices=["funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
                  "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum"],
         help="Strategies to run (default: all 8)"
+    )
+    parser.add_argument(
+        "--adaptive-sizing", action="store_true", default=False,
+        help="Enable adaptive position sizing based on confidence/performance/regime"
     )
 
     args = parser.parse_args()
@@ -2519,6 +2634,12 @@ async def main():
                 atr_timeframe="1h",
                 trailing_enabled=True,
             ))
+
+    # Apply adaptive sizing if enabled
+    if args.adaptive_sizing:
+        for cfg in strategy_configs:
+            cfg.adaptive_sizing = True
+        logger.info("Adaptive position sizing ENABLED (risk range: 0.5% – 3.0%)")
 
     # Create trader
     trader = SimplePaperTrader(
