@@ -85,6 +85,7 @@ COINGECKO_MAP = {
 }
 
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "XRPUSDT"]
+ALL_SYMBOLS = ["BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "DOGEUSDT", "AVAXUSDT"]
 
 SYMBOL_LABELS = {
     "BTCUSDT": "Bitcoin (BTC)", "ETHUSDT": "Ethereum (ETH)", "XRPUSDT": "Ripple (XRP)",
@@ -209,9 +210,9 @@ def filter_signals_by_strategy(signals, strategy_name):
 
 @st.cache_data(ttl=10)
 def fetch_current_prices():
-    """Fetch current prices for all active symbols from multiple sources."""
+    """Fetch current prices for all symbols from multiple sources."""
     prices = {}
-    symbols = get_active_symbols()
+    symbols = ALL_SYMBOLS
 
     # Try multiple Binance endpoints
     binance_urls = [
@@ -1104,7 +1105,7 @@ def main():
 
     interval, limit = timeframe_options[selected_tf]
 
-    chart_symbols = [(sym, SYMBOL_LABELS.get(sym, sym.replace("USDT", ""))) for sym in get_active_symbols()]
+    chart_symbols = [(sym, SYMBOL_LABELS.get(sym, sym.replace("USDT", ""))) for sym in ALL_SYMBOLS]
     # Wrap to rows of 3 if more than 3 symbols
     for row_start in range(0, len(chart_symbols), 3):
         row_symbols = chart_symbols[row_start:row_start + 3]
