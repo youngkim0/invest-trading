@@ -1,5 +1,38 @@
 # Paper Trader Changelog
 
+## v6.7.1 — Correlation guard + directional SL guard + adaptive sizing ON (2026-03-24)
+
+**Problem**: First 19h of v6.7 showed -$60.83 (-1.3%). Two issues:
+
+1. **crash_momentum opened 6 correlated shorts simultaneously** (-$76.93): All 6 coins moved together, all 6 hit SL together. This was one bet, not six independent bets.
+2. **trend_pullback kept buying into a decline** (5/5 SL, -$42.44): Strategy re-entered long after every SL hit, each time catching the next leg down.
+3. **HTF conflict log spam**: 5,008 lines in 19h — logged once per strategy per symbol per cycle.
+
+**Fixes**:
+
+### 1. Max concurrent positions (crash_momentum: 2)
+- New `max_concurrent_positions` field on StrategyConfig (0 = unlimited)
+- crash_momentum capped at 2 open positions across all symbols
+- Prevents correlated exposure from turning one bad call into 6x loss
+
+### 2. Directional SL guard
+- Tracks SL hits per strategy+direction (e.g., "trend_pullback:long")
+- If 2+ SLs in same direction within 2h window, blocks further entries in that direction
+- Prevents buying into sustained declines or shorting into sustained rallies
+- Applies to ALL strategies (not just pullback)
+
+### 3. HTF conflict log throttled
+- Removed per-call logging from `apply_fast_reversal_override()`
+- Now logs once per symbol per cycle (6 lines/cycle max, not 48)
+- Conflict detail preserved in htf_trend dict for debugging
+
+### 4. Adaptive sizing enabled
+- Added `--adaptive-sizing` to GCP service
+- Scales risk 0.5%-3% based on confidence, performance streak, regime alignment
+- After v6.7's crash_momentum 6-loss streak, sizing would auto-reduce to 0.5x risk
+
+---
+
 ## v6.7 — More assets + adaptive position sizing (2026-03-22)
 
 **Two improvements targeting better monthly returns:**

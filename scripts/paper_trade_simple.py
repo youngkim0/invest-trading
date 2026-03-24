@@ -157,28 +157,22 @@ def apply_fast_reversal_override(htf_trend: dict, df_15m: pd.DataFrame) -> dict:
 
     # Bearish conflict: HTF bullish but 15m bearish → suppress to neutral
     if htf_direction == "bullish" and current_price < sma20 and rsi < 40:
-        logger.info(
-            f"⚡ HTF conflict: bullish suppressed to NEUTRAL "
-            f"(15m price ${current_price:,.2f} < SMA20 ${sma20:,.2f}, RSI {rsi:.0f})"
-        )
         return {
             "direction": "neutral",
             "strength": htf_trend.get("strength", 0.0) * 0.3,
             "slope": htf_trend.get("slope", 0.0),
             "suppressed": True,
+            "conflict_detail": f"bullish→NEUTRAL (15m ${current_price:,.2f} < SMA20 ${sma20:,.2f}, RSI {rsi:.0f})",
         }
 
     # Bullish conflict: HTF bearish but 15m bullish → suppress to neutral
     if htf_direction == "bearish" and current_price > sma20 and rsi > 60:
-        logger.info(
-            f"⚡ HTF conflict: bearish suppressed to NEUTRAL "
-            f"(15m price ${current_price:,.2f} > SMA20 ${sma20:,.2f}, RSI {rsi:.0f})"
-        )
         return {
             "direction": "neutral",
             "strength": htf_trend.get("strength", 0.0) * 0.3,
             "slope": htf_trend.get("slope", 0.0),
             "suppressed": True,
+            "conflict_detail": f"bearish→NEUTRAL (15m ${current_price:,.2f} > SMA20 ${sma20:,.2f}, RSI {rsi:.0f})",
         }
 
     return htf_trend
@@ -1163,6 +1157,7 @@ class StrategyConfig:
     atr_timeframe: str = "1h"        # Which timeframe to compute ATR on
     trailing_enabled: bool = False   # Whether trailing stops are active
     min_sl_pct: float = 0.0         # Floor for SL % (0 = no floor)
+    max_concurrent_positions: int = 0  # 0 = unlimited, >0 = cap across all symbols
     # Adaptive sizing (opt-in, default preserves current behavior)
     adaptive_sizing: bool = False    # Master toggle
     min_risk_pct: float = 0.005     # Floor: 0.5% risk minimum
@@ -1359,6 +1354,12 @@ class SimplePaperTrader:
         self.daily_stop_losses: dict[str, int] = {}
         self.max_daily_stop_losses = 2
         self.last_reset_date: str = ""
+
+        # Directional SL tracking: prevents re-entering same direction after repeated SLs
+        # Key: "strategy_name:direction", Value: list of SL timestamps
+        self.directional_sl_history: dict[str, list[datetime]] = {}
+        self.directional_sl_max = 2           # N SLs in same direction to trigger block
+        self.directional_sl_window_hours = 2  # Time window for counting
 
         # Global circuit breaker: pause ALL strategies after N consecutive SLs
         self.global_sl_timestamps: list[datetime] = []  # timestamps of recent SLs
@@ -1657,6 +1658,8 @@ class SimplePaperTrader:
                 self._reversal_counted_this_cycle.add(symbol)
                 if htf_trend.get("suppressed"):
                     self.reversal_override_counts[symbol] = self.reversal_override_counts.get(symbol, 0) + 1
+                    conflict_detail = htf_trend.get("conflict_detail", "suppressed")
+                    logger.info(f"⚡ [{symbol}] HTF conflict: {conflict_detail}")
                 else:
                     self.reversal_override_counts[symbol] = 0
 
@@ -1857,6 +1860,23 @@ class SimplePaperTrader:
                     logger.info(f"   [{strategy.name}] {symbol}: Blocked — {existing_key} already {proposed_side} ({age_min:.0f}min ago)")
                     return
 
+        # Check directional SL guard: block if too many recent SLs in same direction
+        dir_key = f"{strategy.name}:{proposed_side}"
+        if dir_key in self.directional_sl_history:
+            cutoff = now - timedelta(hours=self.directional_sl_window_hours)
+            recent_sls = [t for t in self.directional_sl_history[dir_key] if t > cutoff]
+            self.directional_sl_history[dir_key] = recent_sls  # prune old entries
+            if len(recent_sls) >= self.directional_sl_max:
+                logger.info(f"   [{strategy.name}] {symbol}: Directional SL guard — {len(recent_sls)} {proposed_side} SLs in {self.directional_sl_window_hours}h, skipping")
+                return
+
+        # Check max concurrent positions for this strategy (across all symbols)
+        if strategy.max_concurrent_positions > 0:
+            open_count = sum(1 for k in self.positions if k.startswith(f"{strategy.name}:"))
+            if open_count >= strategy.max_concurrent_positions:
+                logger.info(f"   [{strategy.name}] {symbol}: Max concurrent positions reached ({open_count}/{strategy.max_concurrent_positions})")
+                return
+
         if signal["signal"] in ["buy", "strong_buy"]:
             await self._open_position(pos_key, symbol, "long", price, signal, strategy, atr_value, htf_trend)
         elif signal["signal"] in ["sell", "strong_sell"]:
@@ -1920,6 +1940,11 @@ class SimplePaperTrader:
             should_exit = True
             roe = pnl_pct * self.leverage * 100
             exit_reason = f"Stop loss ({pnl_pct:.2%} = {roe:.0f}% ROE)"
+            # Track directional SL for consecutive-loss guard
+            dir_key = f"{strategy.name}:{position.get('side', 'unknown')}"
+            if dir_key not in self.directional_sl_history:
+                self.directional_sl_history[dir_key] = []
+            self.directional_sl_history[dir_key].append(datetime.now(timezone.utc))
             # Activate per-strategy cooldown
             self.stop_loss_cooldowns[pos_key] = datetime.now(timezone.utc) + timedelta(minutes=self.stop_loss_cooldown_minutes)
             # Activate cross-strategy symbol cooldown
@@ -2633,6 +2658,7 @@ async def main():
                 capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="1h",
                 trailing_enabled=True,
+                max_concurrent_positions=2,  # Crypto is correlated — cap exposure
             ))
 
     # Apply adaptive sizing if enabled
