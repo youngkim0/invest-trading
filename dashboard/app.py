@@ -800,10 +800,13 @@ def main():
         for sym in get_active_symbols():
             price_maps[sym] = fetch_price_at_time(sym, 500)
 
-        # Filter to actionable signals only (buy/sell) — hold signals are noise
-        actionable_signals = [s for s in page_signals if (s.get('signal_type') or 'hold') != 'hold']
+        # Filter holds unless user wants them
+        if show_holds:
+            display_signals = page_signals
+        else:
+            display_signals = [s for s in page_signals if (s.get('signal_type') or 'hold') != 'hold']
 
-        for i, sig in enumerate(actionable_signals):
+        for i, sig in enumerate(display_signals):
             signal_type = sig.get('signal_type', 'hold') or 'hold'
             confidence = float(sig.get('confidence') or 0) * 100
             sig_price = float(sig.get('entry_price') or 0)
