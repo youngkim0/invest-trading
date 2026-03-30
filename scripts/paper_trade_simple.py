@@ -51,6 +51,7 @@ import numpy as np
 from loguru import logger
 
 from data.collectors.market_data import MarketDataCollector
+from data.collectors.hyperliquid_whales import HyperliquidWhaleTracker
 from data.storage.supabase_client import (
     TradeLogRepository,
     SignalRepository,
@@ -1121,6 +1122,174 @@ class CrashMomentumShortGenerator:
         }
 
 
+class SmartMoneyFlowGenerator:
+    """Smart money composite signal — tracks whale positioning across multiple data sources.
+
+    Combines 6 data sources into a single Smart Money Score (-1.0 to +1.0):
+    1. Top trader position ratio (Binance, capital-weighted)
+    2. Top trader vs retail divergence (contrarian retail signal)
+    3. Hyperliquid whale consensus (actual whale positions)
+    4. Taker buy/sell ratio (aggressive order flow)
+    5. Fear & Greed Index (contrarian extreme sentiment)
+    6. Funding rate extreme (contrarian crowd positioning)
+    """
+
+    def generate_signal(self, df_15m, htf_trend, derivatives=None,
+                        whale_consensus=None, fear_greed=None):
+        if df_15m is None or len(df_15m) < 20:
+            return hold_signal("Insufficient 15m data", htf_trend)
+        if not derivatives:
+            return hold_signal("No derivatives data", htf_trend)
+
+        direction = htf_trend.get("direction", "neutral")
+        strength = htf_trend.get("strength", 0.0)
+
+        # Don't trade against a strong HTF trend
+        # (if HTF strongly bullish, don't take short signals and vice versa)
+
+        components = []  # (name, score, weight) — score is -1 to +1
+        reasons = []
+
+        # === 1. Top trader POSITION ratio (capital-weighted whale direction) ===
+        top_pos = derivatives.get("top_position_ratio", [])
+        if top_pos:
+            long_pct = top_pos[0].get("long_account", 0.5)
+            if long_pct > 0.55:
+                score = min(1.0, (long_pct - 0.5) / 0.15)  # 0.55→0.33, 0.65→1.0
+                components.append(("top_position", score, 0.25))
+                reasons.append(f"Top traders {long_pct:.0%} long")
+            elif long_pct < 0.45:
+                score = max(-1.0, (long_pct - 0.5) / 0.15)
+                components.append(("top_position", score, 0.25))
+                reasons.append(f"Top traders {1-long_pct:.0%} short")
+            else:
+                components.append(("top_position", 0.0, 0.25))
+
+        # === 2. Top trader vs retail divergence ===
+        global_ls = derivatives.get("global_long_short", [])
+        top_ls = derivatives.get("top_long_short", [])
+        if global_ls and top_ls:
+            retail_long = global_ls[0].get("long_account", 0.5)
+            pro_long = top_ls[0].get("long_account", 0.5)
+            divergence = pro_long - retail_long  # +ve = pros more bullish than retail
+            if abs(divergence) > 0.03:  # Meaningful divergence (>3%)
+                score = max(-1.0, min(1.0, divergence / 0.10))  # Scale: 10% div = full score
+                components.append(("pro_retail_div", score, 0.25))
+                reasons.append(f"Pro-retail divergence {divergence:+.1%}")
+            else:
+                components.append(("pro_retail_div", 0.0, 0.25))
+
+        # === 3. Hyperliquid whale consensus ===
+        if whale_consensus:
+            wc = whale_consensus.get("consensus", 0.0)
+            total_whales = whale_consensus.get("total", 0)
+            if total_whales >= 3 and abs(wc) > 0.2:  # Need at least 3 whales with signal
+                components.append(("hl_whales", wc, 0.20))
+                side = "long" if wc > 0 else "short"
+                reasons.append(f"HL whales {side} ({whale_consensus.get('long_count',0)}L/{whale_consensus.get('short_count',0)}S)")
+            else:
+                components.append(("hl_whales", 0.0, 0.20))
+
+        # === 4. Taker ratio (15m aggressive flow) ===
+        taker_15m = derivatives.get("taker_ratio_15m", [])
+        if taker_15m:
+            ratio = taker_15m[0].get("buy_sell_ratio", 1.0)
+            if ratio > 1.05:
+                score = min(1.0, (ratio - 1.0) / 0.15)  # 1.05→0.33, 1.15→1.0
+                components.append(("taker_flow", score, 0.15))
+                reasons.append(f"Taker ratio {ratio:.2f} (buying)")
+            elif ratio < 0.95:
+                score = max(-1.0, (ratio - 1.0) / 0.15)
+                components.append(("taker_flow", score, 0.15))
+                reasons.append(f"Taker ratio {ratio:.2f} (selling)")
+            else:
+                components.append(("taker_flow", 0.0, 0.15))
+
+        # === 5. Fear & Greed extreme (contrarian) ===
+        if fear_greed:
+            fg_value = fear_greed.get("value", 50)
+            if fg_value < 20:  # Extreme fear → contrarian long
+                score = min(1.0, (20 - fg_value) / 15)  # 20→0, 5→1.0
+                components.append(("fear_greed", score, 0.10))
+                reasons.append(f"Fear&Greed {fg_value} (extreme fear)")
+            elif fg_value > 75:  # Extreme greed → contrarian short
+                score = max(-1.0, (75 - fg_value) / 15)
+                components.append(("fear_greed", score, 0.10))
+                reasons.append(f"Fear&Greed {fg_value} (extreme greed)")
+            else:
+                components.append(("fear_greed", 0.0, 0.10))
+
+        # === 6. Funding rate extreme (contrarian) ===
+        funding = derivatives.get("funding_rate", [])
+        if funding:
+            rate = funding[0].get("funding_rate", 0)
+            if rate < -0.0002:  # Shorts paying → contrarian long
+                score = min(1.0, abs(rate) / 0.001)
+                components.append(("funding", score, 0.05))
+                reasons.append(f"Funding {rate*100:.3f}% (shorts paying)")
+            elif rate > 0.0003:  # Longs paying → contrarian short
+                score = max(-1.0, -rate / 0.001)
+                components.append(("funding", score, 0.05))
+                reasons.append(f"Funding {rate*100:.3f}% (longs paying)")
+            else:
+                components.append(("funding", 0.0, 0.05))
+
+        # === Compute weighted score ===
+        if not components:
+            return hold_signal("No smart money data available", htf_trend)
+
+        total_weight = sum(w for _, _, w in components)
+        if total_weight <= 0:
+            return hold_signal("No smart money components", htf_trend)
+
+        smart_score = sum(s * w for _, s, w in components) / total_weight
+        agreeing = sum(1 for _, s, _ in components if abs(s) > 0.1 and (
+            (smart_score > 0 and s > 0) or (smart_score < 0 and s < 0)
+        ))
+
+        # === Entry decision ===
+        min_score = 0.4
+        min_agreeing = 3
+
+        if abs(smart_score) < min_score:
+            return hold_signal(
+                f"Smart money score {smart_score:+.2f} too weak (need ±{min_score}), "
+                f"{agreeing} agreeing", htf_trend)
+
+        if agreeing < min_agreeing:
+            return hold_signal(
+                f"Only {agreeing}/{len(components)} components agree (need {min_agreeing})", htf_trend)
+
+        # Check HTF not strongly opposing
+        if smart_score > 0 and direction == "bearish" and strength > 0.3:
+            return hold_signal(f"Smart money bullish but HTF strongly bearish (str={strength:.2f})", htf_trend)
+        if smart_score < 0 and direction == "bullish" and strength > 0.3:
+            return hold_signal(f"Smart money bearish but HTF strongly bullish (str={strength:.2f})", htf_trend)
+
+        # Generate signal
+        if smart_score > 0:
+            signal_type = "strong_buy" if smart_score > 0.6 else "buy"
+        else:
+            signal_type = "strong_sell" if smart_score < -0.6 else "sell"
+
+        # Confidence: map score magnitude to 0.65-0.85 range
+        confidence = min(0.85, 0.65 + abs(smart_score) * 0.3)
+
+        return {
+            "signal": signal_type,
+            "confidence": confidence,
+            "reasoning": f"Smart money score {smart_score:+.2f} ({agreeing}/{len(components)} agree): " + ", ".join(reasons),
+            "indicators": {
+                "smart_score": round(smart_score, 3),
+                "components_agreeing": agreeing,
+                "total_components": len(components),
+                "component_scores": {name: round(s, 3) for name, s, _ in components},
+                "htf_trend": direction,
+                "htf_strength": strength,
+            },
+        }
+
+
 # =============================================================================
 # Strategy Config + Position Sizing
 # =============================================================================
@@ -1532,10 +1701,34 @@ class SimplePaperTrader:
         logger.info("=" * 70)
 
         collector = MarketDataCollector()
+        whale_tracker = HyperliquidWhaleTracker()
+
+        # Shared state for data fetched once per cycle (not per symbol)
+        fear_greed_cache = {"value": 50, "classification": "Neutral", "last_fetch": None}
+        whale_consensus_cache = {}  # {symbol: {consensus, long_count, short_count, ...}}
 
         try:
             while self.running:
                 self._reversal_counted_this_cycle.clear()
+
+                # Fetch shared data once per cycle (not per symbol)
+                has_smart_money = any(s.strategy_type == "smart_money" for s in self.strategies)
+                if has_smart_money:
+                    try:
+                        whale_consensus_cache = await whale_tracker.get_whale_consensus()
+                    except Exception as e:
+                        logger.warning(f"Whale tracker failed: {e}")
+                    # Fear & Greed: refresh every 15 minutes
+                    now_ts = datetime.now(timezone.utc)
+                    last_fg = fear_greed_cache.get("last_fetch")
+                    if not last_fg or (now_ts - last_fg).total_seconds() > 900:
+                        try:
+                            fg = await collector.get_fear_greed_index()
+                            fear_greed_cache.update(fg)
+                            fear_greed_cache["last_fetch"] = now_ts
+                        except Exception as e:
+                            logger.warning(f"Fear & Greed fetch failed: {e}")
+
                 for symbol in self.symbols:
                     # Fetch all market data once per symbol
                     market_data = await self._fetch_market_data(symbol, collector)
@@ -1570,7 +1763,7 @@ class SimplePaperTrader:
         """Fetch all needed data for a symbol (candles + derivatives)."""
         try:
             # Parallel fetch: 1m, 5m, 15m, 1h candles + ticker + derivatives
-            needs_derivatives = any(s.strategy_type in ("funding", "oi", "flow", "regime_short", "failed_bkout_short", "refined_cascade") for s in self.strategies)
+            needs_derivatives = any(s.strategy_type in ("funding", "oi", "flow", "regime_short", "failed_bkout_short", "refined_cascade", "smart_money") for s in self.strategies)
             needs_4h = any(s.strategy_type in ("regime_short", "failed_bkout_short", "refined_cascade", "crash_momentum") for s in self.strategies)
 
             tasks = [
@@ -1696,6 +1889,13 @@ class SimplePaperTrader:
                     market_data.get("1h", pd.DataFrame()), htf_trend,
                     regime=regime,
                 )
+            elif strategy.strategy_type == "smart_money":
+                signal_result = strategy.generator.generate_signal(
+                    market_data.get("15m", pd.DataFrame()), htf_trend,
+                    derivatives=market_data.get("derivatives"),
+                    whale_consensus=whale_consensus_cache.get(symbol),
+                    fear_greed=fear_greed_cache,
+                )
             else:
                 signal_result = {"signal": "hold", "confidence": 0.5,
                                  "reasoning": f"Unknown strategy type: {strategy.strategy_type}"}
@@ -1703,7 +1903,7 @@ class SimplePaperTrader:
             # Determine timeframe label for DB
             tf_map = {"funding": "1h", "breakout": "15m", "pullback": "15m", "flow": "15m",
                       "regime_short": "15m", "failed_bkout_short": "15m", "refined_cascade": "15m",
-                      "crash_momentum": "1h"}
+                      "crash_momentum": "1h", "smart_money": "15m"}
             timeframe = tf_map.get(strategy.strategy_type, "1m")
 
             # Save signals to DB (holds are throttled: once per 15min or on reason change)
@@ -2482,10 +2682,12 @@ async def main():
     parser.add_argument(
         "--strategies", nargs="+",
         default=["funding_reversion", "trend_breakout", "order_flow",
-                 "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum"],
+                 "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum",
+                 "smart_money"],
         choices=["funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
-                 "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum"],
-        help="Strategies to run (default: 7 — trend_pullback disabled, 23%% WR / -$80 in 7 days)"
+                 "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum",
+                 "smart_money"],
+        help="Strategies to run (default: 8 — trend_pullback disabled)"
     )
     parser.add_argument(
         "--adaptive-sizing", action="store_true", default=False,
@@ -2514,13 +2716,14 @@ async def main():
     # Short strategies sized at 50-70% of long equivalents (research: asymmetric risk)
     capital_allocation = {
         "funding_reversion": base_capital * 0.5,       # $500 — rare-event, mostly idle
-        "trend_breakout": base_capital * 1.25,         # $1250 — proven profitable, +$250 from pullback
+        "trend_breakout": base_capital * 1.0,            # $1000 — proven profitable (-$250 to smart_money)
         "trend_pullback": base_capital * 0.75,         # $750 — DISABLED by default (23% WR, -$80/week)
-        "order_flow": base_capital * 0.75,             # $750 — proven, uses taker ratio + L/S data
+        "order_flow": base_capital * 0.5,              # $500 — uses taker ratio + L/S data (-$250 to smart_money)
         "regime_short": base_capital * 0.4,            # $400 — multi-condition confluence short (pre-crash)
         "failed_breakout_short": base_capital * 0.6,   # $600 — price action exhaustion short, +$250 from pullback
         "refined_liq_cascade": base_capital * 0.4,     # $400 — derivatives-based, rare events (pre-crash)
         "crash_momentum": base_capital * 0.75,         # $750 — best performer (+$40/week), +$250 from pullback
+        "smart_money": base_capital * 0.5,              # $500 — whale/smart money composite signal (new v6.8)
     }
 
     strategy_configs = []
@@ -2647,6 +2850,23 @@ async def main():
                 atr_timeframe="1h",
                 trailing_enabled=True,
                 max_concurrent_positions=2,  # Crypto is correlated — cap exposure
+            ))
+
+        elif name == "smart_money":
+            strategy_configs.append(StrategyConfig(
+                name="smart_money",
+                strategy_type="smart_money",
+                generator=SmartMoneyFlowGenerator(),
+                sl_atr_mult=2.0,       # Wider SL — composite signals need room
+                tp_atr_mult=3.0,       # 1.5:1 R:R
+                trailing_atr_mult=2.5,
+                trailing_dist_atr_mult=1.0,
+                max_position_hours=8.0,  # Time stop: 8h
+                risk_per_trade_pct=0.02,
+                capital=capital_allocation.get(name, base_capital),
+                atr_timeframe="15m",
+                trailing_enabled=True,
+                max_concurrent_positions=2,  # Crypto correlated
             ))
 
     # Apply adaptive sizing if enabled

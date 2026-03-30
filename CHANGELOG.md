@@ -1,5 +1,17 @@
 # Paper Trader Changelog
 
+## v6.8 — Smart Money Flow strategy (2026-03-30)
+
+New strategy tracking whale/smart money positions across multiple free data sources.
+
+**New data**: Binance top trader POSITION ratio (capital-weighted), global L/S ratio (retail crowd), Hyperliquid whale positions (20 wallets, $4M-$81M accounts), Fear & Greed Index.
+
+**SmartMoneyFlowGenerator**: Composite score from 6 components (top position 25%, pro-retail divergence 25%, HL whales 20%, taker flow 15%, F&G 10%, funding 5%). Entry: score > ±0.4, 3+ components agree, HTF not opposing. SL 2.0x ATR, TP 3.0x, trailing, max 2 concurrent.
+
+**Capital**: breakout $1250→$1000, flow $750→$500, smart_money $500 (new). Total $4,650.
+
+---
+
 ## v6.7.2 — Data-driven performance fix (2026-03-30)
 
 **7-day assessment (85 trades, Mar 23-30): $4,650 → $4,650.60 (+$0.60, flat)**

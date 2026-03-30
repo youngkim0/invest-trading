@@ -325,6 +325,69 @@ class MarketDataCollector:
             logger.error(f"Failed to fetch top L/S ratio: {e}")
             return []
 
+    async def get_top_long_short_position_ratio(
+        self,
+        symbol: str = "BTCUSDT",
+        period: str = "1h",
+        limit: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Get top trader long/short POSITION ratio (capital-weighted, not account count)."""
+        try:
+            url = f"{self.BINANCE_FAPI_URL}/futures/data/topLongShortPositionRatio"
+            params = {"symbol": symbol, "period": period, "limit": limit}
+            response = await self.client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            return [{
+                "long_short_ratio": float(r["longShortRatio"]),
+                "long_account": float(r["longAccount"]),
+                "short_account": float(r["shortAccount"]),
+                "timestamp": datetime.fromtimestamp(r["timestamp"] / 1000).isoformat(),
+            } for r in data]
+        except Exception as e:
+            logger.error(f"Failed to fetch top position ratio: {e}")
+            return []
+
+    async def get_global_long_short_ratio(
+        self,
+        symbol: str = "BTCUSDT",
+        period: str = "1h",
+        limit: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Get global (all traders) long/short account ratio."""
+        try:
+            url = f"{self.BINANCE_FAPI_URL}/futures/data/globalLongShortAccountRatio"
+            params = {"symbol": symbol, "period": period, "limit": limit}
+            response = await self.client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            return [{
+                "long_short_ratio": float(r["longShortRatio"]),
+                "long_account": float(r["longAccount"]),
+                "short_account": float(r["shortAccount"]),
+                "timestamp": datetime.fromtimestamp(r["timestamp"] / 1000).isoformat(),
+            } for r in data]
+        except Exception as e:
+            logger.error(f"Failed to fetch global L/S ratio: {e}")
+            return []
+
+    async def get_fear_greed_index(self) -> dict[str, Any]:
+        """Get crypto Fear & Greed Index (0-100, updates daily)."""
+        try:
+            url = "https://api.alternative.me/fng/"
+            params = {"limit": 1, "format": "json"}
+            response = await self.client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            entry = data.get("data", [{}])[0]
+            return {
+                "value": int(entry.get("value", 50)),
+                "classification": entry.get("value_classification", "Neutral"),
+            }
+        except Exception as e:
+            logger.error(f"Failed to fetch Fear & Greed Index: {e}")
+            return {"value": 50, "classification": "Neutral"}
+
     async def get_derivatives_data(
         self,
         symbol: str = "BTCUSDT",
@@ -345,6 +408,8 @@ class MarketDataCollector:
                 self.get_taker_long_short_ratio(symbol, "15m", 1),
                 self.get_taker_long_short_ratio(symbol, "1h", 1),
                 self.get_top_long_short_ratio(symbol, "1h", 1),
+                self.get_top_long_short_position_ratio(symbol, "1h", 1),
+                self.get_global_long_short_ratio(symbol, "1h", 1),
                 return_exceptions=True,
             )
 
@@ -357,6 +422,8 @@ class MarketDataCollector:
                 "taker_ratio_15m": results[5] if not isinstance(results[5], Exception) else [],
                 "taker_ratio_1h": results[6] if not isinstance(results[6], Exception) else [],
                 "top_long_short": results[7] if not isinstance(results[7], Exception) else [],
+                "top_position_ratio": results[8] if not isinstance(results[8], Exception) else [],
+                "global_long_short": results[9] if not isinstance(results[9], Exception) else [],
             }
         except Exception as e:
             logger.error(f"Failed to fetch derivatives data: {e}")
