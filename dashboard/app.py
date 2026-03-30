@@ -26,7 +26,7 @@ try:
     UTC = ZoneInfo("UTC")
 except Exception:
     pass  # Keep the fallback values defined above
-NEW_SYSTEM_DATE = "2026-03-11T07:27:00Z"
+NEW_SYSTEM_DATE = "2026-03-30T00:03:00Z"
 
 
 def to_kst(timestamp_str: str) -> str:
