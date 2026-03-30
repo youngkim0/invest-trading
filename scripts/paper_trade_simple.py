@@ -1704,8 +1704,8 @@ class SimplePaperTrader:
         whale_tracker = HyperliquidWhaleTracker()
 
         # Shared state for data fetched once per cycle (not per symbol)
-        fear_greed_cache = {"value": 50, "classification": "Neutral", "last_fetch": None}
-        whale_consensus_cache = {}  # {symbol: {consensus, long_count, short_count, ...}}
+        self._fear_greed_cache = {"value": 50, "classification": "Neutral", "last_fetch": None}
+        self._whale_consensus_cache = {}  # {symbol: {consensus, long_count, short_count, ...}}
 
         try:
             while self.running:
@@ -1715,17 +1715,17 @@ class SimplePaperTrader:
                 has_smart_money = any(s.strategy_type == "smart_money" for s in self.strategies)
                 if has_smart_money:
                     try:
-                        whale_consensus_cache = await whale_tracker.get_whale_consensus()
+                        self._whale_consensus_cache = await whale_tracker.get_whale_consensus()
                     except Exception as e:
                         logger.warning(f"Whale tracker failed: {e}")
                     # Fear & Greed: refresh every 15 minutes
                     now_ts = datetime.now(timezone.utc)
-                    last_fg = fear_greed_cache.get("last_fetch")
+                    last_fg = self._fear_greed_cache.get("last_fetch")
                     if not last_fg or (now_ts - last_fg).total_seconds() > 900:
                         try:
                             fg = await collector.get_fear_greed_index()
-                            fear_greed_cache.update(fg)
-                            fear_greed_cache["last_fetch"] = now_ts
+                            self._fear_greed_cache.update(fg)
+                            self._fear_greed_cache["last_fetch"] = now_ts
                         except Exception as e:
                             logger.warning(f"Fear & Greed fetch failed: {e}")
 
@@ -1893,8 +1893,8 @@ class SimplePaperTrader:
                 signal_result = strategy.generator.generate_signal(
                     market_data.get("15m", pd.DataFrame()), htf_trend,
                     derivatives=market_data.get("derivatives"),
-                    whale_consensus=whale_consensus_cache.get(symbol),
-                    fear_greed=fear_greed_cache,
+                    whale_consensus=self._whale_consensus_cache.get(symbol),
+                    fear_greed=self._fear_greed_cache,
                 )
             else:
                 signal_result = {"signal": "hold", "confidence": 0.5,
