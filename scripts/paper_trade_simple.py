@@ -2599,6 +2599,7 @@ async def main():
                 capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="15m",
                 trailing_enabled=True,
+                max_concurrent_positions=2,  # Crypto correlated — cap exposure
             ))
         elif name == "failed_breakout_short":
             strategy_configs.append(StrategyConfig(
@@ -2614,6 +2615,7 @@ async def main():
                 capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="15m",
                 trailing_enabled=True,
+                max_concurrent_positions=2,  # Crypto correlated — cap like crash_momentum
             ))
         elif name == "refined_liq_cascade":
             strategy_configs.append(StrategyConfig(

@@ -511,7 +511,6 @@ def main():
             "All Strategies": None,
             "🔄 Funding Reversion": "funding_reversion",
             "📈 Trend Breakout": "trend_breakout",
-            "📉 Trend Pullback": "trend_pullback",
             "🌊 Order Flow": "order_flow",
             "🔻 Regime Short": "regime_short",
             "🪤 Failed Breakout Short": "failed_breakout_short",
@@ -540,9 +539,9 @@ def main():
         st.markdown("---")
         st.header("⚖️ Strategy Comparison")
 
-        strat_names = ["funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
+        strat_names = ["funding_reversion", "trend_breakout", "order_flow",
                        "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum"]
-        strat_labels = ["Funding Rev.", "Trend Break.", "Trend Pull.", "Order Flow",
+        strat_labels = ["Funding Rev.", "Trend Break.", "Order Flow",
                         "Regime Short", "Failed Bkout", "Liq Cascade", "Crash Mom."]
         comp_cols = st.columns(len(strat_names))
 
@@ -583,17 +582,16 @@ def main():
     # PORTFOLIO VALUE BANNER (at the top)
     # ============================================
     # Only count active strategies for portfolio calculation
-    ACTIVE_STRATEGIES = {"funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
+    ACTIVE_STRATEGIES = {"funding_reversion", "trend_breakout", "order_flow",
                           "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum"}
     STRATEGY_CAPITAL = {
         "funding_reversion": 500.0,
-        "trend_breakout": 1000.0,
-        "trend_pullback": 750.0,
+        "trend_breakout": 1250.0,
         "order_flow": 750.0,
         "regime_short": 400.0,
-        "failed_breakout_short": 350.0,
+        "failed_breakout_short": 600.0,
         "refined_liq_cascade": 400.0,
-        "crash_momentum": 500.0,
+        "crash_momentum": 750.0,
     }
 
     if strategy_filter is None:
