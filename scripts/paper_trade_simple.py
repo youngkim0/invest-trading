@@ -367,8 +367,8 @@ class FundingMeanReversionGenerator:
         earlier_oi = oi_history[lookback_idx]["sum_open_interest_value"]
         oi_change_pct = (current_oi - earlier_oi) / earlier_oi * 100 if earlier_oi > 0 else 0
 
-        if oi_change_pct < 0.5:
-            return hold_signal(f"OI not rising enough ({oi_change_pct:.2f}%)", htf_trend)
+        if oi_change_pct < 0.2:
+            return hold_signal(f"OI not rising enough ({oi_change_pct:.2f}%, need >0.2%)", htf_trend)
         reasons.append(f"OI +{oi_change_pct:.2f}% (30min)")
 
         # === CONDITION 3: Price hasn't already reversed > 0.5% in last hour ===
@@ -427,12 +427,10 @@ class TrendBreakoutGenerator:
         strength = htf_trend.get("strength", 0.0)
         reasons = []
 
-        # === CONDITION 1: HTF trending OR ranging (neutral allows breakouts with higher vol) ===
-        required_vol_ratio = 1.2
+        # === CONDITION 1: HTF must be trending (neutral/ranging breakouts disabled — 35% WR, too many false breaks) ===
+        required_vol_ratio = 1.5
         if direction == "neutral":
-            # Ranging market: allow breakouts in either direction, require higher volume
-            required_vol_ratio = 1.5
-            reasons.append("Ranging mode (vol 1.5x req)")
+            return hold_signal("Neutral-mode breakouts disabled (false break rate too high)", htf_trend)
         elif strength < 0.1:
             return hold_signal(f"HTF {direction} too weak (str={strength:.2f})", htf_trend)
         else:
@@ -455,15 +453,6 @@ class TrendBreakoutGenerator:
         elif direction == "bearish" and current_price < low_10:
             # Shorts disabled — 10% WR on breakout shorts, no edge
             return hold_signal(f"Bearish breakout short disabled", htf_trend)
-        elif direction == "neutral":
-            # Ranging: only trade long breakouts (shorts disabled)
-            if current_price > high_10:
-                signal_direction = "buy"
-                reasons.append(f"15m range break above ${high_10:,.2f}")
-            elif current_price < low_10:
-                return hold_signal(f"Range short breakout disabled", htf_trend)
-            else:
-                return hold_signal(f"No breakout (${current_price:,.2f} in range ${low_10:,.2f}-${high_10:,.2f})", htf_trend)
         else:
             return hold_signal(f"No breakout (price ${current_price:,.2f}, H10=${high_10:,.2f}, L10=${low_10:,.2f})", htf_trend)
 
@@ -480,11 +469,6 @@ class TrendBreakoutGenerator:
         is_strong = vol_ratio > 2.0 and strength > 0.6
         signal_type = f"strong_{signal_direction}" if is_strong else signal_direction
         confidence = 0.75 if is_strong else 0.70
-
-        # Reduce confidence for range breakouts (no HTF confirmation)
-        if direction == "neutral":
-            confidence -= 0.05
-            reasons.append("Range breakout (-5% conf)")
 
         # HTF is already aligned by design, so just a small boost for high strength
         if strength > 0.6:
@@ -1361,12 +1345,12 @@ class SimplePaperTrader:
         self.directional_sl_max = 2           # N SLs in same direction to trigger block
         self.directional_sl_window_hours = 2  # Time window for counting
 
-        # Global circuit breaker: pause ALL strategies after N consecutive SLs
-        self.global_sl_timestamps: list[datetime] = []  # timestamps of recent SLs
+        # Per-strategy circuit breaker: pause a strategy after N SLs (not global — don't punish winners for losers)
+        self.strategy_sl_timestamps: dict[str, list[datetime]] = {}  # strategy_name -> SL timestamps
         self.circuit_breaker_window_hours = 2  # Look at SLs within this window
-        self.circuit_breaker_threshold = 2     # N SLs to trigger (was 3, tightened: 13-loss streaks)
+        self.circuit_breaker_threshold = 2     # N SLs to trigger
         self.circuit_breaker_pause_minutes = 60  # How long to pause
-        self.circuit_breaker_until: datetime | None = None  # When the pause ends
+        self.circuit_breaker_until: dict[str, datetime] = {}  # strategy_name -> pause end time
 
         # Reversal close: close losing non-pullback positions when reversal persists 2+ cycles
         # Key: "symbol" → count of consecutive main-loop cycles with reversal override active
@@ -1801,15 +1785,16 @@ class SimplePaperTrader:
         if signal["confidence"] < 0.65:
             return
 
-        # Check global circuit breaker
-        if self.circuit_breaker_until:
-            remaining = (self.circuit_breaker_until - datetime.now(timezone.utc)).total_seconds() / 60
+        # Check per-strategy circuit breaker
+        cb_until = self.circuit_breaker_until.get(strategy.name)
+        if cb_until:
+            remaining = (cb_until - datetime.now(timezone.utc)).total_seconds() / 60
             if remaining > 0:
-                logger.info(f"   🔌 Circuit breaker active ({remaining:.0f}min left) — all entries paused")
+                logger.info(f"   🔌 [{strategy.name}] Circuit breaker active ({remaining:.0f}min left)")
                 return
             else:
-                logger.info("   🔌 Circuit breaker lifted — resuming trading")
-                self.circuit_breaker_until = None
+                logger.info(f"   🔌 [{strategy.name}] Circuit breaker lifted — resuming")
+                del self.circuit_breaker_until[strategy.name]
 
         # Reset daily stop loss counter at midnight UTC
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1952,18 +1937,19 @@ class SimplePaperTrader:
             self.daily_stop_losses[pos_key] = self.daily_stop_losses.get(pos_key, 0) + 1
             logger.info(f"   [{strategy.name}] SL cooldown activated. Daily: {self.daily_stop_losses[pos_key]}/{self.max_daily_stop_losses}")
 
-            # Global circuit breaker: track SL timestamps across all strategies
+            # Per-strategy circuit breaker: track SL timestamps per strategy
             now = datetime.now(timezone.utc)
-            self.global_sl_timestamps.append(now)
-            # Prune old timestamps outside the window
+            strat_name = strategy.name
+            if strat_name not in self.strategy_sl_timestamps:
+                self.strategy_sl_timestamps[strat_name] = []
+            self.strategy_sl_timestamps[strat_name].append(now)
             cutoff = now - timedelta(hours=self.circuit_breaker_window_hours)
-            self.global_sl_timestamps = [t for t in self.global_sl_timestamps if t > cutoff]
-            # Check if threshold reached
-            if len(self.global_sl_timestamps) >= self.circuit_breaker_threshold:
-                self.circuit_breaker_until = now + timedelta(minutes=self.circuit_breaker_pause_minutes)
+            self.strategy_sl_timestamps[strat_name] = [t for t in self.strategy_sl_timestamps[strat_name] if t > cutoff]
+            if len(self.strategy_sl_timestamps[strat_name]) >= self.circuit_breaker_threshold:
+                self.circuit_breaker_until[strat_name] = now + timedelta(minutes=self.circuit_breaker_pause_minutes)
                 logger.warning(
-                    f"🔌 CIRCUIT BREAKER: {len(self.global_sl_timestamps)} SLs in {self.circuit_breaker_window_hours}h "
-                    f"— ALL trading paused for {self.circuit_breaker_pause_minutes}min"
+                    f"🔌 CIRCUIT BREAKER [{strat_name}]: {len(self.strategy_sl_timestamps[strat_name])} SLs in "
+                    f"{self.circuit_breaker_window_hours}h — {strat_name} paused for {self.circuit_breaker_pause_minutes}min"
                 )
 
         # 4. TIME-BASED EXIT
@@ -2495,11 +2481,11 @@ async def main():
     )
     parser.add_argument(
         "--strategies", nargs="+",
-        default=["funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
+        default=["funding_reversion", "trend_breakout", "order_flow",
                  "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum"],
         choices=["funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
                  "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum"],
-        help="Strategies to run (default: all 8)"
+        help="Strategies to run (default: 7 — trend_pullback disabled, 23%% WR / -$80 in 7 days)"
     )
     parser.add_argument(
         "--adaptive-sizing", action="store_true", default=False,
@@ -2528,13 +2514,13 @@ async def main():
     # Short strategies sized at 50-70% of long equivalents (research: asymmetric risk)
     capital_allocation = {
         "funding_reversion": base_capital * 0.5,       # $500 — rare-event, mostly idle
-        "trend_breakout": base_capital * 1.0,          # $1000 — proven profitable strategy
-        "trend_pullback": base_capital * 0.75,         # $750 — proven, complementary to breakout
+        "trend_breakout": base_capital * 1.25,         # $1250 — proven profitable, +$250 from pullback
+        "trend_pullback": base_capital * 0.75,         # $750 — DISABLED by default (23% WR, -$80/week)
         "order_flow": base_capital * 0.75,             # $750 — proven, uses taker ratio + L/S data
         "regime_short": base_capital * 0.4,            # $400 — multi-condition confluence short (pre-crash)
-        "failed_breakout_short": base_capital * 0.35,  # $350 — price action exhaustion short (pre-crash)
+        "failed_breakout_short": base_capital * 0.6,   # $600 — price action exhaustion short, +$250 from pullback
         "refined_liq_cascade": base_capital * 0.4,     # $400 — derivatives-based, rare events (pre-crash)
-        "crash_momentum": base_capital * 0.5,          # $500 — price action continuation during crashes
+        "crash_momentum": base_capital * 0.75,         # $750 — best performer (+$40/week), +$250 from pullback
     }
 
     strategy_configs = []
@@ -2650,7 +2636,7 @@ async def main():
                 strategy_type="crash_momentum",
                 generator=CrashMomentumShortGenerator(),
                 sl_atr_mult=2.0,       # Wide SL — crash bounces are violent on 1h
-                tp_atr_mult=4.0,       # 2:1 R:R (bigger moves on 1h)
+                tp_atr_mult=3.0,       # 1.5:1 R:R (was 4.0 — too many stale exits before TP hit)
                 trailing_atr_mult=2.5, # Start trailing at 2.5x ATR (was 2.0 — let crash profits run)
                 trailing_dist_atr_mult=1.5,  # Trail at 1.5x ATR (was 1.0 — wider for crash volatility)
                 max_position_hours=12.0,  # Time stop: 12h (1h candles need more time)

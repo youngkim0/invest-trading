@@ -1,5 +1,23 @@
 # Paper Trader Changelog
 
+## v6.7.2 — Data-driven performance fix (2026-03-30)
+
+**7-day assessment (85 trades, Mar 23-30): $4,650 → $4,650.60 (+$0.60, flat)**
+
+One strategy bled the system: crash_momentum +$40, trend_breakout +$40, but trend_pullback -$81 wiped it all out.
+
+### Changes:
+
+1. **Disabled trend_pullback** — 23% WR, -$80.82, 10pts below breakeven. $750 redistributed to winners.
+2. **Tightened trend_breakout** — disabled neutral-mode breakouts, vol threshold 1.2x→1.5x
+3. **Per-strategy circuit breaker** — was global (pullback SLs froze crash_momentum). Now scoped per strategy.
+4. **Crash momentum TP 4.0→3.0 ATR** — converts stale 12h timeouts into TP hits
+5. **Funding reversion OI 0.5→0.2%** — 0 trades/week because threshold too strict
+
+Capital: funding $500, breakout $1250, flow $750, regime_short $400, failed_bkout $600, cascade $400, crash $750 = $4650
+
+---
+
 ## v6.7.1 — Correlation guard + directional SL guard + adaptive sizing ON (2026-03-24)
 
 **Problem**: First 19h of v6.7 showed -$60.83 (-1.3%). Two issues:
