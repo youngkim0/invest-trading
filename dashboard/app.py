@@ -1360,62 +1360,8 @@ def main():
         st.info(f"📊 {passed_checks}/{len(checks)} criteria met. More data needed.")
 
     # ============================================
-    # SECTION 7: AI INSIGHTS (On-Demand)
     # ============================================
-    st.markdown("---")
-    st.header("🤖 AI Trading Analyst")
-
-    st.caption("Click the button below to generate an AI analysis (uses Gemini API)")
-
-    # Show previous analysis from session state if available
-    if 'ai_insights' in st.session_state:
-        insights = st.session_state['ai_insights']
-        if 'error' in insights:
-            st.error(f"AI Analysis Error: {insights['error']}")
-        else:
-            col1, col2 = st.columns(2)
-            with col1:
-                accuracy = insights.get('signal_accuracy', 0)
-                st.metric(
-                    "Signal Accuracy",
-                    f"{accuracy:.1f}%",
-                    delta=f"{insights.get('correct_signals', 0)}/{insights.get('total_signals_analyzed', 0)} correct"
-                )
-            with col2:
-                generated_at = insights.get('generated_at', '')
-                if generated_at:
-                    try:
-                        gen_time = datetime.fromisoformat(generated_at.replace('Z', '+00:00'))
-                        gen_time_kst = gen_time + timedelta(hours=9)
-                        st.metric("Generated", gen_time_kst.strftime('%m/%d %H:%M KST'))
-                    except:
-                        st.metric("Generated", "Just now")
-
-            st.markdown("### 📋 Analysis & Recommendations")
-            st.markdown(insights.get('analysis', 'No analysis available'))
-
-    # Button to trigger analysis
-    if st.button("🧠 Run AI Analysis", key="run_ai"):
-        if not get_gemini_api_key():
-            st.warning("GEMINI_API_KEY not found in secrets.")
-        else:
-            try:
-                trades_json = json.dumps(trades, default=str)
-                signals_json = json.dumps(signals[-100:], default=str)
-                prices_json = json.dumps(prices)
-                cache_key = get_analysis_cache_key(trades, signals)
-
-                with st.spinner("🧠 AI is analyzing your trading performance..."):
-                    insights = generate_ai_insights(trades_json, signals_json, prices_json, cache_key)
-
-                if insights:
-                    st.session_state['ai_insights'] = insights
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Error generating AI insights: {e}")
-
-    # ============================================
-    # SECTION 8: AI DAILY REVIEW & TRADE ANALYSIS (Claude)
+    # SECTION 7: AI DAILY REVIEW & TRADE ANALYSIS (Claude)
     # ============================================
     st.markdown("---")
     st.header("🧠 Claude AI Reviews")

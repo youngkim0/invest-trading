@@ -10,5 +10,5 @@ Group=paper
 WorkingDirectory=/opt/paper-trader
 Environment=PYTHONPATH=/opt/paper-trader
 EnvironmentFile=/opt/paper-trader/.env
-ExecStart=/usr/bin/python3 scripts/ai_daily_review.py
+ExecStart=/opt/paper-trader/venv/bin/python scripts/ai_daily_review.py
 TimeoutStartSec=120
