@@ -16,49 +16,50 @@ from loguru import logger
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 HYPERLIQUID_LEADERBOARD_URL = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
 
-# Top 40 whale wallets from Hyperliquid leaderboard (sorted by allTime PnL, Mar 2026)
-# Filtered to profitable traders with >$500k account value
+# Top 40 whale wallets from Hyperliquid leaderboard (sorted by 30D ROI%, Mar 2026)
+# Criteria: >5% monthly ROI, >$500k account, positive alltime PnL
+# These are the best *directional* traders right now, not just biggest accounts
 WHALE_WALLETS = [
-    "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00",  # $82M acct, $203M alltime
-    "0x5b5d51203a0f9079f8aeb098a6523a13f298c060",  # $36M acct, $173M alltime
-    "0x7fdafde5cfb5465924316eced2d3715494c517d1",  # BobbyBigSize — $31M acct, $162M alltime
-    "0xfae95f601f3a25ace60d19dbb929f2a5c57e3571",  # thank you jefef — $7M acct, $150M alltime
-    "0xdfc24b077bc1425ad1dea75bcb6f8158e10df303",  # $463M acct, $138M alltime
-    "0x20c2d95a3dfdca9e9ad12794d5fa6fad99da44f5",  # $3.5M acct, $122M alltime
-    "0xb83de012dba672c76a7dbbbf3e459cb59d7d6e36",  # $48M acct, $119M alltime
-    "0x880ac484a1743862989a441d6d867238c7aa311c",  # x35767 — $28M acct, $114M alltime
-    "0xa312114b5795dff9b8db50474dd57701aa78ad1e",  # $12M acct, $93M alltime
-    "0x716bd8d3337972db99995dda5c4b34d954a61d95",  # $48M acct, $89M alltime
-    "0xd47587702a91731dc1089b5db0932cf820151a91",  # $44M acct, $86M alltime
-    "0x2e3d94f0562703b25c83308a05046ddaf9a8dd14",  # $1M acct, $85M alltime
-    "0x45d26f28196d226497130c4bac709d808fed4029",  # $25M acct, $82M alltime
-    "0xbdfa4f4492dd7b7cf211209c4791af8d52bf5c50",  # $38M acct, $71M alltime
-    "0x023a3d058020fb76cca98f01b3c48c8938a22355",  # Auros — $30M acct, $63M alltime
-    "0x8e096995c3e4a3f0bc5b3ea1cba94de2aa4d70c9",  # $7.8M acct, $60M alltime
-    "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7",  # $5M acct, $60M alltime
-    "0x35d1151ef1aab579cbb3109e69fa82f94ff5acb1",  # $19M acct, $59M alltime
-    "0x493db0ed7514c975e9abcc110bd40c473b6763e3",  # $49M acct, $59M alltime
-    "0x8af700ba841f30e0a3fcb0ee4c4a9d223e1efa05",  # $17M acct, $58M alltime
-    "0xcfdb74a8c080bb7b4360ed6fe21f895c653efff4",  # $34M acct, $56M alltime
-    "0x4e14fc11f58b64740e66e4b1aa188a4b007c0eab",  # $55M acct, $53M alltime
-    "0x87f9cd15f5050a9283b8896300f7c8cf69ece2cf",  # $80M acct, $52M alltime
-    "0x0d446c3372a9ba9cddef0eef7a1afab6dc0e8c0b",  # $52M acct, $52M alltime
-    "0x13c50dcdee4bbcba71baf578b345cdd35c7928be",  # $35M acct, $47M alltime
-    "0x010461c14e146ac35fe42271bdc1134ee31c703a",  # $134M acct, $46M alltime
-    "0x939f95036d2e7b6d7419ec072bf9d967352204d2",  # $39M acct, $46M alltime
-    "0x7dacca323e44f168494c779bb5e7483c468ef410",  # $31M acct, $46M alltime
-    "0xcac19662ec88d23fa1c81ac0e8570b0cf2ff26b3",  # $26M acct, $46M alltime
-    "0x03b9a189e2480d1e4c3007080b29f362282130fa",  # $38M acct, $43M alltime
-    "0x162cc7c861ebd0c06b3d72319201150482518185",  # ABC — $40M acct, $41M alltime
-    "0x856c35038594767646266bc7fd68dc26480e910d",  # $33M acct, $38M alltime
-    "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7",  # $14M acct, $38M alltime
-    "0x31ca8395cf837de08b24da3f660e77761dfb974b",  # $135M acct, $37M alltime
-    "0x418aa6bf98a2b2bc93779f810330d88cde488888",  # $10M acct, $37M alltime
-    "0xc59498175d6d317642aeb97f895a7ce1aa992191",  # $4.5M acct, $34M alltime
-    "0x82d8dc80190e6bc1d92b048f9fc7e85e5e1e32ff",  # $22M acct, $33M alltime
-    "0x1419e75330c71ce463102e6a1eb62fe80b412d5f",  # $29M acct, $32M alltime
-    "0xd4c1f7e8d876c4749228d515473d36f919583d1d",  # $8.7M acct, $30M alltime
-    "0xb0a55f13d22f66e6d495ac98113841b2326e9540",  # $30M acct, $30M alltime
+    "0x5bcb8556d5e8d7fee989cf06045a4275e5d9b800",  # +52554%/mo, $2.5M acct
+    "0xd3cb1823da2ff584dec3f49ef6a3eea51471e5bc",  # +1284%/mo, $12.2M acct
+    "0x5b28335f6d5cd5a1ac3b66eb2edd2b917e7aa4a4",  # +1114%/mo, $1M acct
+    "0xeb2c29a8917422b3ff466f74539b206318c40118",  # +567%/mo, $643k acct
+    "0x1c81fb7100276aef766092e16cfcf61097e97a5d",  # +243%/mo, $651k acct
+    "0x3b11267dfc4b9ebe8427e8f557056b4b6ce98112",  # +203%/mo, $552k acct
+    "0x049bdc370620beab340b01072fa580fd57745e7d",  # ♤♤♤ — +200%/mo, $6.7M acct
+    "0x90dbb196cacf24bd212b377a0dd62eaad5e8151b",  # +163%/mo, $2.7M acct
+    "0x198d12ecc9b499adf122eb62159dae75c6ca8002",  # +159%/mo, $630k acct
+    "0x9cd0a696c7cbb9d44de99268194cb08e5684e5fe",  # +153%/mo, $4.1M acct
+    "0x20b7807939c774a152b396beb704acac68fa10fe",  # +150%/mo, $1.6M acct
+    "0xdd7a372377fc633f74ab6e20963803d52f448830",  # +128%/mo, $553k acct
+    "0x8c6d04086236a7c1670a967fc393ff58ca1d7ce9",  # +125%/mo, $632k acct
+    "0xed48b856556a69c7c40229c9c4c829b909257c9b",  # +123%/mo, $1.5M acct
+    "0xedf2b293d5b358f17330c8412e0be36feaa8fc0b",  # +118%/mo, $2.8M acct
+    "0x6b08bbb2daf57d390538d73542f50d5f735ca420",  # +103%/mo, $1.1M acct
+    "0xa98143608a6846453c88f29506d64a8b85532e65",  # +101%/mo, $4.1M acct
+    "0xfe40fa3decfc6dc555f4ad7736d0dd65ccbd4743",  # +100%/mo, $2M acct
+    "0xc6758a779bccee1ef0190dbe8292fdf44076795d",  # +96%/mo, $1.9M acct
+    "0x795cfd1b03eafc11c4ec958b8a94cfc9aa64a242",  # +91%/mo, $2.4M acct
+    "0x6a02aedceac5a6813d960e4dae1910d9c458e77c",  # +91%/mo, $570k acct
+    "0xe9bf81b432e5bf34995afae08747c530c8406c4d",  # +88%/mo, $797k acct
+    "0xfeedc4f156fd25c3fe9ff6402dbf3b99ebed3195",  # +85%/mo, $911k acct
+    "0x2fc3195efbf91ad90854bc3c02fe739895c23460",  # +84%/mo, $3M acct
+    "0xa11f83cbb07fd0327415bd424b986132e009f643",  # +79%/mo, $1.1M acct
+    "0x24a44aef48aeb27c7708dabfccda14b41fbf0ae1",  # +76%/mo, $728k acct
+    "0x1def62ffe2a62d65f649991d7f2199e046a30f72",  # +75%/mo, $999k acct
+    "0x27388d079cb5cf1ad50f60ab4c260356449bf92b",  # +74%/mo, $546k acct
+    "0x547c8d938b98cd17ab7c653a0d98cca80eabb876",  # +73%/mo, $2.6M acct
+    "0x18cd4597e06b7fe0a8cd33dda499121b3a145a8b",  # +72%/mo, $2.4M acct
+    "0x420a4ed7b6bb361da586868adec2f2bb9ab75e66",  # +70%/mo, $837k acct
+    "0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8",  # guy.neet — +70%/mo, $652k acct
+    "0xab961d7c42bbcd454a54b342bd191a8f090219e6",  # +69%/mo, $5M acct
+    "0xb58e1eb8256689e47f589ba6f6a28657d997bf2f",  # +69%/mo, $1.5M acct
+    "0xce5667f7194c4d9320acd28f1ee8b3d2adbdb27e",  # +64%/mo, $789k acct
+    "0x75ec3ba266176e733f1b1fdaa15052f5eff724b8",  # +64%/mo, $1.3M acct
+    "0xd210bd2ed3fafe7a4de5b079392823c81b0dc56a",  # +63%/mo, $1.4M acct
+    "0xb42943e70cb3e27ce45c8c6008b623f292b5dd04",  # +62%/mo, $872k acct
+    "0x888e000c78b8f1aada5b3c99f880794907b76d77",  # +60%/mo, $3.1M acct
+    "0xe091330c53b971ed4e886f902f18e8544a8d6705",  # +58%/mo, $1.1M acct
 ]
 
 # Map Hyperliquid coin names to Binance symbol format
