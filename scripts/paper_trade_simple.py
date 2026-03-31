@@ -1250,7 +1250,7 @@ class SmartMoneyFlowGenerator:
         ))
 
         # === Entry decision ===
-        min_score = 0.4
+        min_score = 0.55  # was 0.4 — too many weak entries at 0.41 (29% WR)
         min_agreeing = 3
 
         if abs(smart_score) < min_score:
@@ -1261,6 +1261,16 @@ class SmartMoneyFlowGenerator:
         if agreeing < min_agreeing:
             return hold_signal(
                 f"Only {agreeing}/{len(components)} components agree (need {min_agreeing})", htf_trend)
+
+        # Require at least one of whale or funding to be active (non-zero)
+        # AI analysis: all 5 consecutive losses had hl_whales=0.0 and funding=0.0
+        component_scores = {name: s for name, s, _ in components}
+        whale_score = abs(component_scores.get("hl_whales", 0.0))
+        funding_score = abs(component_scores.get("funding", 0.0))
+        if whale_score < 0.1 and funding_score < 0.1:
+            return hold_signal(
+                f"Smart money {smart_score:+.2f} but no whale/funding confirmation "
+                f"(whales={whale_score:.2f}, funding={funding_score:.2f})", htf_trend)
 
         # Check HTF not strongly opposing
         if smart_score > 0 and direction == "bearish" and strength > 0.3:
@@ -2223,6 +2233,15 @@ class SimplePaperTrader:
                     f"🔌 CIRCUIT BREAKER [{strat_name}]: {len(self.strategy_sl_timestamps[strat_name])} SLs in "
                     f"{self.circuit_breaker_window_hours}h — {strat_name} paused for {self.circuit_breaker_pause_minutes}min"
                 )
+
+        # 3.5. EARLY MOMENTUM CHECK — crash_momentum: close if no move after 30min
+        # AI analysis: 11/30 trades closed as stale/session-end with tiny PnL.
+        # Real winners move >0.3% within 30min; if it hasn't moved, exit early.
+        elif strategy.strategy_type == "crash_momentum":
+            mins_open = (datetime.now(timezone.utc) - position["entry_time"]).total_seconds() / 60
+            if 30 <= mins_open <= 35 and abs(pnl_pct) < 0.003:
+                should_exit = True
+                exit_reason = f"No momentum ({pnl_pct:.2%} after {mins_open:.0f}min, need ±0.3%)"
 
         # 4. TIME-BASED EXIT
         elif self._is_stale_position(position, pnl_pct, strategy):

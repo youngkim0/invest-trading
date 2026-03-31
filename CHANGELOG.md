@@ -1,5 +1,18 @@
 # Paper Trader Changelog
 
+## v6.9.1 — AI-driven fixes: smart_money + crash_momentum (2026-03-31)
+
+Two fixes based on Claude AI trade analysis patterns:
+
+### smart_money: tighten entry filters (29% WR → expect ~50%+)
+- **Score threshold 0.40 → 0.55**: All 5 consecutive AVAX losses entered at score ~0.41. Raising to 0.55 blocks weak signals.
+- **Require whale OR funding confirmation**: Every loss had `hl_whales=0.0` AND `funding=0.0`. Now requires at least one to be active (>0.1).
+
+### crash_momentum: early momentum exit
+- **30-min momentum check**: If price hasn't moved ±0.3% after 30 minutes, close early. Frees capital from stale trades (11/30 were stale/session-end exits with <$1 PnL).
+
+---
+
 ## v6.9 — AI-Powered Trading Intelligence (2026-03-31)
 
 Integrated Claude API for automated trade analysis, signal evaluation, and daily performance reviews.
