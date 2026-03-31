@@ -151,6 +151,22 @@ class LLMSettings(BaseSettings):
     request_timeout: int = 30
 
 
+class AISettings(BaseSettings):
+    """AI-powered trading analysis settings (Claude API)."""
+
+    model_config = SettingsConfigDict(env_prefix="AI_")
+
+    # Feature flags
+    post_trade_enabled: bool = True
+    signal_gate_enabled: bool = False
+    daily_review_enabled: bool = True
+
+    @property
+    def is_configured(self) -> bool:
+        """Check if AI features can run (needs Anthropic API key)."""
+        return True  # Key comes from ANTHROPIC_API_KEY env var
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -179,6 +195,7 @@ class Settings(BaseSettings):
     trading: TradingSettings = Field(default_factory=TradingSettings)
     rl: RLSettings = Field(default_factory=RLSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    ai: AISettings = Field(default_factory=AISettings)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

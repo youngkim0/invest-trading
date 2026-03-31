@@ -705,6 +705,25 @@ class LiveTrader(SimplePaperTrader):
                 .eq("position_id", position["position_id"])
                 .execute()
             )
+
+            # Fire-and-forget AI post-trade analysis
+            if self.ai_post_trade_enabled and self.ai_analyzer:
+                asyncio.create_task(self._ai_analyze_trade(
+                    position_id=position["position_id"],
+                    strategy_name=strategy_name,
+                    symbol=symbol,
+                    side=position.get("side", "unknown"),
+                    entry_price=position["entry_price"],
+                    exit_price=actual_price,
+                    entry_time=position["entry_time"].isoformat(),
+                    exit_time=datetime.now(timezone.utc).isoformat(),
+                    pnl=pnl,
+                    pnl_pct=roe,
+                    duration_seconds=int(duration),
+                    exit_reason=reason,
+                    entry_indicators=position.get("signal", {}).get("indicators", {}),
+                    strategy_stats=dict(stats),
+                ))
         except Exception as e:
             logger.error(f"Failed to update trade in DB: {e}")
 

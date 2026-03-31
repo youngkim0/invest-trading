@@ -343,6 +343,77 @@ class PerformanceRepository(SupabaseRepository):
         return result.data[0] if result.data else {}
 
 
+class TradeAnalysisRepository(SupabaseRepository):
+    """Repository for AI trade analyses."""
+
+    def __init__(self):
+        super().__init__("trade_analysis")
+
+    async def save_analysis(self, analysis: dict[str, Any]) -> dict[str, Any]:
+        """Save a trade analysis."""
+        result = self.table.insert(analysis).execute()
+        return result.data[0] if result.data else {}
+
+    async def get_analyses(
+        self,
+        start_time: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Get recent trade analyses."""
+        query = self.table.select("*")
+        if start_time:
+            query = query.gte("created_at", start_time)
+        query = query.order("created_at", desc=True).limit(limit)
+        result = query.execute()
+        return result.data or []
+
+    async def get_analysis_for_trade(self, position_id: str) -> dict[str, Any] | None:
+        """Get analysis for a specific trade."""
+        result = (
+            self.table.select("*")
+            .eq("position_id", position_id)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+
+class AIReviewRepository(SupabaseRepository):
+    """Repository for AI daily/weekly reviews."""
+
+    def __init__(self):
+        super().__init__("ai_reviews")
+
+    async def save_review(self, review: dict[str, Any]) -> dict[str, Any]:
+        """Save a review."""
+        result = self.table.insert(review).execute()
+        return result.data[0] if result.data else {}
+
+    async def get_latest_review(self, period: str = "daily") -> dict[str, Any] | None:
+        """Get the most recent review."""
+        result = (
+            self.table.select("*")
+            .eq("period", period)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    async def get_reviews(
+        self,
+        period: str | None = None,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
+        """Get recent reviews."""
+        query = self.table.select("*")
+        if period:
+            query = query.eq("period", period)
+        query = query.order("created_at", desc=True).limit(limit)
+        result = query.execute()
+        return result.data or []
+
+
 class SignalRepository(SupabaseRepository):
     """Repository for trading signals."""
 

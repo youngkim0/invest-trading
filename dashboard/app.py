@@ -1415,10 +1415,69 @@ def main():
                 st.error(f"Error generating AI insights: {e}")
 
     # ============================================
+    # SECTION 8: AI DAILY REVIEW & TRADE ANALYSIS (Claude)
+    # ============================================
+    st.markdown("---")
+    st.header("🧠 Claude AI Reviews")
+
+    try:
+        # Latest daily review
+        latest_review = client.table('ai_reviews').select('*').eq('period', 'daily').order('created_at', desc=True).limit(1).execute()
+        if latest_review.data:
+            review = latest_review.data[0]
+            review_date = review.get('review_date', 'Unknown')
+            st.subheader(f"📋 Daily Review — {review_date}")
+            st.markdown(review.get('summary', 'No summary available'))
+
+            # Show suggestions
+            suggestions = review.get('suggestions', [])
+            if isinstance(suggestions, str):
+                import json as json_mod
+                try:
+                    suggestions = json_mod.loads(suggestions)
+                except:
+                    suggestions = []
+            if suggestions:
+                st.markdown("**Top Suggestions:**")
+                for s in suggestions[:3]:
+                    if isinstance(s, dict):
+                        st.markdown(f"- {s.get('suggestion', str(s))}")
+                    else:
+                        st.markdown(f"- {s}")
+
+            st.caption(f"Model: {review.get('model_used', 'N/A')} | Tokens: {review.get('tokens_used', 0)}")
+        else:
+            st.info("No AI daily reviews yet. Run `python scripts/ai_daily_review.py` to generate one.")
+
+        # Recent per-trade analyses
+        st.subheader("🔍 Per-Trade AI Analysis")
+        trade_analyses = client.table('trade_analysis').select('*').order('created_at', desc=True).limit(10).execute()
+        if trade_analyses.data:
+            for ta in trade_analyses.data:
+                pos_id = ta.get('position_id', 'unknown')[:8]
+                created = ta.get('created_at', '')
+                if created:
+                    try:
+                        ct = datetime.fromisoformat(created.replace('Z', '+00:00'))
+                        ct_kst = ct + timedelta(hours=9)
+                        created = ct_kst.strftime('%m/%d %H:%M')
+                    except:
+                        pass
+                with st.expander(f"Trade {pos_id}... — {created}"):
+                    st.markdown(ta.get('analysis_text', 'No analysis'))
+                    if ta.get('suggestion'):
+                        st.markdown(f"**Suggestion:** {ta['suggestion']}")
+        else:
+            st.info("No per-trade AI analyses yet. They'll appear automatically after trades close (requires ANTHROPIC_API_KEY).")
+
+    except Exception as e:
+        st.warning(f"Could not load AI reviews: {e}")
+
+    # ============================================
     # FOOTER
     # ============================================
     st.markdown("---")
-    st.caption("🤖 AI Trading System v4.0 | Multi-Strategy | Signals every minute | Gemini 2.5 Flash AI | 🇰🇷 KST (UTC+9)")
+    st.caption("🤖 AI Trading System v4.0 | Multi-Strategy | Signals every minute | Gemini 2.5 Flash + Claude AI | 🇰🇷 KST (UTC+9)")
 
 
 if __name__ == "__main__":

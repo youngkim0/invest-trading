@@ -1,5 +1,40 @@
 # Paper Trader Changelog
 
+## v6.9 — AI-Powered Trading Intelligence (2026-03-31)
+
+Integrated Claude API for automated trade analysis, signal evaluation, and daily performance reviews.
+
+### New: Post-Trade AI Analysis
+- After every trade closes, Claude Haiku analyzes why it won/lost using entry indicators and strategy context
+- Results stored in `trade_analysis` table, displayed on dashboard under "Claude AI Reviews"
+- Fire-and-forget pattern — never blocks the trading loop
+- Works in both paper and live trading modes
+
+### New: Pre-Trade Signal Gate (opt-in)
+- Before executing a signal, Claude evaluates it against recent performance and portfolio state
+- Returns adjusted confidence (can only reduce, never inflate)
+- Falls back to original confidence on timeout/error (3s max)
+- Enable with `AI_SIGNAL_GATE_ENABLED=true` in .env (default: off)
+
+### New: Daily AI Review
+- Standalone script `scripts/ai_daily_review.py` generates comprehensive daily reviews via Claude Sonnet
+- Per-strategy breakdown, cross-strategy correlations, 3 ranked suggestions
+- Systemd timer runs at midnight UTC (`deploy/ai-review.timer`)
+- Reviews stored in `ai_reviews` table, displayed on dashboard
+
+### Infrastructure
+- `core/ai/` module: `claude_client.py` (API wrapper), `prompts.py` (templates), `models.py` (dataclasses)
+- New Supabase tables: `trade_analysis`, `ai_reviews`, `signals.ai_gate_result` column
+- Config: `AI_POST_TRADE_ENABLED`, `AI_SIGNAL_GATE_ENABLED`, `AI_DAILY_REVIEW_ENABLED`
+- Cost tracking: per-call token usage, daily cost estimate logged
+- Estimated cost: ~$13-54/month depending on trade volume
+
+### Dashboard
+- New "Claude AI Reviews" section showing latest daily review and per-trade analyses
+- Updated footer to reflect Claude AI integration
+
+---
+
 ## v6.8 — Smart Money Flow strategy (2026-03-30)
 
 New strategy tracking whale/smart money positions across multiple free data sources.

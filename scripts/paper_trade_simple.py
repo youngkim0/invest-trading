@@ -31,6 +31,7 @@ v6.3 — Reversal adaptation:
 """
 
 import asyncio
+import os
 import signal
 import sys
 from dataclasses import dataclass, field
@@ -56,6 +57,7 @@ from data.storage.supabase_client import (
     TradeLogRepository,
     SignalRepository,
     PerformanceRepository,
+    TradeAnalysisRepository,
 )
 
 
@@ -1488,6 +1490,25 @@ class SimplePaperTrader:
         self.trade_repo = TradeLogRepository()
         self.signal_repo = SignalRepository()
         self.perf_repo = PerformanceRepository()
+        self.analysis_repo = TradeAnalysisRepository()
+
+        # AI-powered analysis (Claude API)
+        self.ai_analyzer = None
+        self.ai_post_trade_enabled = os.environ.get("AI_POST_TRADE_ENABLED", "true").lower() == "true"
+        self.ai_signal_gate_enabled = os.environ.get("AI_SIGNAL_GATE_ENABLED", "false").lower() == "true"
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if api_key and (self.ai_post_trade_enabled or self.ai_signal_gate_enabled):
+            try:
+                from core.ai.claude_client import ClaudeAnalyzer
+                self.ai_analyzer = ClaudeAnalyzer(api_key=api_key)
+                features = []
+                if self.ai_post_trade_enabled:
+                    features.append("post-trade")
+                if self.ai_signal_gate_enabled:
+                    features.append("signal-gate")
+                logger.info(f"[AI] Claude analyzer initialized ({', '.join(features)})")
+            except Exception as e:
+                logger.warning(f"[AI] Could not initialize Claude analyzer: {e}")
 
         self.running = False
 
@@ -2062,6 +2083,57 @@ class SimplePaperTrader:
                 logger.info(f"   [{strategy.name}] {symbol}: Max concurrent positions reached ({open_count}/{strategy.max_concurrent_positions})")
                 return
 
+        # AI signal gate: evaluate signal before execution
+        if self.ai_signal_gate_enabled and self.ai_analyzer:
+            try:
+                direction = "long" if signal["signal"] in ["buy", "strong_buy"] else "short"
+                open_pos_list = [
+                    {
+                        "side": v.get("side", "unknown"),
+                        "symbol": self._parse_pos_key(k)[1],
+                        "quantity": v.get("quantity", 0),
+                        "entry_price": v.get("entry_price", 0),
+                        "unrealized_pnl": 0,
+                    }
+                    for k, v in self.positions.items()
+                ]
+
+                # Get recent trades for context
+                recent = await asyncio.to_thread(
+                    lambda: self.trade_repo.table.select("*")
+                    .eq("strategy_name", strategy.name)
+                    .order("entry_time", desc=True)
+                    .limit(20)
+                    .execute()
+                )
+                recent_trades = recent.data or []
+
+                evaluation = await self.ai_analyzer.evaluate_signal(
+                    strategy_name=strategy.name,
+                    symbol=symbol,
+                    direction=direction,
+                    confidence=signal["confidence"],
+                    signal_reasoning=signal.get("reasoning", ""),
+                    indicators=signal.get("indicators", {}),
+                    recent_trades=recent_trades,
+                    open_positions=open_pos_list,
+                )
+                if evaluation:
+                    signal["original_confidence"] = signal["confidence"]
+                    signal["confidence"] = evaluation.adjusted_confidence
+                    signal["ai_reasoning"] = evaluation.reasoning
+                    signal["ai_risk_flags"] = evaluation.risk_flags
+                    # Re-check confidence threshold after AI adjustment
+                    if signal["confidence"] < 0.65:
+                        logger.info(
+                            f"   [{strategy.name}] {symbol}: AI gate BLOCKED "
+                            f"({signal['original_confidence']:.2f} -> {signal['confidence']:.2f}): "
+                            f"{evaluation.reasoning}"
+                        )
+                        return
+            except Exception as e:
+                logger.debug(f"[AI] Signal gate error (proceeding with original): {e}")
+
         if signal["signal"] in ["buy", "strong_buy"]:
             await self._open_position(pos_key, symbol, "long", price, signal, strategy, atr_value, htf_trend)
         elif signal["signal"] in ["sell", "strong_sell"]:
@@ -2471,9 +2543,10 @@ class SimplePaperTrader:
         # Update trade in Supabase
         try:
             position_id = position["position_id"]
+            exit_time_str = datetime.now(timezone.utc).isoformat()
             exit_data = {
                 "exit_price": price,
-                "exit_time": datetime.now(timezone.utc).isoformat(),
+                "exit_time": exit_time_str,
                 "gross_pnl": pnl,
                 "net_pnl": pnl * 0.999,  # 0.1% fee estimate
                 "return_pct": pnl_pct * 100,
@@ -2485,6 +2558,25 @@ class SimplePaperTrader:
                 .eq("position_id", position_id)
                 .execute()
             )
+
+            # Fire-and-forget AI post-trade analysis
+            if self.ai_post_trade_enabled and self.ai_analyzer:
+                asyncio.create_task(self._ai_analyze_trade(
+                    position_id=position_id,
+                    strategy_name=strategy_name,
+                    symbol=symbol,
+                    side=position.get("side", "unknown"),
+                    entry_price=position["entry_price"],
+                    exit_price=price,
+                    entry_time=position["entry_time"].isoformat(),
+                    exit_time=exit_time_str,
+                    pnl=pnl,
+                    pnl_pct=pnl_pct * self.leverage * 100,  # ROE %
+                    duration_seconds=int(duration),
+                    exit_reason=reason,
+                    entry_indicators=position.get("signal", {}).get("indicators", {}),
+                    strategy_stats=dict(stats),
+                ))
         except Exception as e:
             logger.error(f"Failed to update trade: {e}")
 
@@ -2501,6 +2593,39 @@ class SimplePaperTrader:
                 await self._close_position(pos_key, price, "Session end", strategy)
             except Exception as e:
                 logger.error(f"Error closing {pos_key}: {e}")
+
+    async def _ai_analyze_trade(self, **kwargs):
+        """Run AI post-trade analysis in background. Errors are logged, never raised."""
+        try:
+            # Collect active positions snapshot for context
+            active_positions = [
+                {
+                    "strategy": self._parse_pos_key(k)[0],
+                    "symbol": self._parse_pos_key(k)[1],
+                    "side": v.get("side", "unknown"),
+                    "entry_price": v.get("entry_price", 0),
+                }
+                for k, v in self.positions.items()
+            ]
+
+            analysis = await self.ai_analyzer.analyze_trade(
+                active_positions=active_positions,
+                **kwargs,
+            )
+
+            if analysis:
+                await asyncio.to_thread(
+                    lambda: self.analysis_repo.table.insert({
+                        "position_id": analysis.position_id,
+                        "analysis_text": analysis.analysis_text,
+                        "patterns_identified": analysis.patterns_identified,
+                        "suggestion": analysis.suggestion,
+                        "model_used": analysis.model_used,
+                        "tokens_used": analysis.tokens_used,
+                    }).execute()
+                )
+        except Exception as e:
+            logger.debug(f"[AI] Post-trade analysis error: {e}")
 
     async def _save_signal(self, symbol: str, signal: dict, price: float,
                            strategy: StrategyConfig, timeframe: str = "1m"):

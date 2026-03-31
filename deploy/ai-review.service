@@ -1,0 +1,14 @@
+[Unit]
+Description=AI Daily Trading Review (Claude)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=paper
+Group=paper
+WorkingDirectory=/opt/paper-trader
+Environment=PYTHONPATH=/opt/paper-trader
+EnvironmentFile=/opt/paper-trader/.env
+ExecStart=/usr/bin/python3 scripts/ai_daily_review.py
+TimeoutStartSec=120
