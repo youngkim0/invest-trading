@@ -16,29 +16,49 @@ from loguru import logger
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 HYPERLIQUID_LEADERBOARD_URL = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
 
-# Top 20 whale wallets from Hyperliquid leaderboard (sorted by monthly PnL, Mar 2026)
-# Filtered to profitable traders with >$1M account value
+# Top 40 whale wallets from Hyperliquid leaderboard (sorted by allTime PnL, Mar 2026)
+# Filtered to profitable traders with >$500k account value
 WHALE_WALLETS = [
-    "0x162cc7c861ebd0c06b3d72319201150482518185",  # ABC — $41M alltime PnL
-    "0x87f9cd15f5050a9283b8896300f7c8cf69ece2cf",  # $53M alltime, $81M acct
-    "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00",  # $203M alltime, $76M acct
-    "0xfc667adba8d4837586078f4fdcdc29804337ca06",  # $18M alltime, $79M acct
-    "0xff4cd3826ecee12acd4329aada4a2d3419fc463c",  # $26M alltime, $55M acct
-    "0x023a3d058020fb76cca98f01b3c48c8938a22355",  # Auros — $64M alltime
-    "0xefd3ab65915e35105caa462442c9ecc1346728df",  # 2 frères — $7.5M alltime
-    "0xdcac85ecae7148886029c20e661d848a4de99ce2",  # $22M alltime
-    "0x31dea2516beee92135b96f464eeec3cf292a13f2",  # $16.5M alltime
-    "0x57dd78cd36e76e2011e8f6dc25cabbaba994494b",  # $17.8M acct
-    "0xe357fa9fecb084f0303ff341b0bc55c89f2bb5ce",  # $15.5M acct
-    "0xc926ddba8b7617dbc65712f20cf8e1b58b8598d3",  # $13.3M acct, +16.5% month
-    "0x85ecf584f25db6f146718b86d493e33c5af72052",  # $13.5M acct, +9.3% month
-    "0x3bcae23e8c380dab4732e9a159c0456f12d866f3",  # $12.3M acct, $11.9M alltime
-    "0x61ceef212ff4a86933c69fb6aca2fe35d8f2a62b",  # $12.8M acct, +35.3% month
-    "0x7839e2f2c375dd2935193f2736167514efff9916",  # $8.5M acct, +19.2% month
-    "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",  # $8.6M acct, +25.7% month
-    "0xeeb56331b6a250fe2dbc123f08bdb87aa9840464",  # $8.2M acct
-    "0xe4c6ae25959d7fc66cf2dd5965fb78c5e09c4048",  # $14M alltime PnL
-    "0xdf9ea6ec3b7109935ccb4fb267e15ac1fb077ab1",  # $9.4M alltime PnL
+    "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00",  # $82M acct, $203M alltime
+    "0x5b5d51203a0f9079f8aeb098a6523a13f298c060",  # $36M acct, $173M alltime
+    "0x7fdafde5cfb5465924316eced2d3715494c517d1",  # BobbyBigSize — $31M acct, $162M alltime
+    "0xfae95f601f3a25ace60d19dbb929f2a5c57e3571",  # thank you jefef — $7M acct, $150M alltime
+    "0xdfc24b077bc1425ad1dea75bcb6f8158e10df303",  # $463M acct, $138M alltime
+    "0x20c2d95a3dfdca9e9ad12794d5fa6fad99da44f5",  # $3.5M acct, $122M alltime
+    "0xb83de012dba672c76a7dbbbf3e459cb59d7d6e36",  # $48M acct, $119M alltime
+    "0x880ac484a1743862989a441d6d867238c7aa311c",  # x35767 — $28M acct, $114M alltime
+    "0xa312114b5795dff9b8db50474dd57701aa78ad1e",  # $12M acct, $93M alltime
+    "0x716bd8d3337972db99995dda5c4b34d954a61d95",  # $48M acct, $89M alltime
+    "0xd47587702a91731dc1089b5db0932cf820151a91",  # $44M acct, $86M alltime
+    "0x2e3d94f0562703b25c83308a05046ddaf9a8dd14",  # $1M acct, $85M alltime
+    "0x45d26f28196d226497130c4bac709d808fed4029",  # $25M acct, $82M alltime
+    "0xbdfa4f4492dd7b7cf211209c4791af8d52bf5c50",  # $38M acct, $71M alltime
+    "0x023a3d058020fb76cca98f01b3c48c8938a22355",  # Auros — $30M acct, $63M alltime
+    "0x8e096995c3e4a3f0bc5b3ea1cba94de2aa4d70c9",  # $7.8M acct, $60M alltime
+    "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7",  # $5M acct, $60M alltime
+    "0x35d1151ef1aab579cbb3109e69fa82f94ff5acb1",  # $19M acct, $59M alltime
+    "0x493db0ed7514c975e9abcc110bd40c473b6763e3",  # $49M acct, $59M alltime
+    "0x8af700ba841f30e0a3fcb0ee4c4a9d223e1efa05",  # $17M acct, $58M alltime
+    "0xcfdb74a8c080bb7b4360ed6fe21f895c653efff4",  # $34M acct, $56M alltime
+    "0x4e14fc11f58b64740e66e4b1aa188a4b007c0eab",  # $55M acct, $53M alltime
+    "0x87f9cd15f5050a9283b8896300f7c8cf69ece2cf",  # $80M acct, $52M alltime
+    "0x0d446c3372a9ba9cddef0eef7a1afab6dc0e8c0b",  # $52M acct, $52M alltime
+    "0x13c50dcdee4bbcba71baf578b345cdd35c7928be",  # $35M acct, $47M alltime
+    "0x010461c14e146ac35fe42271bdc1134ee31c703a",  # $134M acct, $46M alltime
+    "0x939f95036d2e7b6d7419ec072bf9d967352204d2",  # $39M acct, $46M alltime
+    "0x7dacca323e44f168494c779bb5e7483c468ef410",  # $31M acct, $46M alltime
+    "0xcac19662ec88d23fa1c81ac0e8570b0cf2ff26b3",  # $26M acct, $46M alltime
+    "0x03b9a189e2480d1e4c3007080b29f362282130fa",  # $38M acct, $43M alltime
+    "0x162cc7c861ebd0c06b3d72319201150482518185",  # ABC — $40M acct, $41M alltime
+    "0x856c35038594767646266bc7fd68dc26480e910d",  # $33M acct, $38M alltime
+    "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7",  # $14M acct, $38M alltime
+    "0x31ca8395cf837de08b24da3f660e77761dfb974b",  # $135M acct, $37M alltime
+    "0x418aa6bf98a2b2bc93779f810330d88cde488888",  # $10M acct, $37M alltime
+    "0xc59498175d6d317642aeb97f895a7ce1aa992191",  # $4.5M acct, $34M alltime
+    "0x82d8dc80190e6bc1d92b048f9fc7e85e5e1e32ff",  # $22M acct, $33M alltime
+    "0x1419e75330c71ce463102e6a1eb62fe80b412d5f",  # $29M acct, $32M alltime
+    "0xd4c1f7e8d876c4749228d515473d36f919583d1d",  # $8.7M acct, $30M alltime
+    "0xb0a55f13d22f66e6d495ac98113841b2326e9540",  # $30M acct, $30M alltime
 ]
 
 # Map Hyperliquid coin names to Binance symbol format

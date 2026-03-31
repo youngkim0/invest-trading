@@ -178,7 +178,7 @@ STRATEGY_SOURCE_MAP = {
 # All known strategy names (for filtering)
 ALL_STRATEGY_NAMES = [
     "funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
-    "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum",
+    "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum", "smart_money",
     "liquidation_cascade", "panic_momentum", "breakdown_reversal",
     "oi_momentum", "funding_sentiment", "volatility_squeeze", "taker_flow",
     "agreement_classic", "agreement_mtf", "momentum", "paper_technical",
