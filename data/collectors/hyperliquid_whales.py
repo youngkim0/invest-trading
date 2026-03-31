@@ -79,15 +79,88 @@ TRACKED_COINS = set(COIN_TO_SYMBOL.keys())
 class HyperliquidWhaleTracker:
     """Track positions of top Hyperliquid traders for smart money signals."""
 
+    # Leaderboard refresh config
+    REFRESH_DAY = 0  # Monday (0=Mon, 6=Sun)
+    REFRESH_HOUR = 0  # 00:00 UTC
+    MIN_MONTHLY_ROI = 0.05  # >5% monthly ROI
+    MIN_ACCOUNT_VALUE = 500_000  # >$500k account
+    MAX_WALLETS = 40
+
     def __init__(self, wallets: list[str] | None = None):
-        self.wallets = wallets or WHALE_WALLETS
+        self.wallets = wallets or list(WHALE_WALLETS)  # mutable copy
         self.client = httpx.AsyncClient(timeout=15.0)
         self._cache: dict[str, Any] = {}
         self._cache_time: datetime | None = None
         self._cache_ttl_seconds = 120  # Cache whale data for 2 minutes
+        self._last_leaderboard_refresh: datetime | None = None
 
     async def close(self):
         await self.client.aclose()
+
+    async def maybe_refresh_wallets(self):
+        """Refresh wallet list from leaderboard weekly (Monday 00:00 UTC).
+
+        Also refreshes on first call (startup).
+        """
+        now = datetime.now(timezone.utc)
+
+        # First call: always refresh
+        if self._last_leaderboard_refresh is None:
+            await self._refresh_from_leaderboard()
+            return
+
+        # Check if it's Monday and we haven't refreshed today
+        if (now.weekday() == self.REFRESH_DAY
+                and now.hour >= self.REFRESH_HOUR
+                and (now - self._last_leaderboard_refresh).total_seconds() > 86400):
+            await self._refresh_from_leaderboard()
+
+    async def _refresh_from_leaderboard(self):
+        """Fetch leaderboard and update wallet list sorted by 30D ROI%."""
+        try:
+            response = await self.client.get(HYPERLIQUID_LEADERBOARD_URL, timeout=30.0)
+            response.raise_for_status()
+            data = response.json()
+            rows = data.get("leaderboardRows", [])
+
+            candidates = []
+            for r in rows:
+                addr = r.get("ethAddress", "")
+                acct_val = float(r.get("accountValue", 0))
+                perfs = {p[0]: p[1] for p in r.get("windowPerformances", [])}
+
+                month_perf = perfs.get("month", {})
+                month_roi = float(month_perf.get("roi", 0))
+                alltime_pnl = float(perfs.get("allTime", {}).get("pnl", 0))
+
+                if (month_roi > self.MIN_MONTHLY_ROI
+                        and acct_val > self.MIN_ACCOUNT_VALUE
+                        and alltime_pnl > 0):
+                    candidates.append((addr, month_roi, acct_val))
+
+            # Sort by 30D ROI% descending, take top N
+            candidates.sort(key=lambda x: -x[1])
+            new_wallets = [addr for addr, _, _ in candidates[:self.MAX_WALLETS]]
+
+            if new_wallets:
+                old_set = set(self.wallets)
+                new_set = set(new_wallets)
+                added = len(new_set - old_set)
+                removed = len(old_set - new_set)
+                self.wallets = new_wallets
+                logger.info(
+                    f"🐋 Whale leaderboard refreshed: {len(new_wallets)} wallets "
+                    f"(+{added} new, -{removed} dropped, "
+                    f"top ROI: {candidates[0][1]*100:.0f}%/mo)"
+                )
+            else:
+                logger.warning("🐋 Leaderboard refresh returned 0 candidates, keeping existing list")
+
+            self._last_leaderboard_refresh = datetime.now(timezone.utc)
+
+        except Exception as e:
+            logger.warning(f"🐋 Leaderboard refresh failed (keeping existing list): {e}")
+            self._last_leaderboard_refresh = datetime.now(timezone.utc)
 
     async def _get_wallet_positions(self, address: str) -> list[dict]:
         """Get open positions for a single wallet."""
@@ -130,6 +203,9 @@ class HyperliquidWhaleTracker:
                 long_value: float, short_value: float,
             }}
         """
+        # Auto-refresh wallet list (weekly on Monday, or on first call)
+        await self.maybe_refresh_wallets()
+
         # Check cache
         now = datetime.now(timezone.utc)
         if (self._cache_time and self._cache
