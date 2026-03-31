@@ -1400,8 +1400,29 @@ def main():
         st.subheader("🔍 Per-Trade AI Analysis")
         trade_analyses = client.table('trade_analysis').select('*').order('created_at', desc=True).limit(10).execute()
         if trade_analyses.data:
+            # Look up trade details for each analysis
+            pos_ids = [ta.get('position_id') for ta in trade_analyses.data if ta.get('position_id')]
+            trade_lookup = {}
+            if pos_ids:
+                for pid in pos_ids:
+                    try:
+                        t = client.table('trade_logs').select('strategy_name,symbol,side,net_pnl').eq('position_id', pid).limit(1).execute()
+                        if t.data:
+                            trade_lookup[pid] = t.data[0]
+                    except:
+                        pass
+
             for ta in trade_analyses.data:
-                pos_id = ta.get('position_id', 'unknown')[:8]
+                pos_id = ta.get('position_id', '')
+                trade = trade_lookup.get(pos_id, {})
+                strategy = trade.get('strategy_name', 'unknown')
+                symbol = trade.get('symbol', '???')
+                side = (trade.get('side') or '').upper()
+                pnl = float(trade.get('net_pnl') or 0)
+                pnl_str = f"${pnl:+.2f}"
+                emoji = "✅" if pnl > 0 else "❌"
+                side_emoji = "📈" if side == "BUY" else "📉" if side == "SELL" else ""
+
                 created = ta.get('created_at', '')
                 if created:
                     try:
@@ -1410,7 +1431,9 @@ def main():
                         created = ct_kst.strftime('%m/%d %H:%M')
                     except:
                         pass
-                with st.expander(f"Trade {pos_id}... — {created}"):
+
+                label = f"{emoji} {strategy} | {side_emoji} {symbol} | {pnl_str} — {created}"
+                with st.expander(label):
                     st.markdown(ta.get('analysis_text', 'No analysis'))
                     if ta.get('suggestion'):
                         st.markdown(f"**Suggestion:** {ta['suggestion']}")
