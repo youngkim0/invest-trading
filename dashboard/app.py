@@ -1367,6 +1367,7 @@ def main():
     st.header("🧠 Claude AI Reviews")
 
     try:
+        client = get_supabase()
         # Latest daily review
         latest_review = client.table('ai_reviews').select('*').eq('period', 'daily').order('created_at', desc=True).limit(1).execute()
         if latest_review.data:
