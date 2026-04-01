@@ -434,8 +434,8 @@ class TrendBreakoutGenerator:
         required_vol_ratio = 1.5
         if direction == "neutral":
             return hold_signal("Neutral-mode breakouts disabled (false break rate too high)", htf_trend)
-        elif strength < 0.1:
-            return hold_signal(f"HTF {direction} too weak (str={strength:.2f})", htf_trend)
+        elif strength < 0.3:  # was 0.1 — 17% WR when entering weak trends. Require real trend confirmation.
+            return hold_signal(f"HTF {direction} too weak (str={strength:.2f}, need 0.3)", htf_trend)
         else:
             reasons.append(f"HTF {direction} str={strength:.2f}")
 
@@ -2864,9 +2864,9 @@ async def main():
         "trend_pullback": base_capital * 0.75,         # $750 — DISABLED by default (23% WR, -$80/week)
         "order_flow": base_capital * 0.5,              # $500 — uses taker ratio + L/S data (-$250 to smart_money)
         "regime_short": base_capital * 0.4,            # $400 — multi-condition confluence short (pre-crash)
-        "failed_breakout_short": base_capital * 0.6,   # $600 — price action exhaustion short, +$250 from pullback
+        "failed_breakout_short": base_capital * 0.85,  # $850 — best WR (60%), was $600. Rebalanced from crash_momentum
         "refined_liq_cascade": base_capital * 0.4,     # $400 — derivatives-based, rare events (pre-crash)
-        "crash_momentum": base_capital * 0.75,         # $750 — best performer (+$40/week), +$250 from pullback
+        "crash_momentum": base_capital * 0.5,          # $500 — was $750. 52% WR but SL losses outweigh wins. $250→failed_bkout
         "smart_money": base_capital * 0.5,              # $500 — whale/smart money composite signal (new v6.8)
     }
 

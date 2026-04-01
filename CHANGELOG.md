@@ -1,5 +1,18 @@
 # Paper Trader Changelog
 
+## v6.9.2 — Capital rebalance + trend_breakout filter (2026-04-01)
+
+Based on AI daily review analysis (Mar 30-31):
+
+### Capital reallocation
+- **crash_momentum $750 → $500**: 52% WR but SL losses (-$6 each) outweigh early-exit wins ($0.30-$1). Reduce exposure.
+- **failed_breakout_short $600 → $850**: Best strategy (60% WR, +$17/day) was under-capitalized. Total stays $4,650.
+
+### trend_breakout: HTF strength 0.1 → 0.3
+- 17% WR on 6 trades — entering breakouts when trend barely exists. Requiring 0.3 strength blocks noise entries while keeping real trends.
+
+---
+
 ## v6.9.1 — AI-driven fixes: smart_money + crash_momentum (2026-03-31)
 
 Two fixes based on Claude AI trade analysis patterns:
