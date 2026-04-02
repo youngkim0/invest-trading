@@ -46,7 +46,8 @@ async def run_daily_review(review_date: str | None = None):
     review_repo = AIReviewRepository()
 
     if review_date is None:
-        review_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # Review yesterday (at midnight UTC, today has no trades yet)
+        review_date = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
 
     # Date ranges
     day_start = f"{review_date}T00:00:00+00:00"
