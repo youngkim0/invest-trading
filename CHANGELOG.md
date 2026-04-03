@@ -1,5 +1,29 @@
 # Paper Trader Changelog
 
+## v6.9.3 — 4h uptrend confirmation for long strategies (2026-04-03)
+
+**Problem**: trend_breakout lost -$64 in 7 days (27% WR, 30 trades) despite all signals being "correct" on 1h timeframe. Root cause: 1h SMA20/SMA50 reads "bullish" on 2-3 day bear market rallies, and breakout buys into those bounces. Even htf_str=0.93+ trades were stopping out.
+
+### Fix: `check_4h_uptrend()` — higher timeframe confirmation
+- Long signals from trend_breakout and order_flow now require **4h structural uptrend** (2 of 3 confirmations):
+  1. Price above 4h SMA50 (sustained uptrend ~8 days)
+  2. 4h SMA20 slope positive (trend direction)
+  3. Higher lows on 4h (last 10 vs previous 10 candles — trend structure)
+- This is NOT a regime gate or inverse of bearish check — it's structural trend confirmation
+- Mirrors how short strategies already use `check_bearish_regime(df_4h)` for validation
+- When market turns bullish again, 4h structure naturally confirms and longs fire normally
+
+### Current 4h status (at deploy)
+- BTC: REJECTED (1/3) — below SMA50, lower lows
+- ETH: CONFIRMED (3/3) — above SMA50, rising, higher lows
+- SOL: REJECTED (0/3) — below SMA50, falling, lower lows
+
+### Estimated impact
+- Would have blocked most of the -$64 in breakout losses (bear market rally entries)
+- Strategies stay fully intact — fire automatically when 4h confirms uptrend
+
+---
+
 ## v6.9.2 — Capital rebalance + trend_breakout filter (2026-04-01)
 
 Based on AI daily review analysis (Mar 30-31):

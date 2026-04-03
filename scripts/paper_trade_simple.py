@@ -302,6 +302,57 @@ def check_bearish_regime(df_4h: pd.DataFrame) -> dict:
     }
 
 
+def check_4h_uptrend(df_4h: pd.DataFrame) -> dict:
+    """Check if 4h structure confirms a genuine uptrend for long entries.
+
+    The 1h HTF trend flips 'bullish' on 2-3 day bear market rallies.
+    This 4h check filters those out by requiring structural uptrend evidence.
+
+    Requires at least 2 of 3 confirmations:
+    1. Price above 4h SMA50 — sustained uptrend (~8 days)
+    2. 4h SMA20 slope positive (last 3 candles) — trend direction
+    3. Higher lows: last 10-candle low > previous 10-candle low — trend structure
+    """
+    if df_4h is None or len(df_4h) < 50:
+        return {"confirmed": False, "reason": "Insufficient 4h data for uptrend check",
+                "confirmations": 0}
+
+    prices = df_4h["close"]
+    lows = df_4h["low"]
+    current_price = float(prices.iloc[-1])
+    confirmations = []
+
+    # === Confirmation 1: Price above 4h SMA50 ===
+    sma50 = prices.rolling(50).mean()
+    sma50_val = float(sma50.iloc[-1])
+    if current_price > sma50_val:
+        confirmations.append(f"price above 4h SMA50 ({current_price:.2f} > {sma50_val:.2f})")
+
+    # === Confirmation 2: 4h SMA20 slope positive (last 3 candles) ===
+    if len(df_4h) >= 23:
+        sma20 = prices.rolling(20).mean()
+        sma20_now = float(sma20.iloc[-1])
+        sma20_3ago = float(sma20.iloc[-3])
+        sma20_slope = (sma20_now - sma20_3ago) / sma20_3ago if sma20_3ago > 0 else 0
+        if sma20_slope > 0:
+            confirmations.append(f"4h SMA20 slope positive ({sma20_slope*100:+.3f}%)")
+
+    # === Confirmation 3: Higher lows (last 10 candles vs previous 10) ===
+    if len(lows) >= 20:
+        recent_low = float(lows.iloc[-10:].min())
+        prev_low = float(lows.iloc[-20:-10].min())
+        if recent_low > prev_low:
+            confirmations.append(f"higher lows ({recent_low:.2f} > {prev_low:.2f})")
+
+    confirmed = len(confirmations) >= 2
+    if confirmed:
+        reason = "4h uptrend confirmed: " + ", ".join(confirmations)
+    else:
+        reason = f"4h uptrend NOT confirmed ({len(confirmations)}/2 needed): " + (", ".join(confirmations) if confirmations else "no bullish signals")
+
+    return {"confirmed": confirmed, "reason": reason, "confirmations": len(confirmations)}
+
+
 # =============================================================================
 # Strategy 1: Funding Mean Reversion (LOW frequency, 0-2 trades/day)
 # =============================================================================
@@ -421,7 +472,7 @@ class TrendBreakoutGenerator:
     """
 
     def generate_signal(self, df_15m: pd.DataFrame, htf_trend: dict,
-                        **kwargs) -> dict:
+                        regime_4h: dict = None, **kwargs) -> dict:
         """Generate signal from trend-aligned or range breakouts on 15m."""
         if df_15m is None or len(df_15m) < 30:
             return hold_signal("Insufficient 15m data", htf_trend)
@@ -429,6 +480,11 @@ class TrendBreakoutGenerator:
         direction = htf_trend.get("direction", "neutral")
         strength = htf_trend.get("strength", 0.0)
         reasons = []
+
+        # === CONDITION 0: 4h uptrend confirmation for longs ===
+        # 1h HTF can read "bullish" on bear market rallies. 4h filters those out.
+        if direction == "bullish" and regime_4h and not regime_4h.get("confirmed", True):
+            return hold_signal(f"4h uptrend not confirmed — {regime_4h.get('reason', 'bear market rally')}", htf_trend)
 
         # === CONDITION 1: HTF must be trending (neutral/ranging breakouts disabled — 35% WR, too many false breaks) ===
         required_vol_ratio = 1.5
@@ -610,7 +666,7 @@ class OrderFlowGenerator:
     """
 
     def generate_signal(self, df_15m: pd.DataFrame, htf_trend: dict,
-                        derivatives: dict = None, **kwargs) -> dict:
+                        derivatives: dict = None, regime_4h: dict = None, **kwargs) -> dict:
         """Generate signal from order flow + positioning data."""
         if df_15m is None or len(df_15m) < 20:
             return hold_signal("Insufficient 15m data", htf_trend)
@@ -620,6 +676,10 @@ class OrderFlowGenerator:
         direction = htf_trend.get("direction", "neutral")
         strength = htf_trend.get("strength", 0.0)
         reasons = []
+
+        # === 4h uptrend confirmation for longs ===
+        if direction == "bullish" and regime_4h and not regime_4h.get("confirmed", True):
+            return hold_signal(f"4h uptrend not confirmed — {regime_4h.get('reason', 'bear market rally')}", htf_trend)
 
         # === CONDITION 1: HTF trend established (buys: 0.1, sells: 0.3) ===
         min_strength = 0.1 if direction == "bullish" else 0.3
@@ -1891,17 +1951,25 @@ class SimplePaperTrader:
                     derivatives=market_data.get("derivatives"),
                 )
             elif strategy.strategy_type == "breakout":
+                # 4h uptrend check prevents buying breakouts during bear market rallies
+                df_4h = market_data.get("4h", pd.DataFrame())
+                uptrend_4h = check_4h_uptrend(df_4h) if not df_4h.empty else None
                 signal_result = strategy.generator.generate_signal(
                     market_data.get("15m", pd.DataFrame()), htf_trend,
+                    regime_4h=uptrend_4h,
                 )
             elif strategy.strategy_type == "pullback":
                 signal_result = strategy.generator.generate_signal(
                     market_data.get("15m", pd.DataFrame()), htf_trend,
                 )
             elif strategy.strategy_type == "flow":
+                # 4h uptrend check prevents buying flow signals during bear market rallies
+                df_4h = market_data.get("4h", pd.DataFrame())
+                uptrend_4h = check_4h_uptrend(df_4h) if not df_4h.empty else None
                 signal_result = strategy.generator.generate_signal(
                     market_data.get("15m", pd.DataFrame()), htf_trend,
                     derivatives=market_data.get("derivatives"),
+                    regime_4h=uptrend_4h,
                 )
             elif strategy.strategy_type in ("regime_short", "failed_bkout_short", "refined_cascade"):
                 # Compute regime gate from 4h data (shared across short strategies)
