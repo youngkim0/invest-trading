@@ -1649,7 +1649,7 @@ class SimplePaperTrader:
         # === v7.0 Portfolio-level risk controls ===
         # Daily loss limit: stop opening new trades after 5% daily drawdown
         self.daily_pnl = 0.0
-        self.daily_loss_limit_pct = 0.05  # 5% of initial capital
+        self.daily_loss_limit_pct = 0.03  # 3% of initial capital (v7.0.3: was 5%, tightened after -$146 day)
         self.daily_loss_halt = False
         self.daily_pnl_reset_date = ""
 
@@ -3631,6 +3631,7 @@ async def main():
                 capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="15m",
                 trailing_enabled=False,
+                max_concurrent_positions=1,  # v7.0.3: 1 at a time — prevents correlated blowups (2 breakout SLs = $124 loss)
             ))
         elif name == "trend_pullback":
             strategy_configs.append(StrategyConfig(
@@ -3661,6 +3662,7 @@ async def main():
                 capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="15m",
                 trailing_enabled=False,
+                max_concurrent_positions=1,  # v7.0.3: 1 at a time — same as breakout
             ))
         elif name == "regime_short":
             strategy_configs.append(StrategyConfig(
@@ -3740,7 +3742,7 @@ async def main():
                 capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="15m",
                 trailing_enabled=True,
-                max_concurrent_positions=2,  # Crypto correlated
+                max_concurrent_positions=1,  # v7.0.3: 1 at a time
             ))
 
     # Apply adaptive sizing if enabled
