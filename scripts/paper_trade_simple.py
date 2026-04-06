@@ -3030,21 +3030,32 @@ async def main():
     base_capital = args.capital
 
     # Capital allocation: more to proven strategies, less to new/experimental
-    # Short strategies sized at 50-70% of long equivalents (research: asymmetric risk)
-    # v6.9.4: Capital rebalanced based on 30-day data.
-    # trend_breakout (+$230) is #1 earner — restore to $1250.
-    # failed_breakout_short (-$13) is net loser — reduce to $400.
-    # crash_momentum (+$9 on 131 trades) — reduce to $400, tighter entry compensates.
+    # v7.0.1: Capital allocation based on 30-day PnL/hr efficiency analysis.
+    # 79% of capital was idle. Three strategies had ZERO trades ($1,300 dead).
+    # Principle: give capital to strategies that USE it profitably.
+    #
+    # PnL/hr efficiency ranking:
+    #   trend_breakout  $0.83/hr (38% utilization, +$230/30d) — BEST
+    #   order_flow      $0.54/hr (17% utilization, +$61/30d)
+    #   smart_money     $0.32/hr (2.5% utilization, +$6/30d)
+    #   crash_momentum  $0.02/hr (69% utilization, +$9/30d) — high activity, zero edge
+    #   funding_reversion    0 trades in 30 days
+    #   regime_short         0 trades in 30 days
+    #   refined_liq_cascade  0 trades in 30 days
+    #   failed_breakout_short -$0.12/hr — net loser
+    #
+    # Note: The shared capital pool (_get_available_capital) allows strategies to
+    # use idle capital from other strategies. So these are MAX caps, not reservations.
     capital_allocation = {
-        "funding_reversion": base_capital * 0.5,       # $500 — rare-event, mostly idle
-        "trend_breakout": base_capital * 1.25,         # $1250 — #1 earner (+$230/30d), restored
+        "funding_reversion": base_capital * 0.2,       # $200 — 0 trades/30d, keep minimal for rare events
+        "trend_breakout": base_capital * 2.5,          # $2500 — #1 earner, $0.83/hr, gets the most
         "trend_pullback": base_capital * 0.75,         # $750 — DISABLED by default
-        "order_flow": base_capital * 0.5,              # $500 — #2 earner (+$61/30d)
-        "regime_short": base_capital * 0.4,            # $400 — multi-condition confluence short
-        "failed_breakout_short": base_capital * 0.4,   # $400 — was $850, net loser (-$13/30d)
-        "refined_liq_cascade": base_capital * 0.4,     # $400 — derivatives-based, rare events
-        "crash_momentum": base_capital * 0.4,          # $400 — was $500, tighter entry (0.5% below SMA)
-        "smart_money": base_capital * 0.5,             # $500 — whale/smart money composite
+        "order_flow": base_capital * 1.0,              # $1000 — #2 earner, $0.54/hr
+        "regime_short": base_capital * 0.2,            # $200 — 0 trades/30d, keep minimal
+        "failed_breakout_short": base_capital * 0.3,   # $300 — net loser, minimum viable
+        "refined_liq_cascade": base_capital * 0.2,     # $200 — 0 trades/30d, keep minimal
+        "crash_momentum": base_capital * 0.3,          # $300 — $0.02/hr, barely profitable
+        "smart_money": base_capital * 0.8,             # $800 — decent edge, was undercapitalized
     }
 
     strategy_configs = []

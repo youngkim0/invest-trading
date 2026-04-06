@@ -1,5 +1,30 @@
 # Paper Trader Changelog
 
+## v7.0.1 — Capital efficiency overhaul + relaxed portfolio limits (2026-04-06)
+
+**Problem**: 79% of capital was idle. Three strategies (funding_reversion, regime_short, refined_liq_cascade) had ZERO trades in 30 days = $1,300 dead capital. Meanwhile trend_breakout (#1 earner at $0.83/hr) was capped at $1,250.
+
+### Capital reallocation (follow the PnL/hr)
+- **trend_breakout $1,250 → $2,500**: #1 earner, $0.83/hr in market, 38% utilization. Gets 45% of capital.
+- **order_flow $500 → $1,000**: #2 earner, $0.54/hr in market.
+- **smart_money $500 → $800**: Decent edge, was undercapitalized at 2.5% utilization.
+- **Dead strategies $1,300 → $600**: funding_reversion/regime_short/refined_liq_cascade — 0 trades each, reduced to $200 minimum.
+- **Losers cut**: failed_breakout_short $400→$300, crash_momentum $400→$300.
+- Top 2 earners now get 64% of capital (was 40%).
+
+### Portfolio limits relaxed (3-long cap killed best week)
+- **Max longs 3 → 6**: Best week had 8 concurrent longs. Cap at 3 blocked $248 of profit.
+- **Max shorts 3 → 4**: Shorts fire less frequently.
+- **Correlation group 2 → 3**: Allow full group in strong trends.
+- **Portfolio heat 8% → 12%**: 6 positions × 2% Kelly risk each = 12% needed.
+
+### Projected impact
+- trend_breakout at $2,500 × $0.83/hr × 38% utilization × 720h = ~$227-$454/month
+- Plus order_flow and smart_money contributions
+- Target: 5-10% monthly ($275-$550 on $5,500 total)
+
+---
+
 ## v7.0 — Portfolio Risk Controls + Kelly Sizing (2026-04-06)
 
 **Problem**: Bot had zero portfolio-level risk management. 7 strategies × 6 correlated coins = up to 42 concurrent positions with no aggregate limit. Position sizing boosted risk on win streaks and strong regimes (exactly when drawdowns compound). 30-day result: +$64 on 494 trades — profitable strategies undermined by uncontrolled risk.
