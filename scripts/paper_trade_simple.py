@@ -1862,6 +1862,13 @@ class SimplePaperTrader:
                 self._ai_regime = result
                 new_regime = result.get("regime", "unknown")
                 new_bias = result.get("bias", "neutral")
+                self._log_ai_action("regime_detection", {
+                    "regime": new_regime, "bias": new_bias,
+                    "confidence": result.get("confidence", 0),
+                    "risk_level": result.get("risk_level", "?"),
+                    "reasoning": result.get("reasoning", "")[:100],
+                    "shifted": old_regime != new_regime or old_bias != new_bias,
+                })
 
                 # Regime SHIFT detected — take immediate action
                 if old_regime != new_regime or old_bias != new_bias:
@@ -1905,6 +1912,7 @@ class SimplePaperTrader:
             if confidence >= 0.8 and pnl_pct < -0.005 and risk_level == "high":
                 # High confidence regime shift + position losing → close
                 logger.info(f"🧠 [Regime Shift] Closing {pos_key}: {conflicting_side} in loss ({pnl_pct:.2%}) vs {bias} regime (conf={confidence})")
+                self._log_ai_action("regime_shift_close", {"position": pos_key, "side": conflicting_side, "pnl_pct": f"{pnl_pct:.2%}", "regime_bias": bias})
                 current_price = position.get("entry_price", 0) * (1 + pnl_pct) if position.get("side") == "long" else position.get("entry_price", 0) * (1 - pnl_pct)
                 await self._close_position(pos_key, current_price, f"AI regime shift: {bias} bias (conf={confidence:.0%})", strategy)
                 actions_taken += 1
@@ -1949,6 +1957,11 @@ class SimplePaperTrader:
                 for strat, rule in rules.items():
                     if rule.get("notes"):
                         logger.info(f"   {strat}: {rule['notes']}")
+                self._log_ai_action("pattern_learning", {
+                    "strategies": len(rules),
+                    "rules": {k: v.get("notes", "") for k, v in rules.items()},
+                    "trade_count": len(trades),
+                })
         except Exception as e:
             logger.warning(f"🧠 [AI Pattern] Error: {e}")
 
@@ -1993,6 +2006,10 @@ class SimplePaperTrader:
                     changes.append(f"TP {old}→{s.tp_atr_mult}x ATR")
                 if changes:
                     logger.info(f"🔧 [AI Tuning] {s.name}: {', '.join(changes)} — {rec.get('notes', '')}")
+                    self._log_ai_action("parameter_tuning", {
+                        "strategy": s.name, "changes": changes,
+                        "notes": rec.get("notes", ""),
+                    })
         except Exception as e:
             logger.warning(f"🔧 [AI Tuning] Error: {e}")
 
@@ -2026,6 +2043,7 @@ class SimplePaperTrader:
             if recommendation and recommendation.get("avoid"):
                 self._ai_avoid_symbols = set(recommendation["avoid"])
                 logger.info(f"🎯 [AI Symbols] Avoiding: {self._ai_avoid_symbols}")
+                self._log_ai_action("symbol_selection", {"avoid": list(self._ai_avoid_symbols), "reasoning": recommendation.get("reasoning", "")})
             else:
                 self._ai_avoid_symbols = set()
         except Exception as e:
@@ -2066,6 +2084,7 @@ class SimplePaperTrader:
 
             if action == "close_now":
                 logger.info(f"🧠 [AI Exit] {pos_key}: CLOSE — {reasoning}")
+                self._log_ai_action("exit_close", {"position": pos_key, "reasoning": reasoning})
                 return f"AI exit: {reasoning}"
             elif action == "tighten_stop":
                 # Move SL to breakeven
@@ -2080,6 +2099,65 @@ class SimplePaperTrader:
         except Exception as e:
             logger.warning(f"🧠 [AI Exit] Error for {pos_key}: {e}")
             return None
+
+    def _log_ai_action(self, action_type: str, details: dict):
+        """Record an AI action to the buffer. Flushed to DB every 15 min."""
+        self._ai_action_log.append({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "action": action_type,
+            **details,
+        })
+
+    async def _flush_ai_action_log(self):
+        """Save buffered AI actions to ai_reviews table and clear buffer."""
+        if not self._ai_action_log:
+            return
+        try:
+            import json
+            # Build summary of all actions in this period
+            actions = self._ai_action_log.copy()
+            self._ai_action_log.clear()
+
+            # Group by type for readable summary
+            by_type = {}
+            for a in actions:
+                t = a.get("action", "unknown")
+                by_type.setdefault(t, []).append(a)
+
+            summary_parts = []
+            for action_type, items in by_type.items():
+                summary_parts.append(f"**{action_type}** ({len(items)}x)")
+                for item in items[-3:]:  # Last 3 per type
+                    detail = {k: v for k, v in item.items() if k not in ("timestamp", "action")}
+                    summary_parts.append(f"  {item['timestamp'][11:19]} — {json.dumps(detail, default=str)[:200]}")
+
+            summary = "\n".join(summary_parts)
+
+            # Current state snapshot
+            state = {
+                "regime": self._ai_regime,
+                "learned_rules": {k: v.get("notes", "") for k, v in self._ai_learned_rules.items()} if self._ai_learned_rules else {},
+                "avoid_symbols": list(self._ai_avoid_symbols),
+                "open_positions": len(self.positions),
+                "total_capital": self.total_capital,
+                "daily_pnl": round(self.daily_pnl, 2),
+                "strategy_capitals": {s.name: round(self.strategy_stats[s.name]["capital"], 0) for s in self.strategies},
+            }
+
+            await asyncio.to_thread(
+                lambda: self.review_repo.table.insert({
+                    "review_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                    "period": "ai_action_log",
+                    "summary": summary[:3000],
+                    "strategy_insights": json.dumps(state),
+                    "suggestions": json.dumps(actions[-20:], default=str),  # Last 20 actions
+                    "model_used": "system",
+                    "tokens_used": 0,
+                }).execute()
+            )
+            logger.info(f"📝 [AI Log] Flushed {len(actions)} actions to DB")
+        except Exception as e:
+            logger.warning(f"📝 [AI Log] Flush failed: {e}")
 
     def _get_available_capital(self, strategy: 'StrategyConfig') -> float:
         """Get available capital for a strategy from the shared pool.
@@ -2261,6 +2339,8 @@ class SimplePaperTrader:
         self._ai_regime = {"regime": "unknown", "confidence": 0, "risk_level": "medium", "bias": "neutral"}
         self._ai_learned_rules = {}  # {strategy_name: {avoid_symbols, min_vol_ratio, ...}}
         self._ai_avoid_symbols = set()  # Symbols AI says to avoid
+        self._ai_action_log = []  # Buffer of AI actions to flush to DB every 15min
+        self._last_ai_log_flush = datetime.min.replace(tzinfo=timezone.utc)
 
         try:
             while self.running:
@@ -2300,8 +2380,9 @@ class SimplePaperTrader:
                 # === v7.0.2: AI Intelligence Suite — scheduled tasks ===
                 now_utc = datetime.now(timezone.utc)
 
-                # Every 15min: AI regime detection (#2+#5) — crypto moves fast
+                # Every 15min: Flush AI action log to DB + AI regime detection
                 if (now_utc - self._last_regime_check).total_seconds() >= 900:
+                    await self._flush_ai_action_log()
                     btc_data = await self._fetch_market_data("BTCUSDT", collector)
                     if btc_data:
                         await self._ai_regime_check(btc_data)
@@ -2640,6 +2721,7 @@ class SimplePaperTrader:
         # === v7.0.2: AI Intelligence gates ===
         # Symbol avoidance from AI symbol selection (#6)
         if symbol in self._ai_avoid_symbols:
+            self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": "symbol_avoid"})
             logger.info(f"   [{strategy.name}] {symbol}: AI says avoid this symbol")
             return
 
@@ -2648,19 +2730,23 @@ class SimplePaperTrader:
         if rules:
             avoid = rules.get("avoid_symbols") or []
             if symbol in avoid:
+                self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": "learned_avoid_symbol"})
                 logger.info(f"   [{strategy.name}] {symbol}: AI learned rule — avoid this symbol")
                 return
             min_conf = rules.get("min_confidence")
             if min_conf and signal.get("confidence", 1.0) < min_conf:
+                self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": f"learned_min_confidence ({signal.get('confidence', 0):.2f} < {min_conf})"})
                 logger.info(f"   [{strategy.name}] {symbol}: AI learned rule — confidence {signal.get('confidence', 0):.2f} < {min_conf}")
                 return
             indicators = signal.get("indicators", {})
             min_vol = rules.get("min_vol_ratio")
             if min_vol and indicators.get("vol_ratio", 999) < min_vol:
+                self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": f"learned_min_vol ({indicators.get('vol_ratio', 0):.1f} < {min_vol})"})
                 logger.info(f"   [{strategy.name}] {symbol}: AI learned rule — vol_ratio {indicators.get('vol_ratio', 0):.1f} < {min_vol}")
                 return
             min_htf = rules.get("min_htf_strength")
             if min_htf and indicators.get("htf_strength", 999) < min_htf:
+                self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": f"learned_min_htf ({indicators.get('htf_strength', 0):.2f} < {min_htf})"})
                 logger.info(f"   [{strategy.name}] {symbol}: AI learned rule — htf_strength {indicators.get('htf_strength', 0):.2f} < {min_htf}")
                 return
 
@@ -2669,9 +2755,11 @@ class SimplePaperTrader:
         if ai_regime.get("confidence", 0) >= 0.7:
             bias = ai_regime.get("bias", "neutral")
             if proposed_side == "long" and bias == "short" and ai_regime.get("risk_level") == "high":
+                self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": f"regime_bias (long blocked, bias=short)"})
                 logger.info(f"   [{strategy.name}] {symbol}: AI regime strongly bearish — blocking long")
                 return
             if proposed_side == "short" and bias == "long" and ai_regime.get("risk_level") == "high":
+                self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": f"regime_bias (short blocked, bias=long)"})
                 logger.info(f"   [{strategy.name}] {symbol}: AI regime strongly bullish — blocking short")
                 return
 
