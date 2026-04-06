@@ -1707,6 +1707,109 @@ class SimplePaperTrader:
         current_heat = self._calculate_portfolio_heat()
         return (current_heat + estimated_risk / self.initial_capital) <= self.max_portfolio_heat_pct
 
+    async def _auto_rebalance_capital(self):
+        """Auto-rebalance capital across strategies every 12 hours based on PnL efficiency.
+
+        Uses rolling trade data from DB (not just in-session). Allocates more capital
+        to strategies with higher PnL/hr and positive edge, less to losers and idle strategies.
+
+        Minimum floor: 5% of total capital per active strategy (keeps all strategies alive).
+        Maximum ceiling: 50% of total capital for any single strategy.
+        Only rebalances when no positions are open for that strategy (avoids mid-trade changes).
+        """
+        try:
+            # Fetch last 7 days of trades from DB for robust stats
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            result = await asyncio.to_thread(
+                lambda: self.trade_repo.table.select("strategy_name,net_pnl,entry_time,exit_time,duration_seconds")
+                .gte("exit_time", cutoff)
+                .not_.is_("exit_time", "null")
+                .execute()
+            )
+            trades = result.data or []
+
+            if len(trades) < 10:
+                logger.info("📊 [Rebalance] <10 trades in 7 days, skipping rebalance")
+                return
+
+            # Calculate PnL/hr and total PnL per strategy
+            from collections import defaultdict
+            strat_perf = defaultdict(lambda: {"pnl": 0.0, "time_mins": 0.0, "trades": 0})
+
+            for t in trades:
+                strat = t.get("strategy_name", "unknown")
+                pnl = t.get("net_pnl") or 0
+                dur = (t.get("duration_seconds") or 0) / 60
+                strat_perf[strat]["pnl"] += pnl
+                strat_perf[strat]["time_mins"] += dur
+                strat_perf[strat]["trades"] += 1
+
+            # Compute efficiency score: PnL/hr, floored at 0
+            scores = {}
+            for strat, perf in strat_perf.items():
+                if strat not in self.strategy_stats:
+                    continue
+                pnl_per_hr = perf["pnl"] / (perf["time_mins"] / 60) if perf["time_mins"] > 0 else 0
+                # Score = max(0, pnl_per_hr) — don't give negative-edge strategies more capital
+                scores[strat] = max(0.0, pnl_per_hr)
+
+            # Add strategies with 0 trades (give them minimum)
+            for s in self.strategies:
+                if s.name not in scores:
+                    scores[s.name] = 0.0
+
+            total_score = sum(scores.values())
+            total_capital = self.total_capital
+            min_alloc = total_capital * 0.05  # 5% floor
+            max_alloc = total_capital * 0.50  # 50% ceiling
+
+            if total_score <= 0:
+                logger.info("📊 [Rebalance] No positive-edge strategies, keeping current allocation")
+                return
+
+            # Allocate proportionally to score, with floor and ceiling
+            new_allocs = {}
+            for s in self.strategies:
+                score = scores.get(s.name, 0)
+                if total_score > 0 and score > 0:
+                    raw_alloc = (score / total_score) * total_capital
+                else:
+                    raw_alloc = min_alloc
+                new_allocs[s.name] = max(min_alloc, min(max_alloc, raw_alloc))
+
+            # Normalize to sum to total_capital
+            alloc_sum = sum(new_allocs.values())
+            if alloc_sum > 0:
+                scale = total_capital / alloc_sum
+                for name in new_allocs:
+                    new_allocs[name] *= scale
+
+            # Apply new allocations (only if strategy has no open positions)
+            changes = []
+            for s in self.strategies:
+                stats = self.strategy_stats[s.name]
+                old_cap = stats["capital"]
+                new_cap = new_allocs.get(s.name, old_cap)
+
+                # Only rebalance if no open positions for this strategy
+                has_open = any(k.startswith(f"{s.name}:") for k in self.positions)
+                if has_open:
+                    continue
+
+                if abs(new_cap - old_cap) > 10:  # Only log meaningful changes
+                    changes.append(f"{s.name}: ${old_cap:.0f} → ${new_cap:.0f}")
+                    stats["capital"] = new_cap
+
+            if changes:
+                logger.info(f"📊 [Rebalance] Auto-rebalanced capital based on 7-day PnL/hr:")
+                for c in changes:
+                    logger.info(f"   {c}")
+            else:
+                logger.info("📊 [Rebalance] No changes needed (positions open or allocations stable)")
+
+        except Exception as e:
+            logger.warning(f"📊 [Rebalance] Error during auto-rebalance: {e}")
+
     def _get_available_capital(self, strategy: 'StrategyConfig') -> float:
         """Get available capital for a strategy from the shared pool.
 
@@ -1878,6 +1981,7 @@ class SimplePaperTrader:
         # Shared state for data fetched once per cycle (not per symbol)
         self._fear_greed_cache = {"value": 50, "classification": "Neutral", "last_fetch": None}
         self._whale_consensus_cache = {}  # {symbol: {consensus, long_count, short_count, ...}}
+        self._last_rebalance_time = datetime.now(timezone.utc)  # v7.0.1: auto-rebalance timer
 
         try:
             while self.running:
@@ -1913,6 +2017,13 @@ class SimplePaperTrader:
 
                 # Save performance snapshots (one per strategy)
                 await self._save_performance_snapshots()
+
+                # v7.0.1: Auto-rebalance capital every 12 hours
+                now_utc = datetime.now(timezone.utc)
+                hours_since_rebalance = (now_utc - self._last_rebalance_time).total_seconds() / 3600
+                if hours_since_rebalance >= 12:
+                    await self._auto_rebalance_capital()
+                    self._last_rebalance_time = now_utc
 
                 # Status update
                 self._print_status()
