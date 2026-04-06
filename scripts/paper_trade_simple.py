@@ -1857,9 +1857,70 @@ class SimplePaperTrader:
 
             result = await self.ai_analyzer.detect_regime(data)
             if result:
+                old_regime = self._ai_regime.get("regime", "unknown")
+                old_bias = self._ai_regime.get("bias", "neutral")
                 self._ai_regime = result
+                new_regime = result.get("regime", "unknown")
+                new_bias = result.get("bias", "neutral")
+
+                # Regime SHIFT detected — take immediate action
+                if old_regime != new_regime or old_bias != new_bias:
+                    logger.info(f"🧠 [AI Regime] SHIFT: {old_regime}/{old_bias} → {new_regime}/{new_bias}")
+                    await self._on_regime_shift(result)
         except Exception as e:
             logger.warning(f"🧠 [AI Regime] Error: {e}")
+
+    async def _on_regime_shift(self, regime: dict):
+        """React immediately when AI detects a regime change.
+
+        Actions:
+        1. Tighten stops on positions conflicting with new regime
+        2. Close losing positions that conflict with high-confidence regime
+        """
+        bias = regime.get("bias", "neutral")
+        confidence = regime.get("confidence", 0)
+        risk_level = regime.get("risk_level", "medium")
+
+        if confidence < 0.65 or bias == "neutral":
+            return  # Not confident enough to act
+
+        conflicting_side = "long" if bias == "short" else "short" if bias == "long" else None
+        if not conflicting_side:
+            return
+
+        actions_taken = 0
+        for pos_key, position in list(self.positions.items()):
+            if position.get("side") != conflicting_side:
+                continue
+
+            pnl_pct = self._calculate_pnl_pct(position, position.get("entry_price", 0))
+            strategy_name = pos_key.split(":")[0]
+            strategy = self.strategy_map.get(strategy_name)
+            if not strategy:
+                continue
+
+            # Get current price for this symbol
+            _, symbol = self._parse_pos_key(pos_key)
+
+            if confidence >= 0.8 and pnl_pct < -0.005 and risk_level == "high":
+                # High confidence regime shift + position losing → close
+                logger.info(f"🧠 [Regime Shift] Closing {pos_key}: {conflicting_side} in loss ({pnl_pct:.2%}) vs {bias} regime (conf={confidence})")
+                current_price = position.get("entry_price", 0) * (1 + pnl_pct) if position.get("side") == "long" else position.get("entry_price", 0) * (1 - pnl_pct)
+                await self._close_position(pos_key, current_price, f"AI regime shift: {bias} bias (conf={confidence:.0%})", strategy)
+                actions_taken += 1
+            elif confidence >= 0.7:
+                # Moderate confidence → tighten to breakeven if profitable
+                entry = position["entry_price"]
+                if pnl_pct > 0.002:  # Slightly profitable
+                    if conflicting_side == "long":
+                        position["stop_loss_price"] = entry * 1.001
+                    else:
+                        position["stop_loss_price"] = entry * 0.999
+                    logger.info(f"🧠 [Regime Shift] Tightened {pos_key} SL to breakeven (regime: {bias}, conf={confidence})")
+                    actions_taken += 1
+
+        if actions_taken:
+            logger.info(f"🧠 [Regime Shift] Took {actions_taken} actions on regime change to {bias}")
 
     async def _ai_pattern_learning(self):
         """#1: Daily AI pattern learning from all historical trades."""
@@ -2239,15 +2300,15 @@ class SimplePaperTrader:
                 # === v7.0.2: AI Intelligence Suite — scheduled tasks ===
                 now_utc = datetime.now(timezone.utc)
 
-                # Hourly: AI regime detection (#2+#5) — uses BTC data from last symbol fetch
-                if (now_utc - self._last_regime_check).total_seconds() >= 3600:
+                # Every 15min: AI regime detection (#2+#5) — crypto moves fast
+                if (now_utc - self._last_regime_check).total_seconds() >= 900:
                     btc_data = await self._fetch_market_data("BTCUSDT", collector)
                     if btc_data:
                         await self._ai_regime_check(btc_data)
                     self._last_regime_check = now_utc
 
-                # Every 12h: Capital rebalance + Symbol selection (#6)
-                if (now_utc - self._last_rebalance_time).total_seconds() >= 43200:
+                # Every 6h: Capital rebalance + Symbol selection (#6)
+                if (now_utc - self._last_rebalance_time).total_seconds() >= 21600:
                     await self._auto_rebalance_capital()
                     await self._ai_symbol_selection()
                     self._last_rebalance_time = now_utc
