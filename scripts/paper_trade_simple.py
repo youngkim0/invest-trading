@@ -58,6 +58,7 @@ from data.storage.supabase_client import (
     SignalRepository,
     PerformanceRepository,
     TradeAnalysisRepository,
+    AIReviewRepository,
 )
 
 
@@ -1586,6 +1587,7 @@ class SimplePaperTrader:
         self.trade_repo = TradeLogRepository()
         self.signal_repo = SignalRepository()
         self.perf_repo = PerformanceRepository()
+        self.review_repo = AIReviewRepository()
         self.analysis_repo = TradeAnalysisRepository()
 
         # AI-powered analysis (Claude API)
