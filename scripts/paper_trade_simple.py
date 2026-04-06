@@ -1308,7 +1308,7 @@ class SmartMoneyFlowGenerator:
         ))
 
         # === Entry decision ===
-        min_score = 0.55  # was 0.4 — too many weak entries at 0.41 (29% WR)
+        min_score = 0.45  # was 0.55 (killed strategy — 0 trades in 6 days). Was 0.4 before that. 0.45 filters weakest entries while still firing.
         min_agreeing = 3
 
         if abs(smart_score) < min_score:

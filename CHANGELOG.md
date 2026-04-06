@@ -11,6 +11,9 @@
 - **Restored HTF strength threshold 0.1** (was 0.3 in v6.9.2): Prevented entries on early trend moves
 - **Kept neutral-mode disabled**: That filter has solid evidence (35% false break rate)
 
+### Fixed (smart_money silent)
+- **Score threshold 0.55 → 0.45**: v6.9.1 raised from 0.40→0.55 based on 5 AVAX losses. But 0.55 is unreachable — scores top out ~0.47. Zero trades in 6 days. 0.45 filters the weakest entries while letting the strategy fire.
+
 ### Tightened (short overtrading)
 - **crash_momentum entry: 0.3% → 0.5% below SMA20**: 131 trades for +$9 in 30 days. 48 were "no momentum" exits. Tighter entry = fewer marginal setups.
 
