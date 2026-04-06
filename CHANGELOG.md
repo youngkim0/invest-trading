@@ -1,5 +1,35 @@
 # Paper Trader Changelog
 
+## v6.9.4 — Simplification: restore long strategies, reduce short overtrading (2026-04-06)
+
+**Problem**: Since v6.9.2-v6.9.3 filters, ZERO long trades fired in 3 days. System became shorts-only. Missed the Apr 5 BTC rally ($67.3K→$69.1K) and actively shorted into it. Meanwhile crash_momentum churned 34 trades for -$7.
+
+**Root cause**: Over-optimization. We kept adding filters to fix bad weeks, but 30-day data shows trend_breakout is the #1 earner (+$230) and order_flow is #2 (+$61). The bad weeks are paid for by good weeks — that's how trend following works.
+
+### Rolled back (long strategy filters)
+- **Removed 4h uptrend confirmation** (v6.9.3): Was blocking ALL longs even during real rallies
+- **Restored HTF strength threshold 0.1** (was 0.3 in v6.9.2): Prevented entries on early trend moves
+- **Kept neutral-mode disabled**: That filter has solid evidence (35% false break rate)
+
+### Tightened (short overtrading)
+- **crash_momentum entry: 0.3% → 0.5% below SMA20**: 131 trades for +$9 in 30 days. 48 were "no momentum" exits. Tighter entry = fewer marginal setups.
+
+### Capital rebalanced (follow the data)
+- **trend_breakout $1000 → $1250**: #1 earner, restored to full allocation
+- **failed_breakout_short $850 → $400**: Net loser (-$13/30d), cut in half
+- **crash_momentum $500 → $400**: Overtrading for minimal return
+- Total: $4,290 (was $4,650)
+
+### 30-day performance context
+| Strategy | 30d PnL | Trades | Decision |
+|----------|---------|--------|----------|
+| trend_breakout | +$230 | 122 | **Restore** |
+| order_flow | +$61 | 44 | **Restore** |
+| crash_momentum | +$9 | 131 | Tighten entry |
+| failed_breakout_short | -$13 | 46 | Cut capital |
+
+---
+
 ## v6.9.3 — 4h uptrend confirmation for long strategies (2026-04-03)
 
 **Problem**: trend_breakout lost -$64 in 7 days (27% WR, 30 trades) despite all signals being "correct" on 1h timeframe. Root cause: 1h SMA20/SMA50 reads "bullish" on 2-3 day bear market rallies, and breakout buys into those bounces. Even htf_str=0.93+ trades were stopping out.

@@ -472,7 +472,7 @@ class TrendBreakoutGenerator:
     """
 
     def generate_signal(self, df_15m: pd.DataFrame, htf_trend: dict,
-                        regime_4h: dict = None, **kwargs) -> dict:
+                        **kwargs) -> dict:
         """Generate signal from trend-aligned or range breakouts on 15m."""
         if df_15m is None or len(df_15m) < 30:
             return hold_signal("Insufficient 15m data", htf_trend)
@@ -481,17 +481,16 @@ class TrendBreakoutGenerator:
         strength = htf_trend.get("strength", 0.0)
         reasons = []
 
-        # === CONDITION 0: 4h uptrend confirmation for longs ===
-        # 1h HTF can read "bullish" on bear market rallies. 4h filters those out.
-        if direction == "bullish" and regime_4h and not regime_4h.get("confirmed", True):
-            return hold_signal(f"4h uptrend not confirmed — {regime_4h.get('reason', 'bear market rally')}", htf_trend)
-
-        # === CONDITION 1: HTF must be trending (neutral/ranging breakouts disabled — 35% WR, too many false breaks) ===
+        # === CONDITION 1: HTF must be trending ===
+        # v6.9.4: Restored to original strength threshold 0.1 (was 0.3 in v6.9.2).
+        # 30-day data: trend_breakout is #1 earner at +$230. The 0.3 filter + 4h filter
+        # stacked to block ALL longs including during real rallies. Losing weeks (-$64)
+        # are covered by winning weeks (+$271). Neutral mode stays disabled (solid evidence).
         required_vol_ratio = 1.5
         if direction == "neutral":
             return hold_signal("Neutral-mode breakouts disabled (false break rate too high)", htf_trend)
-        elif strength < 0.3:  # was 0.1 — 17% WR when entering weak trends. Require real trend confirmation.
-            return hold_signal(f"HTF {direction} too weak (str={strength:.2f}, need 0.3)", htf_trend)
+        elif strength < 0.1:
+            return hold_signal(f"HTF {direction} too weak (str={strength:.2f}, need 0.1)", htf_trend)
         else:
             reasons.append(f"HTF {direction} str={strength:.2f}")
 
@@ -666,7 +665,7 @@ class OrderFlowGenerator:
     """
 
     def generate_signal(self, df_15m: pd.DataFrame, htf_trend: dict,
-                        derivatives: dict = None, regime_4h: dict = None, **kwargs) -> dict:
+                        derivatives: dict = None, **kwargs) -> dict:
         """Generate signal from order flow + positioning data."""
         if df_15m is None or len(df_15m) < 20:
             return hold_signal("Insufficient 15m data", htf_trend)
@@ -676,10 +675,6 @@ class OrderFlowGenerator:
         direction = htf_trend.get("direction", "neutral")
         strength = htf_trend.get("strength", 0.0)
         reasons = []
-
-        # === 4h uptrend confirmation for longs ===
-        if direction == "bullish" and regime_4h and not regime_4h.get("confirmed", True):
-            return hold_signal(f"4h uptrend not confirmed — {regime_4h.get('reason', 'bear market rally')}", htf_trend)
 
         # === CONDITION 1: HTF trend established (buys: 0.1, sells: 0.3) ===
         min_strength = 0.1 if direction == "bullish" else 0.3
@@ -1120,14 +1115,17 @@ class CrashMomentumShortGenerator:
         current_price = float(prices.iloc[-1])
         reasons = [f"Regime: {regime['reason'][:60]}"]
 
-        # === CONDITION 1: Price below 1h SMA20 by >0.3% (not just barely touching) ===
+        # === CONDITION 1: Price below 1h SMA20 by >0.5% (confirmed downtrend) ===
+        # v6.9.4: Raised from 0.3% to 0.5%. crash_momentum fired 131 trades in 30 days
+        # for only +$9 total. 48 exits were "no momentum" — too many marginal entries.
+        # 0.5% ensures we only enter when there's real selling pressure, not just noise.
         sma20_series = prices.rolling(20).mean()
         sma20 = float(sma20_series.iloc[-1])
         if current_price >= sma20:
             return hold_signal(f"Price above 1h SMA20 ({current_price:.2f} >= {sma20:.2f})", htf_trend)
         pct_below_sma = (sma20 - current_price) / sma20 * 100
-        if pct_below_sma < 0.3:
-            return hold_signal(f"Price only {pct_below_sma:.2f}% below SMA20 (need >0.3%)", htf_trend)
+        if pct_below_sma < 0.5:
+            return hold_signal(f"Price only {pct_below_sma:.2f}% below SMA20 (need >0.5%)", htf_trend)
         reasons.append(f"Price {pct_below_sma:.1f}% below 1h SMA20")
 
         # === CONDITION 2: 1h SMA20 slope negative (crash still active) ===
@@ -1951,25 +1949,17 @@ class SimplePaperTrader:
                     derivatives=market_data.get("derivatives"),
                 )
             elif strategy.strategy_type == "breakout":
-                # 4h uptrend check prevents buying breakouts during bear market rallies
-                df_4h = market_data.get("4h", pd.DataFrame())
-                uptrend_4h = check_4h_uptrend(df_4h) if not df_4h.empty else None
                 signal_result = strategy.generator.generate_signal(
                     market_data.get("15m", pd.DataFrame()), htf_trend,
-                    regime_4h=uptrend_4h,
                 )
             elif strategy.strategy_type == "pullback":
                 signal_result = strategy.generator.generate_signal(
                     market_data.get("15m", pd.DataFrame()), htf_trend,
                 )
             elif strategy.strategy_type == "flow":
-                # 4h uptrend check prevents buying flow signals during bear market rallies
-                df_4h = market_data.get("4h", pd.DataFrame())
-                uptrend_4h = check_4h_uptrend(df_4h) if not df_4h.empty else None
                 signal_result = strategy.generator.generate_signal(
                     market_data.get("15m", pd.DataFrame()), htf_trend,
                     derivatives=market_data.get("derivatives"),
-                    regime_4h=uptrend_4h,
                 )
             elif strategy.strategy_type in ("regime_short", "failed_bkout_short", "refined_cascade"):
                 # Compute regime gate from 4h data (shared across short strategies)
@@ -2926,16 +2916,20 @@ async def main():
 
     # Capital allocation: more to proven strategies, less to new/experimental
     # Short strategies sized at 50-70% of long equivalents (research: asymmetric risk)
+    # v6.9.4: Capital rebalanced based on 30-day data.
+    # trend_breakout (+$230) is #1 earner — restore to $1250.
+    # failed_breakout_short (-$13) is net loser — reduce to $400.
+    # crash_momentum (+$9 on 131 trades) — reduce to $400, tighter entry compensates.
     capital_allocation = {
         "funding_reversion": base_capital * 0.5,       # $500 — rare-event, mostly idle
-        "trend_breakout": base_capital * 1.0,            # $1000 — proven profitable (-$250 to smart_money)
-        "trend_pullback": base_capital * 0.75,         # $750 — DISABLED by default (23% WR, -$80/week)
-        "order_flow": base_capital * 0.5,              # $500 — uses taker ratio + L/S data (-$250 to smart_money)
-        "regime_short": base_capital * 0.4,            # $400 — multi-condition confluence short (pre-crash)
-        "failed_breakout_short": base_capital * 0.85,  # $850 — best WR (60%), was $600. Rebalanced from crash_momentum
-        "refined_liq_cascade": base_capital * 0.4,     # $400 — derivatives-based, rare events (pre-crash)
-        "crash_momentum": base_capital * 0.5,          # $500 — was $750. 52% WR but SL losses outweigh wins. $250→failed_bkout
-        "smart_money": base_capital * 0.5,              # $500 — whale/smart money composite signal (new v6.8)
+        "trend_breakout": base_capital * 1.25,         # $1250 — #1 earner (+$230/30d), restored
+        "trend_pullback": base_capital * 0.75,         # $750 — DISABLED by default
+        "order_flow": base_capital * 0.5,              # $500 — #2 earner (+$61/30d)
+        "regime_short": base_capital * 0.4,            # $400 — multi-condition confluence short
+        "failed_breakout_short": base_capital * 0.4,   # $400 — was $850, net loser (-$13/30d)
+        "refined_liq_cascade": base_capital * 0.4,     # $400 — derivatives-based, rare events
+        "crash_momentum": base_capital * 0.4,          # $400 — was $500, tighter entry (0.5% below SMA)
+        "smart_money": base_capital * 0.5,             # $500 — whale/smart money composite
     }
 
     strategy_configs = []
