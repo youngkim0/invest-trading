@@ -1500,7 +1500,7 @@ CORRELATION_GROUPS = {
     "large_cap": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
     "alt_cap": ["XRPUSDT", "DOGEUSDT", "AVAXUSDT"],
 }
-MAX_PER_CORRELATION_GROUP = 2
+MAX_PER_CORRELATION_GROUP = 3  # v7.0.1: relaxed from 2 — allow full group in strong trends
 
 
 # Strategy name mapping for backward compat with old trades
@@ -1652,11 +1652,16 @@ class SimplePaperTrader:
         self.daily_pnl_reset_date = ""
 
         # Max directional exposure: cap same-direction positions across all strategies
-        self.max_long_positions = 3
-        self.max_short_positions = 3
+        # v7.0.1: Relaxed from 3→6 longs, 4 shorts. Data showed 3 longs blocked $248 of
+        # profit in the best week, turning +$181 into -$68. Crypto profits come from riding
+        # correlated rallies. Daily loss limit + portfolio heat handle the downside.
+        self.max_long_positions = 6
+        self.max_short_positions = 4
 
         # Portfolio heat: max total open risk (sum of all SL distances × position values)
-        self.max_portfolio_heat_pct = 0.08  # 8% max total risk if all stops hit
+        # v7.0.1: Relaxed from 8%→12%. With Kelly sizing keeping per-trade risk small,
+        # 8% heat was too tight for 6 concurrent positions. 12% allows 6 positions × 2% each.
+        self.max_portfolio_heat_pct = 0.12  # 12% max total risk if all stops hit
 
     @property
     def total_capital(self):
