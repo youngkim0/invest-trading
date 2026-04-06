@@ -385,6 +385,109 @@ class ClaudeAnalyzer:
             logger.error(f"[AI] Daily review failed: {e}")
             return None
 
+    async def recommend_capital_allocation(
+        self,
+        strategy_stats: dict,
+        total_capital: float,
+        recent_trades: list[dict],
+    ) -> dict[str, float] | None:
+        """AI-powered capital rebalancing. Returns {strategy_name: new_capital} or None.
+
+        Uses Claude Haiku for fast, cheap analysis of strategy performance data.
+        Returns specific dollar allocations that sum to total_capital.
+        """
+        # Build performance summary
+        from collections import defaultdict
+        perf = defaultdict(lambda: {"pnl": 0, "trades": 0, "wins": 0, "time_mins": 0, "avg_pnl": 0})
+
+        for t in recent_trades:
+            strat = t.get("strategy_name", "unknown")
+            pnl = t.get("net_pnl") or 0
+            dur = (t.get("duration_seconds") or 0) / 60
+            perf[strat]["pnl"] += pnl
+            perf[strat]["trades"] += 1
+            perf[strat]["time_mins"] += dur
+            if pnl > 0:
+                perf[strat]["wins"] += 1
+
+        perf_lines = []
+        for strat, stats in sorted(strategy_stats.items()):
+            p = perf.get(strat, {"pnl": 0, "trades": 0, "wins": 0, "time_mins": 0})
+            current_cap = stats.get("capital", 0)
+            wr = p["wins"] / p["trades"] * 100 if p["trades"] > 0 else 0
+            pnl_hr = p["pnl"] / (p["time_mins"] / 60) if p["time_mins"] > 60 else 0
+            perf_lines.append(
+                f"- {strat}: ${current_cap:.0f} allocated | {p['trades']} trades | "
+                f"{wr:.0f}% WR | ${p['pnl']:+.2f} PnL | ${pnl_hr:+.2f}/hr in market"
+            )
+
+        prompt = f"""You are a quantitative portfolio manager for a crypto futures trading bot.
+
+TASK: Recommend capital allocation across strategies. Return ONLY a JSON object mapping strategy names to dollar amounts. The amounts MUST sum to exactly ${total_capital:.0f}.
+
+CURRENT PERFORMANCE (last 7 days):
+{chr(10).join(perf_lines)}
+
+Total capital: ${total_capital:.0f}
+
+RULES:
+1. Allocate MORE capital to strategies with high PnL/hr and positive PnL
+2. Allocate LESS (but minimum $200) to strategies that are losing money or have 0 trades
+3. No single strategy gets more than 50% of total capital
+4. Every strategy gets at least $200 (floor) to stay alive for regime changes
+5. Strategies with 0 trades in 7 days should get minimum allocation ($200)
+6. Weight PnL/hr MORE than raw PnL (efficiency matters more than volume)
+7. Consider win rate — below 35% suggests no real edge
+
+Respond with ONLY valid JSON, no explanation. Example format:
+{{"trend_breakout": 2500, "order_flow": 1000, "smart_money": 800, "crash_momentum": 300, "funding_reversion": 200, "regime_short": 200, "refined_liq_cascade": 200, "failed_breakout_short": 300}}"""
+
+        try:
+            response_text, tokens = await asyncio.to_thread(
+                self._call_claude, prompt, HAIKU_MODEL, 256, 10.0
+            )
+
+            # Parse JSON from response
+            import json
+            # Strip markdown code blocks if present
+            text = response_text.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+
+            allocations = json.loads(text)
+
+            # Validate: all values positive, sum reasonable
+            if not isinstance(allocations, dict):
+                logger.warning(f"[AI Rebalance] Invalid response type: {type(allocations)}")
+                return None
+
+            # Normalize to exact total
+            raw_sum = sum(allocations.values())
+            if raw_sum <= 0:
+                return None
+
+            scale = total_capital / raw_sum
+            result = {}
+            for name, amount in allocations.items():
+                if name in strategy_stats:
+                    result[name] = max(200.0, amount * scale)
+
+            # Final normalize after floor
+            final_sum = sum(result.values())
+            if final_sum > 0:
+                final_scale = total_capital / final_sum
+                result = {k: v * final_scale for k, v in result.items()}
+
+            logger.info(f"[AI Rebalance] Recommendation received ({tokens} tokens)")
+            return result
+
+        except Exception as e:
+            logger.warning(f"[AI Rebalance] Failed: {e}")
+            return None
+
     @property
     def daily_cost(self) -> float:
         """Get today's estimated API cost in USD."""

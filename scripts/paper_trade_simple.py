@@ -1708,17 +1708,16 @@ class SimplePaperTrader:
         return (current_heat + estimated_risk / self.initial_capital) <= self.max_portfolio_heat_pct
 
     async def _auto_rebalance_capital(self):
-        """Auto-rebalance capital across strategies every 12 hours based on PnL efficiency.
+        """Auto-rebalance capital every 12 hours using AI analysis of strategy performance.
 
-        Uses rolling trade data from DB (not just in-session). Allocates more capital
-        to strategies with higher PnL/hr and positive edge, less to losers and idle strategies.
+        Uses Claude AI to analyze 7-day trade data and recommend allocations.
+        Falls back to PnL/hr math if AI is unavailable.
 
-        Minimum floor: 5% of total capital per active strategy (keeps all strategies alive).
-        Maximum ceiling: 50% of total capital for any single strategy.
-        Only rebalances when no positions are open for that strategy (avoids mid-trade changes).
+        Constraints: min $200 per strategy, max 50% for any single strategy.
+        Only rebalances strategies with no open positions.
         """
         try:
-            # Fetch last 7 days of trades from DB for robust stats
+            # Fetch last 7 days of trades from DB
             cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
             result = await asyncio.to_thread(
                 lambda: self.trade_repo.table.select("strategy_name,net_pnl,entry_time,exit_time,duration_seconds")
@@ -1732,76 +1731,77 @@ class SimplePaperTrader:
                 logger.info("📊 [Rebalance] <10 trades in 7 days, skipping rebalance")
                 return
 
-            # Calculate PnL/hr and total PnL per strategy
-            from collections import defaultdict
-            strat_perf = defaultdict(lambda: {"pnl": 0.0, "time_mins": 0.0, "trades": 0})
-
-            for t in trades:
-                strat = t.get("strategy_name", "unknown")
-                pnl = t.get("net_pnl") or 0
-                dur = (t.get("duration_seconds") or 0) / 60
-                strat_perf[strat]["pnl"] += pnl
-                strat_perf[strat]["time_mins"] += dur
-                strat_perf[strat]["trades"] += 1
-
-            # Compute efficiency score: PnL/hr, floored at 0
-            scores = {}
-            for strat, perf in strat_perf.items():
-                if strat not in self.strategy_stats:
-                    continue
-                pnl_per_hr = perf["pnl"] / (perf["time_mins"] / 60) if perf["time_mins"] > 0 else 0
-                # Score = max(0, pnl_per_hr) — don't give negative-edge strategies more capital
-                scores[strat] = max(0.0, pnl_per_hr)
-
-            # Add strategies with 0 trades (give them minimum)
-            for s in self.strategies:
-                if s.name not in scores:
-                    scores[s.name] = 0.0
-
-            total_score = sum(scores.values())
             total_capital = self.total_capital
-            min_alloc = total_capital * 0.05  # 5% floor
-            max_alloc = total_capital * 0.50  # 50% ceiling
+            new_allocs = None
 
-            if total_score <= 0:
-                logger.info("📊 [Rebalance] No positive-edge strategies, keeping current allocation")
-                return
+            # Try AI-powered rebalance first
+            if self.ai_analyzer:
+                logger.info("📊 [Rebalance] Asking AI for capital allocation recommendation...")
+                new_allocs = await self.ai_analyzer.recommend_capital_allocation(
+                    strategy_stats=self.strategy_stats,
+                    total_capital=total_capital,
+                    recent_trades=trades,
+                )
 
-            # Allocate proportionally to score, with floor and ceiling
-            new_allocs = {}
-            for s in self.strategies:
-                score = scores.get(s.name, 0)
-                if total_score > 0 and score > 0:
-                    raw_alloc = (score / total_score) * total_capital
-                else:
-                    raw_alloc = min_alloc
-                new_allocs[s.name] = max(min_alloc, min(max_alloc, raw_alloc))
+            # Fallback: PnL/hr math if AI unavailable
+            if not new_allocs:
+                logger.info("📊 [Rebalance] AI unavailable, using PnL/hr math fallback")
+                from collections import defaultdict
+                strat_perf = defaultdict(lambda: {"pnl": 0.0, "time_mins": 0.0, "trades": 0})
 
-            # Normalize to sum to total_capital
-            alloc_sum = sum(new_allocs.values())
-            if alloc_sum > 0:
-                scale = total_capital / alloc_sum
-                for name in new_allocs:
-                    new_allocs[name] *= scale
+                for t in trades:
+                    strat = t.get("strategy_name", "unknown")
+                    pnl = t.get("net_pnl") or 0
+                    dur = (t.get("duration_seconds") or 0) / 60
+                    strat_perf[strat]["pnl"] += pnl
+                    strat_perf[strat]["time_mins"] += dur
+                    strat_perf[strat]["trades"] += 1
+
+                scores = {}
+                for strat, perf in strat_perf.items():
+                    if strat not in self.strategy_stats:
+                        continue
+                    pnl_per_hr = perf["pnl"] / (perf["time_mins"] / 60) if perf["time_mins"] > 60 else 0
+                    scores[strat] = max(0.0, pnl_per_hr)
+
+                total_score = sum(scores.values())
+                if total_score <= 0:
+                    logger.info("📊 [Rebalance] No positive-edge strategies, keeping current allocation")
+                    return
+
+                min_alloc = max(200.0, total_capital * 0.04)
+                max_alloc = total_capital * 0.50
+                new_allocs = {}
+                for s in self.strategies:
+                    score = scores.get(s.name, 0)
+                    raw = (score / total_score) * total_capital if score > 0 else min_alloc
+                    new_allocs[s.name] = max(min_alloc, min(max_alloc, raw))
+
+                alloc_sum = sum(new_allocs.values())
+                if alloc_sum > 0:
+                    scale = total_capital / alloc_sum
+                    new_allocs = {k: v * scale for k, v in new_allocs.items()}
 
             # Apply new allocations (only if strategy has no open positions)
             changes = []
             for s in self.strategies:
+                if s.name not in new_allocs:
+                    continue
                 stats = self.strategy_stats[s.name]
                 old_cap = stats["capital"]
-                new_cap = new_allocs.get(s.name, old_cap)
+                new_cap = new_allocs[s.name]
 
-                # Only rebalance if no open positions for this strategy
                 has_open = any(k.startswith(f"{s.name}:") for k in self.positions)
                 if has_open:
                     continue
 
-                if abs(new_cap - old_cap) > 10:  # Only log meaningful changes
+                if abs(new_cap - old_cap) > 10:
                     changes.append(f"{s.name}: ${old_cap:.0f} → ${new_cap:.0f}")
                     stats["capital"] = new_cap
 
             if changes:
-                logger.info(f"📊 [Rebalance] Auto-rebalanced capital based on 7-day PnL/hr:")
+                source = "AI" if self.ai_analyzer else "PnL/hr math"
+                logger.info(f"📊 [Rebalance] Capital rebalanced ({source}, 7-day data):")
                 for c in changes:
                     logger.info(f"   {c}")
             else:
