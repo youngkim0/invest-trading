@@ -1810,6 +1810,216 @@ class SimplePaperTrader:
         except Exception as e:
             logger.warning(f"📊 [Rebalance] Error during auto-rebalance: {e}")
 
+    async def _ai_regime_check(self, market_data_btc: dict):
+        """#2+#5: Hourly AI regime detection from BTC market data."""
+        if not self.ai_analyzer:
+            return
+        try:
+            prices_1h = market_data_btc.get("1h")
+            if prices_1h is None or prices_1h.empty:
+                return
+
+            close = prices_1h["close"]
+            current = float(close.iloc[-1])
+            sma20 = float(close.rolling(20).mean().iloc[-1]) if len(close) >= 20 else current
+            sma50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else current
+            atr = calculate_atr(prices_1h) if len(prices_1h) >= 14 else 0
+            atr_pct = atr / current * 100 if current > 0 else 0
+
+            sma_status = "SMA20 above SMA50" if sma20 > sma50 else "SMA20 below SMA50"
+            fg = self._fear_greed_cache
+
+            # 4h trend
+            df_4h = market_data_btc.get("4h")
+            trend_4h = "unknown"
+            if df_4h is not None and not df_4h.empty and len(df_4h) >= 50:
+                sma50_4h = float(df_4h["close"].rolling(50).mean().iloc[-1])
+                trend_4h = "bullish" if current > sma50_4h else "bearish"
+
+            derivatives = market_data_btc.get("derivatives", {})
+            taker = derivatives.get("taker_ratio_15m", [{}])
+            taker_ratio = taker[0].get("buy_sell_ratio", 1.0) if isinstance(taker, list) and taker else 1.0
+            top_ls = derivatives.get("top_long_short", [{}])
+            top_long = top_ls[0].get("long_account", 0.5) if isinstance(top_ls, list) and top_ls else 0.5
+            funding = derivatives.get("funding_rate", [{}])
+            fund_rate = funding[0].get("rate", 0) if isinstance(funding, list) and funding else 0
+
+            data = {
+                "btc_price": f"{current:,.0f}",
+                "btc_sma_status": f"{sma_status} (spread: {abs(sma20-sma50)/sma50*100:.2f}%)",
+                "btc_4h_trend": trend_4h,
+                "fear_greed": f"{fg.get('value', '?')} ({fg.get('classification', '?')})",
+                "btc_funding": f"{fund_rate*100:.4f}%",
+                "taker_ratio": f"{taker_ratio:.3f}",
+                "top_long_pct": f"{top_long:.1%}",
+                "atr_pct": f"{atr_pct:.2f}%",
+            }
+
+            result = await self.ai_analyzer.detect_regime(data)
+            if result:
+                self._ai_regime = result
+        except Exception as e:
+            logger.warning(f"🧠 [AI Regime] Error: {e}")
+
+    async def _ai_pattern_learning(self):
+        """#1: Daily AI pattern learning from all historical trades."""
+        if not self.ai_analyzer:
+            return
+        try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+            result = await asyncio.to_thread(
+                lambda: self.trade_repo.table.select("strategy_name,symbol,side,net_pnl,signal_confidence,indicators_at_entry,entry_time,exit_time,exit_reasoning,duration_seconds")
+                .gte("exit_time", cutoff)
+                .not_.is_("exit_time", "null")
+                .order("exit_time", desc=True)
+                .limit(500)
+                .execute()
+            )
+            trades = result.data or []
+            if len(trades) < 20:
+                logger.info("🧠 [AI Pattern] <20 trades, skipping learning")
+                return
+
+            strategy_names = [s.name for s in self.strategies]
+            rules = await self.ai_analyzer.learn_trade_patterns(trades, strategy_names)
+            if rules:
+                self._ai_learned_rules = rules
+                logger.info(f"🧠 [AI Pattern] Updated learned rules for {len(rules)} strategies")
+                for strat, rule in rules.items():
+                    if rule.get("notes"):
+                        logger.info(f"   {strat}: {rule['notes']}")
+        except Exception as e:
+            logger.warning(f"🧠 [AI Pattern] Error: {e}")
+
+    async def _ai_parameter_tuning(self):
+        """#4: Daily AI parameter tuning recommendations."""
+        if not self.ai_analyzer:
+            return
+        try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            result = await asyncio.to_thread(
+                lambda: self.trade_repo.table.select("strategy_name,net_pnl,exit_reasoning,duration_seconds")
+                .gte("exit_time", cutoff)
+                .not_.is_("exit_time", "null")
+                .execute()
+            )
+            trades = result.data or []
+            if len(trades) < 15:
+                return
+
+            current_params = {s.name: {"sl_atr_mult": s.sl_atr_mult, "tp_atr_mult": s.tp_atr_mult,
+                                        "max_position_hours": s.max_position_hours} for s in self.strategies}
+
+            recommendations = await self.ai_analyzer.tune_parameters(
+                self.strategy_stats, trades, current_params
+            )
+            if not recommendations:
+                return
+
+            # Apply parameter changes
+            for s in self.strategies:
+                rec = recommendations.get(s.name)
+                if not rec:
+                    continue
+                changes = []
+                if rec.get("sl_atr_mult") and rec["sl_atr_mult"] != s.sl_atr_mult:
+                    old = s.sl_atr_mult
+                    s.sl_atr_mult = max(1.0, min(3.0, rec["sl_atr_mult"]))  # Clamp to safe range
+                    changes.append(f"SL {old}→{s.sl_atr_mult}x ATR")
+                if rec.get("tp_atr_mult") and rec["tp_atr_mult"] != s.tp_atr_mult:
+                    old = s.tp_atr_mult
+                    s.tp_atr_mult = max(1.5, min(5.0, rec["tp_atr_mult"]))
+                    changes.append(f"TP {old}→{s.tp_atr_mult}x ATR")
+                if changes:
+                    logger.info(f"🔧 [AI Tuning] {s.name}: {', '.join(changes)} — {rec.get('notes', '')}")
+        except Exception as e:
+            logger.warning(f"🔧 [AI Tuning] Error: {e}")
+
+    async def _ai_symbol_selection(self):
+        """#6: AI symbol selection every 12h."""
+        if not self.ai_analyzer:
+            return
+        try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            result = await asyncio.to_thread(
+                lambda: self.trade_repo.table.select("symbol,net_pnl")
+                .gte("exit_time", cutoff)
+                .not_.is_("exit_time", "null")
+                .execute()
+            )
+            trades = result.data or []
+            if len(trades) < 15:
+                return
+
+            from collections import defaultdict
+            sym_stats = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0})
+            for t in trades:
+                sym = t.get("symbol", "?")
+                pnl = t.get("net_pnl") or 0
+                sym_stats[sym]["trades"] += 1
+                sym_stats[sym]["pnl"] += pnl
+                if pnl > 0:
+                    sym_stats[sym]["wins"] += 1
+
+            recommendation = await self.ai_analyzer.select_symbols(dict(sym_stats), self.symbols)
+            if recommendation and recommendation.get("avoid"):
+                self._ai_avoid_symbols = set(recommendation["avoid"])
+                logger.info(f"🎯 [AI Symbols] Avoiding: {self._ai_avoid_symbols}")
+            else:
+                self._ai_avoid_symbols = set()
+        except Exception as e:
+            logger.warning(f"🎯 [AI Symbols] Error: {e}")
+
+    async def _ai_check_exit(self, pos_key: str, position: dict, current_price: float,
+                              strategy: StrategyConfig) -> str | None:
+        """#3: AI exit optimization for open positions. Returns exit reason or None."""
+        if not self.ai_analyzer:
+            return None
+        try:
+            mins_open = (datetime.now(timezone.utc) - position["entry_time"]).total_seconds() / 60
+            if mins_open < 30:
+                return None  # Too early for AI exit check
+
+            pnl_pct = self._calculate_pnl_pct(position, current_price)
+            _, symbol = self._parse_pos_key(pos_key)
+
+            result = await self.ai_analyzer.optimize_exit(
+                position={
+                    "side": position.get("side", "?"),
+                    "pnl_pct": pnl_pct,
+                    "mins_open": mins_open,
+                    "sl_pct": position.get("sl_pct", 0.02),
+                    "tp_pct": position.get("tp_pct", 0.04),
+                    "strategy": strategy.name,
+                    "symbol": symbol,
+                },
+                current_price=current_price,
+                market_context=self._ai_regime,
+            )
+
+            if not result:
+                return None
+
+            action = result.get("action", "hold")
+            reasoning = result.get("reasoning", "")
+
+            if action == "close_now":
+                logger.info(f"🧠 [AI Exit] {pos_key}: CLOSE — {reasoning}")
+                return f"AI exit: {reasoning}"
+            elif action == "tighten_stop":
+                # Move SL to breakeven
+                entry = position["entry_price"]
+                if position["side"] == "long" and current_price > entry:
+                    position["stop_loss_price"] = entry * 1.001  # Tiny buffer above entry
+                    logger.info(f"🧠 [AI Exit] {pos_key}: Tightened SL to breakeven — {reasoning}")
+                elif position["side"] == "short" and current_price < entry:
+                    position["stop_loss_price"] = entry * 0.999
+                    logger.info(f"🧠 [AI Exit] {pos_key}: Tightened SL to breakeven — {reasoning}")
+            return None
+        except Exception as e:
+            logger.warning(f"🧠 [AI Exit] Error for {pos_key}: {e}")
+            return None
+
     def _get_available_capital(self, strategy: 'StrategyConfig') -> float:
         """Get available capital for a strategy from the shared pool.
 
@@ -1981,7 +2191,15 @@ class SimplePaperTrader:
         # Shared state for data fetched once per cycle (not per symbol)
         self._fear_greed_cache = {"value": 50, "classification": "Neutral", "last_fetch": None}
         self._whale_consensus_cache = {}  # {symbol: {consensus, long_count, short_count, ...}}
-        self._last_rebalance_time = datetime.now(timezone.utc)  # v7.0.1: auto-rebalance timer
+        # v7.0.2: AI Intelligence Suite timers and state
+        self._last_rebalance_time = datetime.now(timezone.utc)
+        self._last_regime_check = datetime.min.replace(tzinfo=timezone.utc)
+        self._last_pattern_learn = datetime.min.replace(tzinfo=timezone.utc)
+        self._last_param_tune = datetime.min.replace(tzinfo=timezone.utc)
+        self._last_symbol_select = datetime.min.replace(tzinfo=timezone.utc)
+        self._ai_regime = {"regime": "unknown", "confidence": 0, "risk_level": "medium", "bias": "neutral"}
+        self._ai_learned_rules = {}  # {strategy_name: {avoid_symbols, min_vol_ratio, ...}}
+        self._ai_avoid_symbols = set()  # Symbols AI says to avoid
 
         try:
             while self.running:
@@ -2018,12 +2236,29 @@ class SimplePaperTrader:
                 # Save performance snapshots (one per strategy)
                 await self._save_performance_snapshots()
 
-                # v7.0.1: Auto-rebalance capital every 12 hours
+                # === v7.0.2: AI Intelligence Suite — scheduled tasks ===
                 now_utc = datetime.now(timezone.utc)
-                hours_since_rebalance = (now_utc - self._last_rebalance_time).total_seconds() / 3600
-                if hours_since_rebalance >= 12:
+
+                # Hourly: AI regime detection (#2+#5) — uses BTC data from last symbol fetch
+                if (now_utc - self._last_regime_check).total_seconds() >= 3600:
+                    btc_data = await self._fetch_market_data("BTCUSDT", collector)
+                    if btc_data:
+                        await self._ai_regime_check(btc_data)
+                    self._last_regime_check = now_utc
+
+                # Every 12h: Capital rebalance + Symbol selection (#6)
+                if (now_utc - self._last_rebalance_time).total_seconds() >= 43200:
                     await self._auto_rebalance_capital()
+                    await self._ai_symbol_selection()
                     self._last_rebalance_time = now_utc
+                    self._last_symbol_select = now_utc
+
+                # Daily: Pattern learning (#1) + Parameter tuning (#4)
+                if (now_utc - self._last_pattern_learn).total_seconds() >= 86400:
+                    await self._ai_pattern_learning()
+                    await self._ai_parameter_tuning()
+                    self._last_pattern_learn = now_utc
+                    self._last_param_tune = now_utc
 
                 # Status update
                 self._print_status()
@@ -2341,6 +2576,44 @@ class SimplePaperTrader:
             logger.info(f"   [{strategy.name}] {symbol}: Portfolio heat limit ({heat:.1%} >= {self.max_portfolio_heat_pct:.0%})")
             return
 
+        # === v7.0.2: AI Intelligence gates ===
+        # Symbol avoidance from AI symbol selection (#6)
+        if symbol in self._ai_avoid_symbols:
+            logger.info(f"   [{strategy.name}] {symbol}: AI says avoid this symbol")
+            return
+
+        # Learned rules from AI pattern learning (#1)
+        rules = self._ai_learned_rules.get(strategy.name)
+        if rules:
+            avoid = rules.get("avoid_symbols") or []
+            if symbol in avoid:
+                logger.info(f"   [{strategy.name}] {symbol}: AI learned rule — avoid this symbol")
+                return
+            min_conf = rules.get("min_confidence")
+            if min_conf and signal.get("confidence", 1.0) < min_conf:
+                logger.info(f"   [{strategy.name}] {symbol}: AI learned rule — confidence {signal.get('confidence', 0):.2f} < {min_conf}")
+                return
+            indicators = signal.get("indicators", {})
+            min_vol = rules.get("min_vol_ratio")
+            if min_vol and indicators.get("vol_ratio", 999) < min_vol:
+                logger.info(f"   [{strategy.name}] {symbol}: AI learned rule — vol_ratio {indicators.get('vol_ratio', 0):.1f} < {min_vol}")
+                return
+            min_htf = rules.get("min_htf_strength")
+            if min_htf and indicators.get("htf_strength", 999) < min_htf:
+                logger.info(f"   [{strategy.name}] {symbol}: AI learned rule — htf_strength {indicators.get('htf_strength', 0):.2f} < {min_htf}")
+                return
+
+        # AI regime bias check — don't go long in strong bear regime or short in strong bull
+        ai_regime = self._ai_regime
+        if ai_regime.get("confidence", 0) >= 0.7:
+            bias = ai_regime.get("bias", "neutral")
+            if proposed_side == "long" and bias == "short" and ai_regime.get("risk_level") == "high":
+                logger.info(f"   [{strategy.name}] {symbol}: AI regime strongly bearish — blocking long")
+                return
+            if proposed_side == "short" and bias == "long" and ai_regime.get("risk_level") == "high":
+                logger.info(f"   [{strategy.name}] {symbol}: AI regime strongly bullish — blocking short")
+                return
+
         for existing_key, existing_pos in self.positions.items():
             if existing_key == pos_key:
                 continue
@@ -2537,6 +2810,13 @@ class SimplePaperTrader:
             should_exit = True
             confidence = signal.get("confidence", 0)
             exit_reason = f"{signal['signal'].replace('_', ' ').title()} signal (confidence: {confidence:.0%})"
+
+        # 7. AI EXIT OPTIMIZATION (#3) — ask AI for positions open > 30min
+        if not should_exit:
+            ai_exit_reason = await self._ai_check_exit(pos_key, position, price, strategy)
+            if ai_exit_reason:
+                should_exit = True
+                exit_reason = ai_exit_reason
 
         if should_exit:
             await self._close_position(pos_key, price, exit_reason, strategy)

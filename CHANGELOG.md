@@ -1,5 +1,26 @@
 # Paper Trader Changelog
 
+## v7.0.2 — Full AI Trading Intelligence Suite (2026-04-06)
+
+Six AI features that make the system learn and adapt from historical data:
+
+| # | Feature | Frequency | Model | What it does |
+|---|---------|-----------|-------|-------------|
+| 1 | Pattern Learning | Daily | Sonnet | Analyzes 30d trades → per-strategy rules (avoid symbols, min thresholds) |
+| 2+5 | Regime Detection | Hourly | Haiku | BTC multi-signal analysis → regime/bias/risk classification |
+| 3 | Exit Optimization | Per-position | Haiku | AI decides: hold / tighten stop / close now |
+| 4 | Parameter Tuning | Daily | Sonnet | Recommends SL/TP ATR multiplier changes from exit patterns |
+| 6 | Symbol Selection | 12h | Haiku | Identifies which symbols to trade/avoid based on 7d WR |
+
+- Learned rules from #1 applied as dynamic filters in entry logic
+- Regime bias from #2 blocks counter-regime trades when confidence > 70%
+- Exit optimization #3 added as step 7 in exit priority chain
+- Parameter tuning #4 auto-adjusts SL/TP within safe ranges (SL 1-3x, TP 1.5-5x)
+- Symbol avoidance from #6 blocks entry on poorly-performing coins
+- Total cost: ~$4.20/month (1.5% of target monthly profit)
+
+---
+
 ## v7.0.1 — Capital efficiency overhaul + relaxed portfolio limits (2026-04-06)
 
 **Problem**: 79% of capital was idle. Three strategies (funding_reversion, regime_short, refined_liq_cascade) had ZERO trades in 30 days = $1,300 dead capital. Meanwhile trend_breakout (#1 earner at $0.83/hr) was capped at $1,250.

@@ -488,6 +488,312 @@ Respond with ONLY valid JSON, no explanation. Example format:
             logger.warning(f"[AI Rebalance] Failed: {e}")
             return None
 
+    # ==========================================
+    # v7.0.2: Full AI Trading Intelligence Suite
+    # ==========================================
+
+    async def learn_trade_patterns(self, trades: list[dict], strategy_names: list[str]) -> dict | None:
+        """#1: Analyze ALL historical trades to discover winning vs losing patterns.
+
+        Returns learned rules per strategy, e.g.:
+        {"trend_breakout": {"avoid_symbols": ["AVAXUSDT"], "min_vol_ratio": 2.0, "best_hours_utc": [14,15,16], "notes": "..."}}
+        Runs daily. Uses Sonnet for deeper analysis.
+        """
+        if not trades:
+            return None
+
+        # Build per-strategy summaries
+        from collections import defaultdict
+        strat_data = defaultdict(lambda: {"wins": [], "losses": [], "by_symbol": defaultdict(lambda: {"w": 0, "l": 0, "pnl": 0})})
+
+        for t in trades:
+            strat = t.get("strategy_name", "unknown")
+            pnl = t.get("net_pnl") or 0
+            symbol = t.get("symbol", "?")
+            ind = t.get("indicators_at_entry") or {}
+            entry_hour = ""
+            if t.get("entry_time"):
+                try:
+                    entry_hour = t["entry_time"][11:13]
+                except Exception:
+                    pass
+
+            record = {
+                "symbol": symbol, "pnl": round(pnl, 2),
+                "htf_strength": ind.get("htf_strength", "?"),
+                "vol_ratio": ind.get("vol_ratio", "?"),
+                "rsi": ind.get("rsi", "?"),
+                "confidence": t.get("signal_confidence", "?"),
+                "hour_utc": entry_hour,
+                "duration_min": int((t.get("duration_seconds") or 0) / 60),
+            }
+
+            if pnl > 0:
+                strat_data[strat]["wins"].append(record)
+            else:
+                strat_data[strat]["losses"].append(record)
+
+            strat_data[strat]["by_symbol"][symbol]["pnl"] += pnl
+            if pnl > 0:
+                strat_data[strat]["by_symbol"][symbol]["w"] += 1
+            else:
+                strat_data[strat]["by_symbol"][symbol]["l"] += 1
+
+        # Build compact summary for prompt
+        summary_lines = []
+        for strat in strategy_names:
+            d = strat_data.get(strat)
+            if not d:
+                summary_lines.append(f"\n### {strat}: 0 trades")
+                continue
+            total = len(d["wins"]) + len(d["losses"])
+            wr = len(d["wins"]) / total * 100 if total else 0
+            summary_lines.append(f"\n### {strat}: {total} trades, {wr:.0f}% WR")
+            # Symbol breakdown
+            for sym, sd in d["by_symbol"].items():
+                sym_total = sd["w"] + sd["l"]
+                sym_wr = sd["w"] / sym_total * 100 if sym_total else 0
+                summary_lines.append(f"  {sym}: {sym_total} trades, {sym_wr:.0f}% WR, ${sd['pnl']:+.2f}")
+            # Sample wins/losses (last 5 each)
+            if d["wins"]:
+                summary_lines.append(f"  Recent wins: {d['wins'][-5:]}")
+            if d["losses"]:
+                summary_lines.append(f"  Recent losses: {d['losses'][-5:]}")
+
+        prompt = f"""You are a quantitative analyst. Analyze these crypto futures trading results and discover PATTERNS that separate winners from losers.
+
+TRADE DATA (last 30 days):
+{"".join(summary_lines)}
+
+For EACH strategy, return a JSON object with learned rules. Focus on:
+1. **avoid_symbols**: Symbols with <25% WR and negative PnL — list them
+2. **min_vol_ratio**: If wins cluster above a volume threshold, specify it (null if no pattern)
+3. **min_htf_strength**: If wins need stronger HTF trend, specify minimum (null if no pattern)
+4. **best_hours_utc**: Hours (0-23) when win rate is notably higher (empty list if no pattern)
+5. **max_rsi_entry**: If wins cluster below an RSI level, specify ceiling (null if no pattern)
+6. **min_confidence**: Minimum confidence that produces positive expectancy (null if no pattern)
+7. **notes**: One sentence explaining the key insight for this strategy
+
+Respond with ONLY valid JSON. Example:
+{{"trend_breakout": {{"avoid_symbols": ["AVAXUSDT"], "min_vol_ratio": 2.0, "min_htf_strength": null, "best_hours_utc": [], "max_rsi_entry": null, "min_confidence": 0.72, "notes": "Wins cluster on high-volume breakouts; AVAX has 15% WR"}},
+"crash_momentum": {{"avoid_symbols": [], "min_vol_ratio": null, "min_htf_strength": null, "best_hours_utc": [8,9,10], "max_rsi_entry": 35, "min_confidence": null, "notes": "Best during Asian session with RSI <35"}}}}"""
+
+        try:
+            response_text, tokens = await asyncio.to_thread(
+                self._call_claude, prompt, SONNET_MODEL, 1024, 30.0
+            )
+            import json
+            text = response_text.strip()
+            if text.startswith("```"):
+                text = "\n".join(text.split("\n")[1:])
+            if text.endswith("```"):
+                text = text[:-3]
+            rules = json.loads(text.strip())
+            logger.info(f"[AI Pattern] Learned rules for {len(rules)} strategies ({tokens} tokens)")
+            return rules
+        except Exception as e:
+            logger.warning(f"[AI Pattern] Failed: {e}")
+            return None
+
+    async def detect_regime(self, market_data: dict) -> dict | None:
+        """#2 + #5: AI regime detection + market context from multiple signals.
+
+        Returns: {"regime": "trending_bull|trending_bear|ranging|high_vol_crisis",
+                  "confidence": 0.8, "risk_level": "low|medium|high",
+                  "reasoning": "...", "bias": "long|short|neutral"}
+        Runs hourly. Uses Haiku for speed.
+        """
+        prompt = f"""You are a crypto market regime classifier. Analyze these signals and classify the current market regime.
+
+MARKET DATA:
+- BTC price: ${market_data.get('btc_price', '?')}
+- BTC 1h SMA20 vs SMA50: {market_data.get('btc_sma_status', '?')}
+- BTC 4h trend: {market_data.get('btc_4h_trend', '?')}
+- Fear & Greed Index: {market_data.get('fear_greed', '?')}
+- BTC funding rate: {market_data.get('btc_funding', '?')}
+- Taker buy/sell ratio: {market_data.get('taker_ratio', '?')}
+- Top trader long %: {market_data.get('top_long_pct', '?')}
+- Recent volatility (ATR%): {market_data.get('atr_pct', '?')}
+
+Respond with ONLY valid JSON:
+{{"regime": "trending_bull|trending_bear|ranging|high_vol_crisis", "confidence": 0.0-1.0, "risk_level": "low|medium|high", "bias": "long|short|neutral", "reasoning": "one sentence"}}"""
+
+        try:
+            response_text, tokens = await asyncio.to_thread(
+                self._call_claude, prompt, HAIKU_MODEL, 200, 8.0
+            )
+            import json
+            text = response_text.strip()
+            if text.startswith("```"):
+                text = "\n".join(text.split("\n")[1:])
+            if text.endswith("```"):
+                text = text[:-3]
+            result = json.loads(text.strip())
+            logger.info(f"[AI Regime] {result.get('regime', '?')} (conf={result.get('confidence', '?')}, bias={result.get('bias', '?')}) | {result.get('reasoning', '')[:80]}")
+            return result
+        except Exception as e:
+            logger.warning(f"[AI Regime] Failed: {e}")
+            return None
+
+    async def optimize_exit(self, position: dict, current_price: float,
+                            market_context: dict) -> dict | None:
+        """#3: AI exit decision for open positions.
+
+        Returns: {"action": "hold|tighten_stop|close_now", "reasoning": "..."}
+        Called for positions open > 30min. Uses Haiku.
+        """
+        pnl_pct = position.get("pnl_pct", 0)
+        mins_open = position.get("mins_open", 0)
+        side = position.get("side", "?")
+        sl_pct = position.get("sl_pct", 0.02)
+        tp_pct = position.get("tp_pct", 0.04)
+
+        prompt = f"""You are a trade exit optimizer. Should this crypto futures position be held, tightened, or closed?
+
+POSITION:
+- Side: {side} | PnL: {pnl_pct:+.2%} | Open: {mins_open:.0f}min
+- SL distance: {sl_pct:.2%} | TP distance: {tp_pct:.2%}
+- Strategy: {position.get('strategy', '?')} | Symbol: {position.get('symbol', '?')}
+
+MARKET CONTEXT:
+- Regime: {market_context.get('regime', '?')} | Bias: {market_context.get('bias', '?')}
+- Risk level: {market_context.get('risk_level', '?')}
+
+RULES:
+- "hold": Position is progressing well or needs more time
+- "tighten_stop": Move SL to breakeven or tighter (position is profitable but momentum fading)
+- "close_now": Exit immediately (regime changed against position, or stale with no momentum)
+- Do NOT close winners early — let them run to TP
+- Close if: losing + regime flipped against position, or 60+ min with <0.1% move
+
+Respond with ONLY valid JSON: {{"action": "hold|tighten_stop|close_now", "reasoning": "one sentence"}}"""
+
+        try:
+            response_text, tokens = await asyncio.to_thread(
+                self._call_claude, prompt, HAIKU_MODEL, 100, 5.0
+            )
+            import json
+            text = response_text.strip()
+            if text.startswith("```"):
+                text = "\n".join(text.split("\n")[1:])
+            if text.endswith("```"):
+                text = text[:-3]
+            return json.loads(text.strip())
+        except Exception as e:
+            logger.warning(f"[AI Exit] Failed: {e}")
+            return None
+
+    async def tune_parameters(self, strategy_stats: dict, recent_trades: list[dict],
+                               current_params: dict) -> dict | None:
+        """#4: AI strategy parameter tuning. Returns recommended parameter changes.
+
+        Returns: {"trend_breakout": {"sl_atr_mult": 1.5, "tp_atr_mult": 3.5}, ...}
+        Runs daily. Uses Sonnet.
+        """
+        from collections import defaultdict
+        perf = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0, "sl_exits": 0, "tp_exits": 0, "stale_exits": 0, "avg_win": 0, "avg_loss": 0})
+
+        for t in recent_trades:
+            strat = t.get("strategy_name", "unknown")
+            pnl = t.get("net_pnl") or 0
+            perf[strat]["trades"] += 1
+            perf[strat]["pnl"] += pnl
+            if pnl > 0:
+                perf[strat]["wins"] += 1
+            exit_r = t.get("exit_reasoning") or ""
+            if "Stop loss" in exit_r:
+                perf[strat]["sl_exits"] += 1
+            elif "Take profit" in exit_r:
+                perf[strat]["tp_exits"] += 1
+            elif "Stale" in exit_r or "momentum" in exit_r.lower():
+                perf[strat]["stale_exits"] += 1
+
+        lines = []
+        for strat, p in perf.items():
+            params = current_params.get(strat, {})
+            wr = p["wins"] / p["trades"] * 100 if p["trades"] else 0
+            lines.append(
+                f"- {strat}: {p['trades']} trades, {wr:.0f}% WR, ${p['pnl']:+.2f} | "
+                f"SL exits: {p['sl_exits']}, TP exits: {p['tp_exits']}, Stale: {p['stale_exits']} | "
+                f"Current params: SL={params.get('sl_atr_mult', '?')}x ATR, TP={params.get('tp_atr_mult', '?')}x ATR"
+            )
+
+        prompt = f"""You are a quantitative strategist tuning crypto trading parameters.
+
+STRATEGY PERFORMANCE (last 7 days):
+{chr(10).join(lines)}
+
+For each strategy, recommend parameter adjustments. Consider:
+- If SL exits >> TP exits: SL may be too tight (increase sl_atr_mult) or TP too ambitious (decrease tp_atr_mult)
+- If stale exits are high: max_position_hours may be too long, or TP too far
+- If WR < 30%: Consider if the strategy has any edge at all
+- Only suggest changes if there's clear evidence. Use null for "no change needed"
+
+Respond with ONLY valid JSON. Example:
+{{"trend_breakout": {{"sl_atr_mult": 1.8, "tp_atr_mult": 2.5, "notes": "Too many SL exits — widen SL slightly"}},
+"crash_momentum": {{"sl_atr_mult": null, "tp_atr_mult": 2.5, "notes": "TP too ambitious, reduce to capture more wins"}}}}"""
+
+        try:
+            response_text, tokens = await asyncio.to_thread(
+                self._call_claude, prompt, SONNET_MODEL, 512, 20.0
+            )
+            import json
+            text = response_text.strip()
+            if text.startswith("```"):
+                text = "\n".join(text.split("\n")[1:])
+            if text.endswith("```"):
+                text = text[:-3]
+            result = json.loads(text.strip())
+            logger.info(f"[AI Tuning] Parameter recommendations for {len(result)} strategies ({tokens} tokens)")
+            return result
+        except Exception as e:
+            logger.warning(f"[AI Tuning] Failed: {e}")
+            return None
+
+    async def select_symbols(self, symbol_stats: dict, available_symbols: list[str]) -> dict | None:
+        """#6: AI symbol selection. Recommends best symbols to trade.
+
+        Returns: {"trade": ["BTCUSDT", ...], "avoid": ["AVAXUSDT", ...], "reasoning": "..."}
+        Runs every 12h. Uses Haiku.
+        """
+        lines = []
+        for sym, stats in symbol_stats.items():
+            wr = stats["wins"] / stats["trades"] * 100 if stats["trades"] else 0
+            lines.append(f"- {sym}: {stats['trades']} trades, {wr:.0f}% WR, ${stats['pnl']:+.2f}, avg vol: {stats.get('avg_volume', '?')}")
+
+        prompt = f"""You are a crypto symbol selector for an algo trading bot on Binance USDT-M Futures.
+
+SYMBOL PERFORMANCE (last 7 days):
+{chr(10).join(lines)}
+
+Available symbols: {', '.join(available_symbols)}
+
+Recommend which symbols to actively trade and which to avoid. Consider:
+- Win rate below 25% with >10 trades = avoid
+- Negative PnL with >20 trades = strong avoid signal
+- Low volume = poor execution, avoid
+- Keep at least 3 symbols active for diversification
+
+Respond with ONLY valid JSON:
+{{"trade": ["BTCUSDT", "ETHUSDT", ...], "avoid": ["AVAXUSDT", ...], "reasoning": "one sentence"}}"""
+
+        try:
+            response_text, tokens = await asyncio.to_thread(
+                self._call_claude, prompt, HAIKU_MODEL, 200, 8.0
+            )
+            import json
+            text = response_text.strip()
+            if text.startswith("```"):
+                text = "\n".join(text.split("\n")[1:])
+            if text.endswith("```"):
+                text = text[:-3]
+            result = json.loads(text.strip())
+            logger.info(f"[AI Symbols] Trade: {result.get('trade', [])}, Avoid: {result.get('avoid', [])} ({tokens} tokens)")
+            return result
+        except Exception as e:
+            logger.warning(f"[AI Symbols] Failed: {e}")
+            return None
+
     @property
     def daily_cost(self) -> float:
         """Get today's estimated API cost in USD."""
