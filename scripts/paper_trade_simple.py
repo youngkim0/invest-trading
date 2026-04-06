@@ -1384,7 +1384,7 @@ class StrategyConfig:
     # Adaptive sizing (opt-in, default preserves current behavior)
     adaptive_sizing: bool = False    # Master toggle
     min_risk_pct: float = 0.005     # Floor: 0.5% risk minimum
-    max_risk_pct: float = 0.03      # Ceiling: 3% risk maximum
+    max_risk_pct: float = 0.025     # Ceiling: 2.5% risk maximum (v7.0: reduced from 3%)
 
     @property
     def rr_ratio(self) -> float:
@@ -1429,50 +1429,78 @@ def calculate_position_size(capital: float, risk_pct: float, sl_distance_pct: fl
     return quantity, margin
 
 
-def calculate_adaptive_risk_pct(
+def calculate_kelly_risk_pct(
     base_risk_pct: float,
-    confidence: float,
-    consecutive_losses: int,
-    consecutive_wins: int,
-    regime_strength: float = 0.0,
-    regime_aligned: bool = True,
-    multi_strategy_count: int = 0,
+    recent_results: list[float],
+    min_trades: int = 15,
+    kelly_fraction: float = 0.25,
     min_risk_pct: float = 0.005,
-    max_risk_pct: float = 0.03,
+    max_risk_pct: float = 0.025,
 ) -> float:
-    """Calculate adaptive risk percentage based on multiple factors.
+    """Calculate position size using quarter-Kelly criterion from actual trade results.
 
-    Returns adjusted risk_pct, clamped between min and max.
+    v7.0: Replaces calculate_adaptive_risk_pct which had broken scaling:
+    - Win streak boost (gambler's fallacy)
+    - Regime boost (increases risk when drawdowns compound)
+    - Multi-strategy boost (correlated signals aren't independent)
+
+    Kelly formula: f* = (p * b - q) / b
+    where p = win rate, q = loss rate, b = avg_win / avg_loss
+
+    Uses quarter-Kelly for safety (captures 75% of growth with 50% less drawdown).
+    Falls back to base_risk_pct if insufficient trade history.
     """
-    risk = base_risk_pct
+    if len(recent_results) < min_trades:
+        return base_risk_pct
 
-    # 1. Confidence scaling: linear interpolation
-    #    confidence 0.45 -> 50% of base, 0.90 -> 100% of base
-    conf_floor, conf_ceil = 0.45, 0.90
-    conf_scale = max(0.5, min(1.0, (confidence - conf_floor) / (conf_ceil - conf_floor)))
-    risk *= conf_scale
+    wins = [r for r in recent_results if r > 0]
+    losses = [r for r in recent_results if r <= 0]
 
-    # 2. Performance scaling (simplified Kelly-inspired)
-    #    After 2+ consecutive losses, reduce by 25% per loss (floor at 50%)
-    #    After 3+ consecutive wins, boost by 10% per win (cap at 130%)
-    if consecutive_losses >= 2:
-        loss_factor = max(0.5, 1.0 - 0.25 * (consecutive_losses - 1))
-        risk *= loss_factor
-    elif consecutive_wins >= 3:
-        win_factor = min(1.3, 1.0 + 0.10 * (consecutive_wins - 2))
-        risk *= win_factor
+    if not wins or not losses:
+        return base_risk_pct
 
-    # 3. Regime alignment: boost when strongly aligned, reduce when misaligned
-    if regime_aligned and regime_strength > 0.5:
-        risk *= 1.0 + 0.15 * regime_strength  # up to +15%
-    elif not regime_aligned:
-        risk *= 0.75  # 25% reduction for counter-regime
+    win_rate = len(wins) / len(recent_results)
+    avg_win = sum(wins) / len(wins)
+    avg_loss = abs(sum(losses) / len(losses))
 
-    # 4. Multi-strategy agreement: small boost when 2+ strategies agree
-    if multi_strategy_count >= 2:
-        risk *= 1.1  # 10% boost
+    if avg_loss == 0:
+        return base_risk_pct
 
+    b = avg_win / avg_loss  # Win/loss ratio
+    kelly = (win_rate * b - (1 - win_rate)) / b
+
+    if kelly <= 0:
+        return min_risk_pct  # No edge — minimum sizing
+
+    risk = kelly * kelly_fraction
     return max(min_risk_pct, min(max_risk_pct, risk))
+
+
+def calculate_vol_adjusted_risk(
+    base_risk_pct: float,
+    atr_pct: float,
+    target_vol_pct: float = 0.015,
+    min_scale: float = 0.5,
+    max_scale: float = 1.5,
+) -> float:
+    """Scale risk inversely with realized volatility (v7.0).
+
+    When ATR is 3% (high vol), scale = 1.5/3.0 = 0.5 (half size).
+    When ATR is 0.75% (low vol), scale = 1.5/0.75 = 2.0, capped at 1.5.
+    """
+    if atr_pct <= 0:
+        return base_risk_pct
+    vol_scale = max(min_scale, min(max_scale, target_vol_pct / atr_pct))
+    return base_risk_pct * vol_scale
+
+
+# v7.0: Correlation groups — coins within a group are 80-95% correlated
+# Max 2 same-direction positions per group (6 coins ≈ 2 real bets, not 6)
+CORRELATION_GROUPS = {
+    "large_cap": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+    "alt_cap": ["XRPUSDT", "DOGEUSDT", "AVAXUSDT"],
+}
+MAX_PER_CORRELATION_GROUP = 2
 
 
 # Strategy name mapping for backward compat with old trades
@@ -1616,6 +1644,20 @@ class SimplePaperTrader:
         self.reversal_close_min_cycles = 2  # Must persist 2 consecutive cycles before closing
         self._reversal_counted_this_cycle: set[str] = set()  # Prevent multi-counting per cycle
 
+        # === v7.0 Portfolio-level risk controls ===
+        # Daily loss limit: stop opening new trades after 5% daily drawdown
+        self.daily_pnl = 0.0
+        self.daily_loss_limit_pct = 0.05  # 5% of initial capital
+        self.daily_loss_halt = False
+        self.daily_pnl_reset_date = ""
+
+        # Max directional exposure: cap same-direction positions across all strategies
+        self.max_long_positions = 3
+        self.max_short_positions = 3
+
+        # Portfolio heat: max total open risk (sum of all SL distances × position values)
+        self.max_portfolio_heat_pct = 0.08  # 8% max total risk if all stops hit
+
     @property
     def total_capital(self):
         return sum(s["capital"] for s in self.strategy_stats.values())
@@ -1623,6 +1665,42 @@ class SimplePaperTrader:
     @property
     def total_pnl(self):
         return sum(s["total_pnl"] for s in self.strategy_stats.values())
+
+    # === v7.0 Portfolio risk check methods ===
+
+    def _check_portfolio_exposure(self, proposed_side: str) -> bool:
+        """Check if adding a position would exceed max directional exposure."""
+        count = sum(1 for p in self.positions.values() if p.get("side") == proposed_side)
+        limit = self.max_long_positions if proposed_side == "long" else self.max_short_positions
+        return count < limit
+
+    def _check_correlation_limit(self, symbol: str, proposed_side: str) -> bool:
+        """Check if adding a position would exceed correlation group limits."""
+        for group_name, group_symbols in CORRELATION_GROUPS.items():
+            if symbol in group_symbols:
+                count = sum(
+                    1 for k, v in self.positions.items()
+                    if self._parse_pos_key(k)[1] in group_symbols
+                    and v.get("side") == proposed_side
+                )
+                if count >= MAX_PER_CORRELATION_GROUP:
+                    return False
+        return True
+
+    def _calculate_portfolio_heat(self) -> float:
+        """Total portfolio risk: sum of (position_value × sl_distance) / initial_capital."""
+        total_risk = 0.0
+        for pos in self.positions.values():
+            pos_value = pos.get("quantity", 0) * pos.get("entry_price", 0)
+            sl_pct = pos.get("sl_pct", 0.02)
+            total_risk += pos_value * sl_pct
+        return total_risk / self.initial_capital if self.initial_capital > 0 else 0
+
+    def _check_portfolio_heat(self, strategy: 'StrategyConfig') -> bool:
+        """Check if adding a new position would exceed max portfolio heat."""
+        estimated_risk = strategy.risk_per_trade_pct * strategy.capital
+        current_heat = self._calculate_portfolio_heat()
+        return (current_heat + estimated_risk / self.initial_capital) <= self.max_portfolio_heat_pct
 
     def _get_available_capital(self, strategy: 'StrategyConfig') -> float:
         """Get available capital for a strategy from the shared pool.
@@ -2074,6 +2152,15 @@ class SimplePaperTrader:
         if signal["confidence"] < 0.65:
             return
 
+        # === v7.0: Daily loss limit ===
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if today != self.daily_pnl_reset_date:
+            self.daily_pnl = 0.0
+            self.daily_loss_halt = False
+            self.daily_pnl_reset_date = today
+        if self.daily_loss_halt:
+            return
+
         # Check per-strategy circuit breaker
         cb_until = self.circuit_breaker_until.get(strategy.name)
         if cb_until:
@@ -2123,6 +2210,21 @@ class SimplePaperTrader:
         # (prevents simultaneous pileup but allows independent sequential entries)
         proposed_side = "long" if signal["signal"] in ["buy", "strong_buy"] else "short"
         now = datetime.now(timezone.utc)
+
+        # === v7.0: Portfolio-level risk gates ===
+        if not self._check_portfolio_exposure(proposed_side):
+            logger.info(f"   [{strategy.name}] {symbol}: Max {proposed_side} positions reached ({self.max_long_positions if proposed_side == 'long' else self.max_short_positions})")
+            return
+
+        if not self._check_correlation_limit(symbol, proposed_side):
+            logger.info(f"   [{strategy.name}] {symbol}: Correlation group limit reached for {proposed_side}")
+            return
+
+        if not self._check_portfolio_heat(strategy):
+            heat = self._calculate_portfolio_heat()
+            logger.info(f"   [{strategy.name}] {symbol}: Portfolio heat limit ({heat:.1%} >= {self.max_portfolio_heat_pct:.0%})")
+            return
+
         for existing_key, existing_pos in self.positions.items():
             if existing_key == pos_key:
                 continue
@@ -2429,26 +2531,26 @@ class SimplePaperTrader:
 
     def _get_effective_risk_pct(self, strategy: StrategyConfig, signal: dict,
                                  symbol: str, side: str, htf_trend: dict | None) -> float:
-        """Calculate effective risk percentage (adaptive or fixed)."""
+        """Calculate effective risk percentage using Kelly criterion (v7.0)."""
         if not strategy.adaptive_sizing:
             return strategy.risk_per_trade_pct
 
         stats = self.strategy_stats[strategy.name]
-        effective_risk = calculate_adaptive_risk_pct(
+        effective_risk = calculate_kelly_risk_pct(
             base_risk_pct=strategy.risk_per_trade_pct,
-            confidence=signal.get("confidence", 0.7),
-            consecutive_losses=stats["consecutive_losses"],
-            consecutive_wins=stats["consecutive_wins"],
-            regime_strength=htf_trend.get("strength", 0) if htf_trend else 0,
-            regime_aligned=self._check_regime_alignment(side, htf_trend),
-            multi_strategy_count=self._count_agreeing_strategies(symbol, side),
+            recent_results=stats["recent_results"],
+            min_trades=15,
+            kelly_fraction=0.25,
             min_risk_pct=strategy.min_risk_pct,
             max_risk_pct=strategy.max_risk_pct,
         )
+        # Log Kelly sizing info
+        n = len(stats["recent_results"])
+        wins = sum(1 for r in stats["recent_results"] if r > 0)
+        wr = wins / n * 100 if n > 0 else 0
         logger.info(
-            f"   [{strategy.name}] Adaptive risk: {strategy.risk_per_trade_pct:.1%} → {effective_risk:.1%} "
-            f"(conf={signal.get('confidence', 0):.0%}, losses={stats['consecutive_losses']}, "
-            f"wins={stats['consecutive_wins']}, regime={htf_trend.get('strength', 0) if htf_trend else 0:.2f})"
+            f"   [{strategy.name}] Kelly risk: {strategy.risk_per_trade_pct:.1%} → {effective_risk:.1%} "
+            f"(WR={wr:.0f}% over {n} trades)"
         )
         return effective_risk
 
@@ -2488,6 +2590,9 @@ class SimplePaperTrader:
             logger.info(f"   [{strategy.name}] {symbol}: No capital available (pool fully allocated)")
             return
         effective_risk = self._get_effective_risk_pct(strategy, signal, symbol, side, htf_trend)
+        # v7.0: Volatility-adjusted sizing — size smaller when market is volatile
+        atr_pct = atr_value / price if price > 0 else 0
+        effective_risk = calculate_vol_adjusted_risk(effective_risk, atr_pct)
         quantity, margin = calculate_position_size(
             capital=available_capital,
             risk_pct=effective_risk,
@@ -2596,6 +2701,11 @@ class SimplePaperTrader:
         # Update per-strategy stats
         stats["capital"] += pnl
         stats["total_pnl"] += pnl
+        # v7.0: Track daily PnL for daily loss limit
+        self.daily_pnl += pnl
+        if self.initial_capital > 0 and self.daily_pnl / self.initial_capital < -self.daily_loss_limit_pct:
+            self.daily_loss_halt = True
+            logger.warning(f"🛑 DAILY LOSS LIMIT: ${self.daily_pnl:.2f} ({self.daily_pnl/self.initial_capital:.1%}). No new entries today.")
         stats["trade_count"] += 1
         if pnl > 0:
             stats["winning_trades"] += 1
@@ -2605,7 +2715,7 @@ class SimplePaperTrader:
             stats["consecutive_losses"] += 1
             stats["consecutive_wins"] = 0
         stats["recent_results"].append(pnl)
-        if len(stats["recent_results"]) > 20:
+        if len(stats["recent_results"]) > 30:  # v7.0: increased from 20 for Kelly sizing
             stats["recent_results"].pop(0)
 
         duration = (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()

@@ -1,5 +1,39 @@
 # Paper Trader Changelog
 
+## v7.0 — Portfolio Risk Controls + Kelly Sizing (2026-04-06)
+
+**Problem**: Bot had zero portfolio-level risk management. 7 strategies × 6 correlated coins = up to 42 concurrent positions with no aggregate limit. Position sizing boosted risk on win streaks and strong regimes (exactly when drawdowns compound). 30-day result: +$64 on 494 trades — profitable strategies undermined by uncontrolled risk.
+
+### Portfolio Risk Controls (new)
+- **Daily loss limit**: Stop opening new trades after 5% daily drawdown. Prevents catastrophic loss days.
+- **Max directional exposure**: Cap at 3 longs and 3 shorts across all strategies. A single market move can no longer trigger 6+ simultaneous losses.
+- **Correlation group limits**: BTC/ETH/SOL = large_cap group, XRP/DOGE/AVAX = alt_cap group. Max 2 same-direction positions per group. 6 coins at 80-95% correlation = 2 real bets, not 6.
+- **Portfolio heat check**: Total open risk (all positions' SL distances × values) capped at 8% of capital. Prevents over-leveraged portfolio even when individual positions are within limits.
+
+### Position Sizing Overhaul
+- **Kelly-based sizing**: Replaced `calculate_adaptive_risk_pct` with `calculate_kelly_risk_pct`. Uses quarter-Kelly from actual rolling 30-trade win rate and avg win/loss ratio. No more arbitrary confidence scaling, win-streak boosts, regime boosts, or multi-strategy boosts.
+- **Volatility-adjusted sizing**: Position size scales inversely with ATR. High vol → smaller positions, low vol → larger positions. Target: 1.5% ATR.
+- **Max risk ceiling**: Reduced from 3% to 2.5% per trade.
+- **Recent results history**: Increased from 20 to 30 trades for more stable Kelly estimates.
+
+### What was removed
+- Win streak risk boost (gambler's fallacy)
+- Regime alignment risk boost (increases risk when drawdowns compound)
+- Multi-strategy agreement risk boost (correlated signals aren't independent)
+- Confidence-based linear risk scaling (replaced by Kelly from actual results)
+
+### Expected impact
+| Control | Prevention | Estimated benefit |
+|---------|-----------|-------------------|
+| Daily loss limit | -20% drawdown days | Caps worst day at -5% |
+| Max directional exposure | 6 correlated losses | ~50% worst-case reduction |
+| Correlation groups | BTC+ETH+SOL same-direction | Further ~30% risk reduction |
+| Portfolio heat | Over-leveraged portfolio | Caps total open risk at 8% |
+| Kelly sizing | Oversizing no-edge strategies | crash_momentum: same PnL, 75% less risk |
+| Vol-adjusted sizing | Big losses in volatile markets | 15-25% smaller avg loss |
+
+---
+
 ## v6.9.4 — Simplification: restore long strategies, reduce short overtrading (2026-04-06)
 
 **Problem**: Since v6.9.2-v6.9.3 filters, ZERO long trades fired in 3 days. System became shorts-only. Missed the Apr 5 BTC rally ($67.3K→$69.1K) and actively shorted into it. Meanwhile crash_momentum churned 34 trades for -$7.
