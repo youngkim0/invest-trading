@@ -388,6 +388,106 @@ class MarketDataCollector:
             logger.error(f"Failed to fetch Fear & Greed Index: {e}")
             return {"value": 50, "classification": "Neutral"}
 
+    # =================================================================
+    # v7.0.3: Free external data sources for AI intelligence
+    # =================================================================
+
+    async def get_crypto_news(self, limit: int = 10) -> list[dict]:
+        """Fetch latest crypto news from CoinGecko (free, no key needed).
+
+        Returns list of {title, description, url, published_at}.
+        """
+        try:
+            url = "https://api.coingecko.com/api/v3/news"
+            response = await self.client.get(url, timeout=10.0)
+            response.raise_for_status()
+            data = response.json()
+            articles = data.get("data", [])[:limit]
+            return [
+                {
+                    "title": a.get("title", ""),
+                    "description": (a.get("description") or "")[:200],
+                    "url": a.get("url", ""),
+                    "published_at": a.get("updated_at") or a.get("created_at", ""),
+                }
+                for a in articles
+            ]
+        except Exception as e:
+            logger.debug(f"Crypto news fetch failed: {e}")
+            return []
+
+    async def get_funding_rate_history(self, symbol: str = "BTCUSDT", limit: int = 30) -> list[dict]:
+        """Fetch historical funding rates from Binance (free).
+
+        Returns last N funding rate entries (each is 8h apart).
+        30 entries = 10 days of history.
+        """
+        try:
+            url = f"{self.BINANCE_FAPI_URL}/fapi/v1/fundingRate"
+            params = {"symbol": symbol, "limit": limit}
+            response = await self.client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            return [
+                {
+                    "symbol": symbol,
+                    "rate": float(d.get("fundingRate", 0)),
+                    "time": datetime.fromtimestamp(d.get("fundingTime", 0) / 1000).isoformat(),
+                }
+                for d in data
+            ]
+        except Exception as e:
+            logger.debug(f"Funding rate history fetch failed for {symbol}: {e}")
+            return []
+
+    async def get_macro_dxy(self) -> dict:
+        """Fetch DXY (US Dollar Index) approximation from free API.
+
+        Uses EUR/USD as proxy (DXY is ~57% EUR/USD weighted).
+        Free, no key needed.
+        """
+        try:
+            # Use Binance forex proxy — EUR/USDT as DXY inverse proxy
+            url = f"{self.BINANCE_BASE_URL}/ticker/price"
+            params = {"symbol": "EURUSDT"}
+            response = await self.client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            eur_usd = float(data.get("price", 1.0))
+            # Approximate DXY: when EUR/USD goes up, DXY goes down
+            # DXY ~= 100 * (1 / EUR/USD) normalized
+            dxy_approx = round(100.0 / eur_usd * 1.08, 2)  # Rough normalization
+            return {
+                "dxy_approx": dxy_approx,
+                "eur_usd": eur_usd,
+                "source": "binance_eurusdt_proxy",
+            }
+        except Exception as e:
+            logger.debug(f"DXY proxy fetch failed: {e}")
+            return {"dxy_approx": 100.0, "eur_usd": 1.0, "source": "fallback"}
+
+    async def get_btc_dominance(self) -> dict:
+        """Fetch BTC dominance from CoinGecko (free).
+
+        BTC dominance rising = alts underperforming, risk-off in crypto.
+        """
+        try:
+            url = "https://api.coingecko.com/api/v3/global"
+            response = await self.client.get(url, timeout=10.0)
+            response.raise_for_status()
+            data = response.json().get("data", {})
+            market_cap_pct = data.get("market_cap_percentage", {})
+            return {
+                "btc_dominance": round(market_cap_pct.get("btc", 0), 2),
+                "eth_dominance": round(market_cap_pct.get("eth", 0), 2),
+                "total_market_cap_usd": data.get("total_market_cap", {}).get("usd", 0),
+                "total_volume_usd": data.get("total_volume", {}).get("usd", 0),
+                "market_cap_change_24h": round(data.get("market_cap_change_percentage_24h_usd", 0), 2),
+            }
+        except Exception as e:
+            logger.debug(f"BTC dominance fetch failed: {e}")
+            return {"btc_dominance": 0, "eth_dominance": 0}
+
     async def get_derivatives_data(
         self,
         symbol: str = "BTCUSDT",

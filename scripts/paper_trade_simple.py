@@ -2175,6 +2175,72 @@ class SimplePaperTrader:
         except Exception as e:
             logger.warning(f"📝 [AI Log] Flush failed: {e}")
 
+    async def _save_market_snapshot(self, collector):
+        """Save market data snapshot to DB every 5 minutes for AI learning.
+
+        Stores derivatives data (funding, OI, taker ratios, top trader positions),
+        external data (news, BTC dominance, DXY proxy, Fear & Greed), and whale data.
+        All from free APIs. Stored in ai_reviews with period='market_snapshot'.
+        """
+        try:
+            import json
+
+            # Fetch BTC derivatives (already fetched in main loop, but snapshot may be stale)
+            btc_derivs = await collector.get_derivatives_data("BTCUSDT")
+
+            # Fetch new external data sources (all free)
+            news, btc_dom, dxy, funding_hist = await asyncio.gather(
+                collector.get_crypto_news(5),
+                collector.get_btc_dominance(),
+                collector.get_macro_dxy(),
+                collector.get_funding_rate_history("BTCUSDT", 3),
+                return_exceptions=True,
+            )
+
+            # Build snapshot
+            snapshot = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                # Derivatives
+                "btc_funding_rate": btc_derivs.get("funding_rate", [{}])[0].get("rate", 0) if btc_derivs.get("funding_rate") else 0,
+                "btc_open_interest": btc_derivs.get("open_interest", {}).get("openInterest", 0),
+                "btc_taker_ratio": btc_derivs.get("taker_ratio_15m", [{}])[0].get("buy_sell_ratio", 1.0) if btc_derivs.get("taker_ratio_15m") else 1.0,
+                "btc_top_long_pct": btc_derivs.get("top_long_short", [{}])[0].get("long_account", 0.5) if btc_derivs.get("top_long_short") else 0.5,
+                "btc_global_long_pct": btc_derivs.get("global_long_short", [{}])[0].get("long_account", 0.5) if btc_derivs.get("global_long_short") else 0.5,
+                # External - handle exceptions from gather
+                "fear_greed": self._fear_greed_cache.get("value", 50),
+                "fear_greed_class": self._fear_greed_cache.get("classification", "Neutral"),
+                "btc_dominance": btc_dom.get("btc_dominance", 0) if not isinstance(btc_dom, Exception) else 0,
+                "market_cap_change_24h": btc_dom.get("market_cap_change_24h", 0) if not isinstance(btc_dom, Exception) else 0,
+                "dxy_approx": dxy.get("dxy_approx", 100) if not isinstance(dxy, Exception) else 100,
+                "eur_usd": dxy.get("eur_usd", 1.0) if not isinstance(dxy, Exception) else 1.0,
+                # News headlines
+                "news_headlines": [n.get("title", "") for n in news[:5]] if not isinstance(news, Exception) else [],
+                # Funding rate history (last 3 = 24h)
+                "funding_history": funding_hist if not isinstance(funding_hist, Exception) else [],
+                # Whale data
+                "whale_consensus": {k: v.get("consensus", "neutral") for k, v in self._whale_consensus_cache.items()} if self._whale_consensus_cache else {},
+                # AI state
+                "ai_regime": self._ai_regime,
+            }
+
+            await asyncio.to_thread(
+                lambda: self.review_repo.table.insert({
+                    "review_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                    "period": "market_snapshot",
+                    "summary": f"BTC funding={snapshot['btc_funding_rate']:.4%} | OI={snapshot['btc_open_interest']} | "
+                               f"taker={snapshot['btc_taker_ratio']:.3f} | F&G={snapshot['fear_greed']} | "
+                               f"BTC.D={snapshot['btc_dominance']:.1f}% | DXY≈{snapshot['dxy_approx']}",
+                    "strategy_insights": json.dumps(snapshot, default=str),
+                    "suggestions": json.dumps(snapshot.get("news_headlines", []), default=str),
+                    "model_used": "data_collector",
+                    "tokens_used": 0,
+                }).execute()
+            )
+            logger.debug(f"📸 [Snapshot] Market data saved (F&G={snapshot['fear_greed']}, BTC.D={snapshot['btc_dominance']:.1f}%)")
+
+        except Exception as e:
+            logger.warning(f"📸 [Snapshot] Failed to save market data: {e}")
+
     def _get_available_capital(self, strategy: 'StrategyConfig') -> float:
         """Get available capital for a strategy from the shared pool.
 
@@ -2357,6 +2423,8 @@ class SimplePaperTrader:
         self._ai_avoid_symbols = set()  # Symbols AI says to avoid
         self._ai_action_log = []  # Buffer of AI actions to flush to DB every 15min
         self._last_ai_log_flush = datetime.min.replace(tzinfo=timezone.utc)
+        self._last_market_snapshot = datetime.min.replace(tzinfo=timezone.utc)  # v7.0.3: market data storage
+        self._market_data_cache = {}  # Store last fetched market data for snapshot
 
         try:
             while self.running:
@@ -2417,6 +2485,11 @@ class SimplePaperTrader:
                     await self._ai_parameter_tuning()
                     self._last_pattern_learn = now_utc
                     self._last_param_tune = now_utc
+
+                # Every 5min: Save market data snapshot to DB for AI learning
+                if (now_utc - self._last_market_snapshot).total_seconds() >= 300:
+                    await self._save_market_snapshot(collector)
+                    self._last_market_snapshot = now_utc
 
                 # Status update
                 self._print_status()
