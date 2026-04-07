@@ -1972,15 +1972,20 @@ class SimplePaperTrader:
         if not self.ai_analyzer:
             return
         try:
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            # v7.0.3: Only use trades from CURRENT system version, not old data.
+            # Using old v6.9.x data caused the AI to widen SL for a $2,500 strategy
+            # based on results from a $1,250 strategy — amplifying losses.
+            # Use dashboard cutoff date as the system start marker.
+            system_start = "2026-04-06T04:50:00Z"  # v7.0 deploy
             result = await asyncio.to_thread(
                 lambda: self.trade_repo.table.select("strategy_name,net_pnl,exit_reasoning,duration_seconds")
-                .gte("exit_time", cutoff)
+                .gte("exit_time", system_start)
                 .not_.is_("exit_time", "null")
                 .execute()
             )
             trades = result.data or []
-            if len(trades) < 15:
+            if len(trades) < 30:  # Need 30+ trades under current system before tuning
+                logger.info(f"🔧 [AI Tuning] Only {len(trades)} trades since v7.0 deploy, need 30+ before tuning")
                 return
 
             current_params = {s.name: {"sl_atr_mult": s.sl_atr_mult, "tp_atr_mult": s.tp_atr_mult,
