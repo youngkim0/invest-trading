@@ -1992,7 +1992,10 @@ class SimplePaperTrader:
             if not recommendations:
                 return
 
-            # Apply parameter changes
+            # Apply parameter changes with GRADUAL stepping
+            # v7.0.3: Max 10% change per tuning cycle to prevent sudden large shifts.
+            # AI tuner jumped SL 1.5→2.0 (33%) in one step, which amplified losses by $20/trade.
+            MAX_STEP_PCT = 0.10  # Max 10% change per cycle
             for s in self.strategies:
                 rec = recommendations.get(s.name)
                 if not rec:
@@ -2000,12 +2003,18 @@ class SimplePaperTrader:
                 changes = []
                 if rec.get("sl_atr_mult") and rec["sl_atr_mult"] != s.sl_atr_mult:
                     old = s.sl_atr_mult
-                    s.sl_atr_mult = max(1.0, min(3.0, rec["sl_atr_mult"]))  # Clamp to safe range
-                    changes.append(f"SL {old}→{s.sl_atr_mult}x ATR")
+                    target = max(1.0, min(3.0, rec["sl_atr_mult"]))
+                    max_delta = old * MAX_STEP_PCT
+                    new_val = max(old - max_delta, min(old + max_delta, target))
+                    s.sl_atr_mult = round(new_val, 2)
+                    changes.append(f"SL {old}→{s.sl_atr_mult}x ATR (target {target})")
                 if rec.get("tp_atr_mult") and rec["tp_atr_mult"] != s.tp_atr_mult:
                     old = s.tp_atr_mult
-                    s.tp_atr_mult = max(1.5, min(5.0, rec["tp_atr_mult"]))
-                    changes.append(f"TP {old}→{s.tp_atr_mult}x ATR")
+                    target = max(1.5, min(5.0, rec["tp_atr_mult"]))
+                    max_delta = old * MAX_STEP_PCT
+                    new_val = max(old - max_delta, min(old + max_delta, target))
+                    s.tp_atr_mult = round(new_val, 2)
+                    changes.append(f"TP {old}→{s.tp_atr_mult}x ATR (target {target})")
                 if changes:
                     logger.info(f"🔧 [AI Tuning] {s.name}: {', '.join(changes)} — {rec.get('notes', '')}")
                     self._log_ai_action("parameter_tuning", {
