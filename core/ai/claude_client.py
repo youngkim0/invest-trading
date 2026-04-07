@@ -753,7 +753,7 @@ Respond with ONLY valid JSON. Example:
     async def select_symbols(self, symbol_stats: dict, available_symbols: list[str]) -> dict | None:
         """#6: AI symbol selection. Recommends best symbols to trade.
 
-        Returns: {"trade": ["BTCUSDT", ...], "avoid": ["AVAXUSDT", ...], "reasoning": "..."}
+        Returns: {"avoid_long": ["AVAXUSDT", ...], "avoid_short": [], "reasoning": "..."}
         Runs every 12h. Uses Haiku.
         """
         lines = []
@@ -768,14 +768,17 @@ SYMBOL PERFORMANCE (last 7 days):
 
 Available symbols: {', '.join(available_symbols)}
 
-Recommend which symbols to actively trade and which to avoid. Consider:
-- Win rate below 25% with >10 trades = avoid
-- Negative PnL with >20 trades = strong avoid signal
-- Low volume = poor execution, avoid
-- Keep at least 3 symbols active for diversification
+IMPORTANT: A symbol that loses on LONGS may be GREAT for SHORTS (weak coins crash harder).
+Do NOT avoid a symbol entirely — specify DIRECTION.
+
+Recommend which symbols to avoid for longs and which to avoid for shorts:
+- Avoid LONG on symbols with <25% WR on buy trades and negative PnL
+- Avoid SHORT on symbols with <25% WR on sell trades and negative PnL
+- A symbol can appear in avoid_long but NOT avoid_short (and vice versa)
+- Keep at least 4 symbols available per direction
 
 Respond with ONLY valid JSON:
-{{"trade": ["BTCUSDT", "ETHUSDT", ...], "avoid": ["AVAXUSDT", ...], "reasoning": "one sentence"}}"""
+{{"avoid_long": ["AVAXUSDT"], "avoid_short": [], "reasoning": "one sentence"}}"""
 
         try:
             response_text, tokens = await asyncio.to_thread(

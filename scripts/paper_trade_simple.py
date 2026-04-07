@@ -2056,12 +2056,15 @@ class SimplePaperTrader:
                     sym_stats[sym]["wins"] += 1
 
             recommendation = await self.ai_analyzer.select_symbols(dict(sym_stats), self.symbols)
-            if recommendation and recommendation.get("avoid"):
-                self._ai_avoid_symbols = set(recommendation["avoid"])
-                logger.info(f"🎯 [AI Symbols] Avoiding: {self._ai_avoid_symbols}")
-                self._log_ai_action("symbol_selection", {"avoid": list(self._ai_avoid_symbols), "reasoning": recommendation.get("reasoning", "")})
-            else:
-                self._ai_avoid_symbols = set()
+            if recommendation:
+                self._ai_avoid_long = set(recommendation.get("avoid_long") or [])
+                self._ai_avoid_short = set(recommendation.get("avoid_short") or [])
+                logger.info(f"🎯 [AI Symbols] Avoid long: {self._ai_avoid_long}, Avoid short: {self._ai_avoid_short}")
+                self._log_ai_action("symbol_selection", {
+                    "avoid_long": list(self._ai_avoid_long),
+                    "avoid_short": list(self._ai_avoid_short),
+                    "reasoning": recommendation.get("reasoning", ""),
+                })
         except Exception as e:
             logger.warning(f"🎯 [AI Symbols] Error: {e}")
 
@@ -2153,7 +2156,8 @@ class SimplePaperTrader:
             state = {
                 "regime": self._ai_regime,
                 "learned_rules": {k: v.get("notes", "") for k, v in self._ai_learned_rules.items()} if self._ai_learned_rules else {},
-                "avoid_symbols": list(self._ai_avoid_symbols),
+                "avoid_long": list(self._ai_avoid_long),
+                "avoid_short": list(self._ai_avoid_short),
                 "open_positions": len(self.positions),
                 "total_capital": self.total_capital,
                 "daily_pnl": round(self.daily_pnl, 2),
@@ -2420,7 +2424,8 @@ class SimplePaperTrader:
         self._last_symbol_select = datetime.min.replace(tzinfo=timezone.utc)
         self._ai_regime = {"regime": "unknown", "confidence": 0, "risk_level": "medium", "bias": "neutral"}
         self._ai_learned_rules = {}  # {strategy_name: {avoid_symbols, min_vol_ratio, ...}}
-        self._ai_avoid_symbols = set()  # Symbols AI says to avoid
+        self._ai_avoid_long = set()   # Symbols AI says to avoid for longs
+        self._ai_avoid_short = set()  # Symbols AI says to avoid for shorts
         self._ai_action_log = []  # Buffer of AI actions to flush to DB every 15min
         self._last_ai_log_flush = datetime.min.replace(tzinfo=timezone.utc)
         self._last_market_snapshot = datetime.min.replace(tzinfo=timezone.utc)  # v7.0.3: market data storage
@@ -2808,10 +2813,14 @@ class SimplePaperTrader:
             return
 
         # === v7.0.2: AI Intelligence gates ===
-        # Symbol avoidance from AI symbol selection (#6)
-        if symbol in self._ai_avoid_symbols:
-            self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": "symbol_avoid"})
-            logger.info(f"   [{strategy.name}] {symbol}: AI says avoid this symbol")
+        # Symbol avoidance from AI symbol selection (#6) — direction-aware
+        if proposed_side == "long" and symbol in self._ai_avoid_long:
+            self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": "avoid_long"})
+            logger.info(f"   [{strategy.name}] {symbol}: AI says avoid LONG on this symbol")
+            return
+        if proposed_side == "short" and symbol in self._ai_avoid_short:
+            self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": "avoid_short"})
+            logger.info(f"   [{strategy.name}] {symbol}: AI says avoid SHORT on this symbol")
             return
 
         # Learned rules from AI pattern learning (#1)
