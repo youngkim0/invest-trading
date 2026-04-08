@@ -1771,7 +1771,9 @@ class SimplePaperTrader:
                     logger.info("📊 [Rebalance] No positive-edge strategies, keeping current allocation")
                     return
 
-                min_alloc = max(200.0, total_capital * 0.04)
+                # v7.0.4: Min $500 per strategy. $225 was too small to take meaningful positions.
+                # Order_flow and smart_money got gutted to $225 and couldn't trade during +4.2% rally.
+                min_alloc = max(500.0, total_capital * 0.08)
                 max_alloc = total_capital * 0.50
                 new_allocs = {}
                 for s in self.strategies:
@@ -3058,12 +3060,10 @@ class SimplePaperTrader:
             confidence = signal.get("confidence", 0)
             exit_reason = f"{signal['signal'].replace('_', ' ').title()} signal (confidence: {confidence:.0%})"
 
-        # 7. AI EXIT OPTIMIZATION (#3) — ask AI for positions open > 30min
-        if not should_exit:
-            ai_exit_reason = await self._ai_check_exit(pos_key, position, price, strategy)
-            if ai_exit_reason:
-                should_exit = True
-                exit_reason = ai_exit_reason
+        # 7. AI EXIT OPTIMIZATION — DISABLED
+        # Was closing profitable positions before they could run. Killed the only
+        # trend_breakout long 10 hours before a +4.2% BTC rally. Let strategies
+        # manage their own exits via SL/TP/trailing/stale mechanisms.
 
         if should_exit:
             await self._close_position(pos_key, price, exit_reason, strategy)

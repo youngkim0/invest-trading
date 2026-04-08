@@ -432,15 +432,15 @@ Total capital: ${total_capital:.0f}
 
 RULES:
 1. Allocate MORE capital to strategies with high PnL/hr and positive PnL
-2. Allocate LESS (but minimum $200) to strategies that are losing money or have 0 trades
+2. Allocate LESS (but minimum $500) to strategies that are losing money or have 0 trades
 3. No single strategy gets more than 50% of total capital
-4. Every strategy gets at least $200 (floor) to stay alive for regime changes
-5. Strategies with 0 trades in 7 days should get minimum allocation ($200)
+4. Every strategy gets at least $500 (floor) — $200 is too small for meaningful trades at 10x leverage
+5. Strategies with 0 trades may be waiting for the right conditions — don't starve them
 6. Weight PnL/hr MORE than raw PnL (efficiency matters more than volume)
 7. Consider win rate — below 35% suggests no real edge
 
 Respond with ONLY valid JSON, no explanation. Example format:
-{{"trend_breakout": 2500, "order_flow": 1000, "smart_money": 800, "crash_momentum": 300, "funding_reversion": 200, "regime_short": 200, "refined_liq_cascade": 200, "failed_breakout_short": 300}}"""
+{{"trend_breakout": 2500, "order_flow": 1000, "smart_money": 800, "crash_momentum": 500, "funding_reversion": 500, "regime_short": 500, "refined_liq_cascade": 500, "failed_breakout_short": 500}}"""
 
         try:
             response_text, tokens = await asyncio.to_thread(
@@ -473,7 +473,7 @@ Respond with ONLY valid JSON, no explanation. Example format:
             result = {}
             for name, amount in allocations.items():
                 if name in strategy_stats:
-                    result[name] = max(200.0, amount * scale)
+                    result[name] = max(500.0, amount * scale)
 
             # Final normalize after floor
             final_sum = sum(result.values())
