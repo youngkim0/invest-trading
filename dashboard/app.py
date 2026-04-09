@@ -26,7 +26,7 @@ try:
     UTC = ZoneInfo("UTC")
 except Exception:
     pass  # Keep the fallback values defined above
-NEW_SYSTEM_DATE = "2026-04-07T00:15:00Z"  # v7.0.3 clean start: AI suite + data collection + 1-pos limit
+NEW_SYSTEM_DATE = "2026-04-09T02:30:00Z"  # v7.1 clean start: AI stripped to observe-only, strategies trade freely
 
 
 def to_kst(timestamp_str: str) -> str:
@@ -502,7 +502,7 @@ Keep response under 500 words."""
 def main():
     st.title("📈 AI Trading Dashboard")
     kst_now = datetime.now(timezone.utc) + timedelta(hours=9)
-    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v7.0.3 started: Apr 7, 2026 | v7.0.3 (AI intelligence suite, Kelly sizing, 1-pos/strategy, data collection, 6 coins)")
+    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v7.1 started: Apr 9, 2026 | v7.1 (strategies trade freely, Kelly sizing, 1-pos/strategy, AI observe-only, 6 coins)")
 
     # Auto refresh + strategy selector
     col1, col2, col3 = st.columns([2.5, 1.5, 1])

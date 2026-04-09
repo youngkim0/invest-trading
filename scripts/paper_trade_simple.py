@@ -2468,10 +2468,10 @@ class SimplePaperTrader:
                 # Save performance snapshots (one per strategy)
                 await self._save_performance_snapshots()
 
-                # === v7.0.2: AI Intelligence Suite — scheduled tasks ===
+                # === v7.1: Simplified AI — observe and collect only ===
                 now_utc = datetime.now(timezone.utc)
 
-                # Every 15min: Flush AI action log to DB + AI regime detection
+                # Every 15min: AI regime detection (logging only, no entry blocking)
                 if (now_utc - self._last_regime_check).total_seconds() >= 900:
                     await self._flush_ai_action_log()
                     btc_data = await self._fetch_market_data("BTCUSDT", collector)
@@ -2479,24 +2479,16 @@ class SimplePaperTrader:
                         await self._ai_regime_check(btc_data)
                     self._last_regime_check = now_utc
 
-                # Every 6h: Capital rebalance + Symbol selection (#6)
-                if (now_utc - self._last_rebalance_time).total_seconds() >= 21600:
-                    await self._auto_rebalance_capital()
-                    await self._ai_symbol_selection()
-                    self._last_rebalance_time = now_utc
-                    self._last_symbol_select = now_utc
-
-                # Daily: Pattern learning (#1) + Parameter tuning (#4)
-                if (now_utc - self._last_pattern_learn).total_seconds() >= 86400:
-                    await self._ai_pattern_learning()
-                    await self._ai_parameter_tuning()
-                    self._last_pattern_learn = now_utc
-                    self._last_param_tune = now_utc
-
-                # Every 5min: Save market data snapshot to DB for AI learning
+                # Every 5min: Save market data snapshot to DB for future analysis
                 if (now_utc - self._last_market_snapshot).total_seconds() >= 300:
                     await self._save_market_snapshot(collector)
                     self._last_market_snapshot = now_utc
+
+                # REMOVED: AI capital rebalance (was starving winners, feeding churners)
+                # REMOVED: AI symbol selection (was blocking BTC/ETH longs during rallies)
+                # REMOVED: AI parameter tuning (was widening SL from old data, amplifying losses)
+                # REMOVED: AI pattern learning entry blocks (was blocking crash_momentum on AVAX)
+                # Capital allocation is now FIXED at startup. Strategies manage their own trades.
 
                 # Status update
                 self._print_status()
@@ -2814,54 +2806,12 @@ class SimplePaperTrader:
             logger.info(f"   [{strategy.name}] {symbol}: Portfolio heat limit ({heat:.1%} >= {self.max_portfolio_heat_pct:.0%})")
             return
 
-        # === v7.0.2: AI Intelligence gates ===
-        # Symbol avoidance from AI symbol selection (#6) — direction-aware
-        if proposed_side == "long" and symbol in self._ai_avoid_long:
-            self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": "avoid_long"})
-            logger.info(f"   [{strategy.name}] {symbol}: AI says avoid LONG on this symbol")
-            return
-        if proposed_side == "short" and symbol in self._ai_avoid_short:
-            self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": "avoid_short"})
-            logger.info(f"   [{strategy.name}] {symbol}: AI says avoid SHORT on this symbol")
-            return
-
-        # Learned rules from AI pattern learning (#1)
-        rules = self._ai_learned_rules.get(strategy.name)
-        if rules:
-            avoid = rules.get("avoid_symbols") or []
-            if symbol in avoid:
-                self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": "learned_avoid_symbol"})
-                logger.info(f"   [{strategy.name}] {symbol}: AI learned rule — avoid this symbol")
-                return
-            min_conf = rules.get("min_confidence")
-            if min_conf and signal.get("confidence", 1.0) < min_conf:
-                self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": f"learned_min_confidence ({signal.get('confidence', 0):.2f} < {min_conf})"})
-                logger.info(f"   [{strategy.name}] {symbol}: AI learned rule — confidence {signal.get('confidence', 0):.2f} < {min_conf}")
-                return
-            indicators = signal.get("indicators", {})
-            min_vol = rules.get("min_vol_ratio")
-            if min_vol and indicators.get("vol_ratio", 999) < min_vol:
-                self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": f"learned_min_vol ({indicators.get('vol_ratio', 0):.1f} < {min_vol})"})
-                logger.info(f"   [{strategy.name}] {symbol}: AI learned rule — vol_ratio {indicators.get('vol_ratio', 0):.1f} < {min_vol}")
-                return
-            min_htf = rules.get("min_htf_strength")
-            if min_htf and indicators.get("htf_strength", 999) < min_htf:
-                self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": f"learned_min_htf ({indicators.get('htf_strength', 0):.2f} < {min_htf})"})
-                logger.info(f"   [{strategy.name}] {symbol}: AI learned rule — htf_strength {indicators.get('htf_strength', 0):.2f} < {min_htf}")
-                return
-
-        # AI regime bias check — don't go long in strong bear regime or short in strong bull
-        ai_regime = self._ai_regime
-        if ai_regime.get("confidence", 0) >= 0.7:
-            bias = ai_regime.get("bias", "neutral")
-            if proposed_side == "long" and bias == "short" and ai_regime.get("risk_level") == "high":
-                self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": f"regime_bias (long blocked, bias=short)"})
-                logger.info(f"   [{strategy.name}] {symbol}: AI regime strongly bearish — blocking long")
-                return
-            if proposed_side == "short" and bias == "long" and ai_regime.get("risk_level") == "high":
-                self._log_ai_action("entry_blocked", {"strategy": strategy.name, "symbol": symbol, "reason": f"regime_bias (short blocked, bias=long)"})
-                logger.info(f"   [{strategy.name}] {symbol}: AI regime strongly bullish — blocking short")
-                return
+        # === v7.1: AI gates REMOVED ===
+        # AI symbol avoidance, learned rules, and regime entry blocking all REMOVED.
+        # These were blocking BTC/ETH longs during a 4.2% rally, starving strategies
+        # of capital, and paralyzing the system to 4 trades/day.
+        # AI now only: detects regime (for logging), collects data, and does post-trade analysis.
+        # The strategies themselves handle all entry/exit decisions.
 
         for existing_key, existing_pos in self.positions.items():
             if existing_key == pos_key:
@@ -3667,33 +3617,20 @@ async def main():
     selected = args.strategies
     base_capital = args.capital
 
-    # Capital allocation: more to proven strategies, less to new/experimental
-    # v7.0.1: Capital allocation based on 30-day PnL/hr efficiency analysis.
-    # 79% of capital was idle. Three strategies had ZERO trades ($1,300 dead).
-    # Principle: give capital to strategies that USE it profitably.
-    #
-    # PnL/hr efficiency ranking:
-    #   trend_breakout  $0.83/hr (38% utilization, +$230/30d) — BEST
-    #   order_flow      $0.54/hr (17% utilization, +$61/30d)
-    #   smart_money     $0.32/hr (2.5% utilization, +$6/30d)
-    #   crash_momentum  $0.02/hr (69% utilization, +$9/30d) — high activity, zero edge
-    #   funding_reversion    0 trades in 30 days
-    #   regime_short         0 trades in 30 days
-    #   refined_liq_cascade  0 trades in 30 days
-    #   failed_breakout_short -$0.12/hr — net loser
-    #
-    # Note: The shared capital pool (_get_available_capital) allows strategies to
-    # use idle capital from other strategies. So these are MAX caps, not reservations.
+    # v7.1: FIXED capital allocation. No more AI rebalancing.
+    # AI rebalancer gave crash_momentum $2,361 and trend_breakout $728 — the opposite
+    # of what works. Capital allocation is now locked based on 30-day proven PnL/hr.
+    # Shared pool still lets idle capital flow to active strategies.
     capital_allocation = {
-        "funding_reversion": base_capital * 0.2,       # $200 — 0 trades/30d, keep minimal for rare events
-        "trend_breakout": base_capital * 2.5,          # $2500 — #1 earner, $0.83/hr, gets the most
+        "funding_reversion": base_capital * 0.5,       # $500 — rare events, keep viable
+        "trend_breakout": base_capital * 1.5,          # $1500 — #1 earner (+$230/30d)
         "trend_pullback": base_capital * 0.75,         # $750 — DISABLED by default
-        "order_flow": base_capital * 1.0,              # $1000 — #2 earner, $0.54/hr
-        "regime_short": base_capital * 0.2,            # $200 — 0 trades/30d, keep minimal
-        "failed_breakout_short": base_capital * 0.3,   # $300 — net loser, minimum viable
-        "refined_liq_cascade": base_capital * 0.2,     # $200 — 0 trades/30d, keep minimal
-        "crash_momentum": base_capital * 0.3,          # $300 — $0.02/hr, barely profitable
-        "smart_money": base_capital * 0.8,             # $800 — decent edge, was undercapitalized
+        "order_flow": base_capital * 1.0,              # $1000 — #2 earner (+$61/30d)
+        "regime_short": base_capital * 0.5,            # $500 — viable when conditions hit
+        "failed_breakout_short": base_capital * 0.5,   # $500 — viable
+        "refined_liq_cascade": base_capital * 0.5,     # $500 — viable
+        "crash_momentum": base_capital * 0.5,          # $500 — viable for real crashes
+        "smart_money": base_capital * 0.75,            # $750 — decent edge
     }
 
     strategy_configs = []
