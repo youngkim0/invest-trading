@@ -1,5 +1,41 @@
 # Paper Trader Changelog
 
+## v8.0 — Evidence-Based Rebuild: Backtest-Proven Strategies Only (2026-04-09)
+
+**6-month backtest (Oct 2025 - Apr 2026, 1,199 trades) revealed the truth:**
+- trend_breakout: -$1,451/6mo, 30.7% WR — proven loser across ALL parameter combos
+- crash_momentum: -$5,871/6mo, 22.8% WR — structurally broken (shorting crypto long bias)
+- All short strategies: massive losers over 6 months
+- Only ONE strategy was profitable: **Pullback to SMA20 + volume confirmation**
+
+### New strategy: UptrendPullbackGenerator (PROVEN)
+- **Backtest: +$439/6mo, 44.7% WR, 215 trades, $243 max drawdown**
+- Buys pullbacks to 1h SMA20 during confirmed uptrends (SMA20 > SMA50)
+- Requires volume > 1.5x average (institutional buying the dip)
+- Best coins: ETH (+$239), AVAX (+$169), XRP (+$118)
+- SL 1.5x ATR (tight, below SMA20), TP 2.5x ATR
+
+### Active strategies (4 total)
+| Strategy | Capital | Edge | Evidence |
+|----------|---------|------|----------|
+| uptrend_pullback | $2,000 | PROVEN | 6mo backtest +$439, 44.7% WR |
+| order_flow | $1,500 | Promising | +$61/30d live (can't backtest - needs derivatives) |
+| smart_money | $1,250 | Promising | +$6/30d live (can't backtest - needs derivatives) |
+| funding_reversion | $1,000 | Rare event | Idle capital shared via pool |
+
+### Disabled strategies (5 removed)
+- trend_breakout: -$1,451/6mo backtest
+- crash_momentum: -$5,871/6mo backtest
+- failed_breakout_short, regime_short, refined_liq_cascade: 0 trades or net losers
+
+### Infrastructure retained
+- Kelly quarter-sizing from rolling 30 trades
+- Volatility-adjusted position sizing
+- 1 position per strategy, daily loss limit 3%, portfolio heat 12%
+- AI regime detection (observe-only), market data snapshots, post-trade analysis
+
+---
+
 ## v7.0.2 — Full AI Trading Intelligence Suite (2026-04-06)
 
 Six AI features that make the system learn and adapt from historical data:
