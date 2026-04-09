@@ -154,9 +154,13 @@ def fetch_trades(limit: int = 100):
 # Strategy name → signal source mapping
 STRATEGY_SOURCE_MAP = {
     "funding_reversion": "funding",
+    "uptrend_pullback": "uptrend_pullback",
+    "rsi_momentum": "rsi_momentum",
+    "bb_squeeze": "bb_squeeze",
+    "order_flow": "flow",
+    "smart_money": "smart_money",
     "trend_breakout": "breakout",
     "trend_pullback": "pullback",
-    "order_flow": "flow",
     "regime_short": "regime_short",
     "failed_breakout_short": "failed_bkout_short",
     "refined_liq_cascade": "refined_cascade",
@@ -177,8 +181,12 @@ STRATEGY_SOURCE_MAP = {
 
 # All known strategy names (for filtering)
 ALL_STRATEGY_NAMES = [
-    "funding_reversion", "trend_breakout", "trend_pullback", "order_flow",
-    "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum", "smart_money",
+    # v8.0 active strategies
+    "funding_reversion", "uptrend_pullback", "rsi_momentum", "bb_squeeze",
+    "order_flow", "smart_money",
+    # Legacy (for historical data)
+    "trend_breakout", "trend_pullback", "crash_momentum",
+    "regime_short", "failed_breakout_short", "refined_liq_cascade",
     "liquidation_cascade", "panic_momentum", "breakdown_reversal",
     "oi_momentum", "funding_sentiment", "volatility_squeeze", "taker_flow",
     "agreement_classic", "agreement_mtf", "momentum", "paper_technical",
@@ -509,14 +517,12 @@ def main():
     with col2:
         strategy_options = {
             "All Strategies": None,
-            "🔄 Funding Reversion": "funding_reversion",
-            "📈 Trend Breakout": "trend_breakout",
+            "📊 Uptrend Pullback": "uptrend_pullback",
+            "📈 RSI Momentum": "rsi_momentum",
+            "💎 BB Squeeze": "bb_squeeze",
             "🌊 Order Flow": "order_flow",
-            "🔻 Regime Short": "regime_short",
-            "🪤 Failed Breakout Short": "failed_breakout_short",
-            "💥 Refined Liq Cascade": "refined_liq_cascade",
-            "📉 Crash Momentum": "crash_momentum",
             "🐋 Smart Money": "smart_money",
+            "🔄 Funding Reversion": "funding_reversion",
         }
         selected_label = st.selectbox("Strategy", list(strategy_options.keys()), key="strategy_select")
         strategy_filter = strategy_options[selected_label]
@@ -540,12 +546,10 @@ def main():
         st.markdown("---")
         st.header("⚖️ Strategy Comparison")
 
-        strat_names = ["funding_reversion", "trend_breakout", "order_flow",
-                       "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum",
-                       "smart_money"]
-        strat_labels = ["Funding Rev.", "Trend Break.", "Order Flow",
-                        "Regime Short", "Failed Bkout", "Liq Cascade", "Crash Mom.",
-                        "Smart Money"]
+        strat_names = ["uptrend_pullback", "rsi_momentum", "bb_squeeze",
+                       "order_flow", "smart_money", "funding_reversion"]
+        strat_labels = ["Pullback", "RSI Mom.", "BB Squeeze",
+                        "Order Flow", "Smart Money", "Funding Rev."]
         comp_cols = st.columns(len(strat_names))
 
         for col, sname, slabel in zip(comp_cols, strat_names, strat_labels):
@@ -585,18 +589,15 @@ def main():
     # PORTFOLIO VALUE BANNER (at the top)
     # ============================================
     # Only count active strategies for portfolio calculation
-    ACTIVE_STRATEGIES = {"funding_reversion", "trend_breakout", "order_flow",
-                          "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum",
-                          "smart_money"}
+    ACTIVE_STRATEGIES = {"funding_reversion", "uptrend_pullback", "rsi_momentum", "bb_squeeze",
+                          "order_flow", "smart_money"}
     STRATEGY_CAPITAL = {
-        "funding_reversion": 500.0,
-        "trend_breakout": 1000.0,
-        "order_flow": 500.0,
-        "regime_short": 400.0,
-        "failed_breakout_short": 600.0,
-        "refined_liq_cascade": 400.0,
-        "crash_momentum": 750.0,
-        "smart_money": 500.0,
+        "funding_reversion": 750.0,
+        "uptrend_pullback": 1250.0,
+        "rsi_momentum": 1500.0,
+        "bb_squeeze": 1500.0,
+        "order_flow": 1000.0,
+        "smart_money": 1000.0,
     }
 
     if strategy_filter is None:
@@ -694,15 +695,19 @@ def main():
     if open_trades:
         # Strategy label mapping
         strat_badge = {
+            "uptrend_pullback": "📊 Pullback",
+            "rsi_momentum": "📈 RSI Mom.",
+            "bb_squeeze": "💎 BB Squeeze",
             "funding_reversion": "🔄 Funding",
-            "trend_breakout": "📈 Breakout",
-            "trend_pullback": "📉 Pullback",
             "order_flow": "🌊 Flow",
-            "regime_short": "🔻 Regime Short",
-            "failed_breakout_short": "🪤 Failed Bkout",
-            "refined_liq_cascade": "💥 Liq Cascade",
-            "crash_momentum": "📉 Crash Mom.",
             "smart_money": "🐋 Smart Money",
+            # Legacy
+            "trend_breakout": "📈 Breakout(old)",
+            "trend_pullback": "📉 Pullback(old)",
+            "regime_short": "🔻 Regime Short(old)",
+            "failed_breakout_short": "🪤 Failed Bkout(old)",
+            "refined_liq_cascade": "💥 Liq Cascade(old)",
+            "crash_momentum": "📉 Crash Mom.(old)",
             # Legacy
             "liquidation_cascade": "💥 Liq Cascade(v6.4)",
             "panic_momentum": "😱 Panic(v6.4)",
@@ -884,15 +889,18 @@ def main():
             # Strategy source label
             sig_source = sig.get('source', 'technical')
             source_labels = {
+                'uptrend_pullback': '📊 Pullback',
+                'rsi_momentum': '📈 RSI Mom.',
+                'bb_squeeze': '💎 BB Squeeze',
                 'funding': '💰 Funding',
                 'breakout': '📈 Breakout',
                 'pullback': '📉 Pullback',
                 'flow': '🌊 Flow',
+                'smart_money': '🐋 Smart Money',
                 'regime_short': '🔻 Regime Short',
                 'failed_bkout_short': '🪤 Failed Bkout',
                 'refined_cascade': '💥 Liq Cascade',
                 'crash_momentum': '📉 Crash Mom.',
-                'smart_money': '🐋 Smart Money',
                 'liq_cascade': '💥 Liq Cascade(v6.4)',
                 'panic_momentum': '😱 Panic(v6.4)',
                 'breakdown': '⬇️ Breakdown(v6.4)',
@@ -994,15 +1002,18 @@ def main():
     if trades:
         # Strategy badge mapping for trades
         trade_strat_badge = {
+            "uptrend_pullback": "📊 Pullback",
+            "rsi_momentum": "📈 RSI Mom.",
+            "bb_squeeze": "💎 BB Squeeze",
             "funding_reversion": "🔄 Funding",
-            "trend_breakout": "📈 Breakout",
-            "trend_pullback": "📉 Pullback",
             "order_flow": "🌊 Flow",
-            "regime_short": "🔻 Regime Short",
-            "failed_breakout_short": "🪤 Failed Bkout",
-            "refined_liq_cascade": "💥 Liq Cascade",
-            "crash_momentum": "📉 Crash Mom.",
             "smart_money": "🐋 Smart Money",
+            "trend_breakout": "📈 Breakout(old)",
+            "trend_pullback": "📉 Pullback(old)",
+            "regime_short": "🔻 Regime(old)",
+            "failed_breakout_short": "🪤 Bkout(old)",
+            "refined_liq_cascade": "💥 Cascade(old)",
+            "crash_momentum": "📉 Crash(old)",
             # Legacy
             "liquidation_cascade": "💥 Liq Cascade(v6.4)",
             "panic_momentum": "😱 Panic(v6.4)",
