@@ -589,8 +589,8 @@ class RSIMomentumGenerator:
         if rsi_4h is None:
             return hold_signal("Cannot calculate 4H RSI", htf_trend)
         r4h = float(rsi_4h.iloc[-1])
-        if r4h < 45:
-            return hold_signal(f"4H RSI too low ({r4h:.0f}, need >45)", htf_trend)
+        if r4h < 42:  # Was 45. Lowered to catch earlier reversals (+$145/6mo more, would have caught Apr 13 bump)
+            return hold_signal(f"4H RSI too low ({r4h:.0f}, need >42)", htf_trend)
 
         # === CONDITION 2: 1H RSI was below 40 (dip happened) ===
         rsi_1h = self._calc_rsi(df_1h["close"])
