@@ -1962,7 +1962,7 @@ class SimplePaperTrader:
         strategies: list[StrategyConfig] = None,
         initial_capital: float = 1000.0,
         leverage: int = 10,
-        check_interval: int = 60,
+        check_interval: int = 15,  # v8.1: 15s for Joovier scalp (was 60s)
         signal_exit_min_confidence: float = 0.70,
         signal_exit_min_profit_pct: float = 0.01,
         stale_position_min_profit_pct: float = 0.005,
@@ -2868,6 +2868,8 @@ class SimplePaperTrader:
         self._last_ai_log_flush = datetime.min.replace(tzinfo=timezone.utc)
         self._last_market_snapshot = datetime.min.replace(tzinfo=timezone.utc)  # v7.0.3: market data storage
         self._market_data_cache = {}  # Store last fetched market data for snapshot
+        self._cycle_count = 0  # v8.1: cycle counter for smart data fetching
+        self._cached_market_data = {}  # Cache full market data between quick cycles
 
         try:
             while self.running:
@@ -2891,18 +2893,41 @@ class SimplePaperTrader:
                         except Exception as e:
                             logger.warning(f"Fear & Greed fetch failed: {e}")
 
+                # v8.1: Smart data fetching — full fetch every 60s, quick 1m every 15s
+                self._cycle_count += 1
+                is_full_cycle = self._cycle_count % 4 == 1  # Full fetch every 4th cycle (60s)
+                has_scalp = any(s.strategy_type == "joovier_scalp" for s in self.strategies)
+
                 for symbol in self.symbols:
-                    # Fetch all market data once per symbol
-                    market_data = await self._fetch_market_data(symbol, collector)
-                    if market_data is None:
-                        continue
+                    if is_full_cycle or not self._cached_market_data.get(symbol):
+                        # Full fetch: all timeframes + derivatives
+                        market_data = await self._fetch_market_data(symbol, collector)
+                        if market_data is None:
+                            continue
+                        self._cached_market_data[symbol] = market_data
+                    elif has_scalp:
+                        # Quick fetch: only 1m data for scalper, reuse cached rest
+                        market_data = self._cached_market_data[symbol].copy()
+                        try:
+                            fresh_1m = await collector.get_binance_klines(symbol, "1m", 100)
+                            if fresh_1m is not None and not fresh_1m.empty:
+                                market_data["1m"] = fresh_1m
+                                market_data["current_price"] = float(fresh_1m["close"].iloc[-1])
+                        except Exception:
+                            pass
+                    else:
+                        continue  # No scalp strategy, skip quick cycles
 
                     # Run each strategy
                     for strategy in self.strategies:
+                        # On quick cycles, only run scalp strategies
+                        if not is_full_cycle and strategy.strategy_type != "joovier_scalp":
+                            continue
                         await self._process_strategy_symbol(strategy, symbol, market_data)
 
-                # Save performance snapshots (one per strategy)
-                await self._save_performance_snapshots()
+                # Save performance snapshots (only on full cycles)
+                if is_full_cycle:
+                    await self._save_performance_snapshots()
 
                 # === v7.1: Simplified AI — observe and collect only ===
                 now_utc = datetime.now(timezone.utc)
