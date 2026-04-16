@@ -26,7 +26,7 @@ try:
     UTC = ZoneInfo("UTC")
 except Exception:
     pass  # Keep the fallback values defined above
-NEW_SYSTEM_DATE = "2026-04-09T12:30:00Z"  # v8.0: backtest-proven pullback strategy, 4 strategies, evidence-based
+NEW_SYSTEM_DATE = "2026-04-16T18:10:00Z"  # v8.1: Joovier scalp + 5 proven strategies, 15s loop
 
 
 def to_kst(timestamp_str: str) -> str:
@@ -157,7 +157,7 @@ STRATEGY_SOURCE_MAP = {
     "uptrend_pullback": "uptrend_pullback",
     "rsi_momentum": "rsi_momentum",
     "bb_squeeze": "bb_squeeze",
-    "order_flow": "flow",
+    "joovier_scalp": "joovier_scalp",
     "smart_money": "smart_money",
     "trend_breakout": "breakout",
     "trend_pullback": "pullback",
@@ -510,7 +510,7 @@ Keep response under 500 words."""
 def main():
     st.title("📈 AI Trading Dashboard")
     kst_now = datetime.now(timezone.utc) + timedelta(hours=9)
-    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v8.0 started: Apr 9, 2026 | v8.0 (backtest-proven pullback + 3 strategies, Kelly sizing, 6 coins)")
+    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v8.1 started: Apr 17, 2026 | v8.1 (Joovier scalp + 4 proven strategies, 15s loop, 6 coins)")
 
     # Auto refresh + strategy selector
     col1, col2, col3 = st.columns([2.5, 1.5, 1])
@@ -520,7 +520,7 @@ def main():
             "📊 Uptrend Pullback": "uptrend_pullback",
             "📈 RSI Momentum": "rsi_momentum",
             "💎 BB Squeeze": "bb_squeeze",
-            "🌊 Order Flow": "order_flow",
+            "⚡ Joovier Scalp": "joovier_scalp",
             "🐋 Smart Money": "smart_money",
             "🔄 Funding Reversion": "funding_reversion",
         }
@@ -547,9 +547,9 @@ def main():
         st.header("⚖️ Strategy Comparison")
 
         strat_names = ["uptrend_pullback", "rsi_momentum", "bb_squeeze",
-                       "order_flow", "smart_money", "funding_reversion"]
+                       "joovier_scalp", "smart_money", "funding_reversion"]
         strat_labels = ["Pullback", "RSI Mom.", "BB Squeeze",
-                        "Order Flow", "Smart Money", "Funding Rev."]
+                        "Joovier", "Smart Money", "Funding Rev."]
         comp_cols = st.columns(len(strat_names))
 
         for col, sname, slabel in zip(comp_cols, strat_names, strat_labels):
@@ -590,13 +590,13 @@ def main():
     # ============================================
     # Only count active strategies for portfolio calculation
     ACTIVE_STRATEGIES = {"funding_reversion", "uptrend_pullback", "rsi_momentum", "bb_squeeze",
-                          "order_flow", "smart_money"}
+                          "joovier_scalp", "smart_money"}
     STRATEGY_CAPITAL = {
         "funding_reversion": 750.0,
         "uptrend_pullback": 1250.0,
         "rsi_momentum": 1500.0,
         "bb_squeeze": 1500.0,
-        "order_flow": 1000.0,
+        "joovier_scalp": 2000.0,
         "smart_money": 1000.0,
     }
 
@@ -699,7 +699,7 @@ def main():
             "rsi_momentum": "📈 RSI Mom.",
             "bb_squeeze": "💎 BB Squeeze",
             "funding_reversion": "🔄 Funding",
-            "order_flow": "🌊 Flow",
+            "joovier_scalp": "⚡ Joovier",
             "smart_money": "🐋 Smart Money",
             # Legacy
             "trend_breakout": "📈 Breakout(old)",
@@ -895,7 +895,7 @@ def main():
                 'funding': '💰 Funding',
                 'breakout': '📈 Breakout',
                 'pullback': '📉 Pullback',
-                'flow': '🌊 Flow',
+                'joovier_scalp': '⚡ Joovier',
                 'smart_money': '🐋 Smart Money',
                 'regime_short': '🔻 Regime Short',
                 'failed_bkout_short': '🪤 Failed Bkout',
@@ -1006,7 +1006,7 @@ def main():
             "rsi_momentum": "📈 RSI Mom.",
             "bb_squeeze": "💎 BB Squeeze",
             "funding_reversion": "🔄 Funding",
-            "order_flow": "🌊 Flow",
+            "joovier_scalp": "⚡ Joovier",
             "smart_money": "🐋 Smart Money",
             "trend_breakout": "📈 Breakout(old)",
             "trend_pullback": "📉 Pullback(old)",
