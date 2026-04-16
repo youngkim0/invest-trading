@@ -551,6 +551,148 @@ class UptrendPullbackGenerator:
 
 
 # =============================================================================
+# Strategy 2e: Joovier Superscalp (BACKTESTED +$3,725/30d on crypto 1m, 34.5% WR)
+# =============================================================================
+
+class JoovierScalpGenerator:
+    """Joovier's Hybrid Superscalp — 1m Heikin Ashi + 100 EMA scalper.
+
+    Backtested 30 days on BTC/ETH/SOL (1m, 10x leverage, $5K):
+    - PnL: +$3,725/month (BTC +$688, ETH +$1,184, SOL +$1,853)
+    - 1,362 trades, 34.5% WR
+    - Tight SL at doji extreme, TP at 1.2R
+
+    Entry requires ALL conditions:
+    1. Price on correct side of 100 EMA (above for long, below for short)
+    2. Structure: no candle broke through EMA in last 20 candles
+    3. 2+ clean Heikin Ashi pullback candles (no opposing wicks)
+    4. High-volume doji candle (small body, big wicks both sides)
+    """
+
+    def generate_signal(self, df_1m: pd.DataFrame, htf_trend: dict,
+                        **kwargs) -> dict:
+        """Generate scalp signal from 1m Heikin Ashi pattern."""
+        if df_1m is None or len(df_1m) < 120:
+            return hold_signal("Insufficient 1m data for scalp", htf_trend)
+
+        prices = df_1m["close"]
+        current_price = float(prices.iloc[-1])
+
+        # Calculate 100 EMA on raw prices
+        ema100 = float(prices.ewm(span=100).mean().iloc[-1])
+
+        # === CONDITION 1: Price on correct side of EMA ===
+        if current_price > ema100 * 1.0005:
+            direction = "long"
+        elif current_price < ema100 * 0.9995:
+            direction = "short"
+        else:
+            return hold_signal(f"Price too close to EMA100 ({current_price:.2f} vs {ema100:.2f})", htf_trend)
+
+        # === CONDITION 2: Structure intact — no break through EMA in last 20 candles ===
+        recent_lows = df_1m["low"].iloc[-20:]
+        recent_highs = df_1m["high"].iloc[-20:]
+        if direction == "long" and float(recent_lows.min()) < ema100 * 0.999:
+            return hold_signal("Structure broken below EMA", htf_trend)
+        if direction == "short" and float(recent_highs.max()) > ema100 * 1.001:
+            return hold_signal("Structure broken above EMA", htf_trend)
+
+        # === Convert to Heikin Ashi for pullback/doji detection ===
+        ha_close = (df_1m["open"] + df_1m["high"] + df_1m["low"] + df_1m["close"]) / 4
+        ha_open = df_1m["open"].copy()
+        for i in range(1, len(ha_open)):
+            ha_open.iloc[i] = (ha_open.iloc[i-1] + ha_close.iloc[i-1]) / 2
+        ha_high = pd.concat([ha_open, ha_close, df_1m["high"]], axis=1).max(axis=1)
+        ha_low = pd.concat([ha_open, ha_close, df_1m["low"]], axis=1).min(axis=1)
+
+        # === CONDITION 3: 2+ clean pullback candles in last 5 ===
+        pullback_count = 0
+        for j in range(-6, -1):
+            o_j = float(ha_open.iloc[j])
+            h_j = float(ha_high.iloc[j])
+            l_j = float(ha_low.iloc[j])
+            c_j = float(ha_close.iloc[j])
+            body = abs(c_j - o_j)
+            if body <= 0:
+                continue
+
+            if direction == "long":
+                # Bearish pullback: close < open, minimal upper wick
+                upper_wick = h_j - max(o_j, c_j)
+                if c_j < o_j and upper_wick < body * 0.15:
+                    pullback_count += 1
+            else:
+                # Bullish pullback: close > open, minimal lower wick
+                lower_wick = min(o_j, c_j) - l_j
+                if c_j > o_j and lower_wick < body * 0.15:
+                    pullback_count += 1
+
+        if pullback_count < 2:
+            return hold_signal(f"Only {pullback_count} clean pullback candles (need 2+)", htf_trend)
+
+        # === CONDITION 4: Current candle is high-volume doji ===
+        ha_o = float(ha_open.iloc[-1])
+        ha_h = float(ha_high.iloc[-1])
+        ha_l = float(ha_low.iloc[-1])
+        ha_c = float(ha_close.iloc[-1])
+        vol_now = float(df_1m["volume"].iloc[-1])
+        vol_avg = float(df_1m["volume"].iloc[-21:-1].mean())
+
+        body = abs(ha_c - ha_o)
+        rng = ha_h - ha_l
+        if rng <= 0:
+            return hold_signal("Zero-range candle", htf_trend)
+
+        body_pct = body / rng
+        upper_wick = ha_h - max(ha_o, ha_c)
+        lower_wick = min(ha_o, ha_c) - ha_l
+
+        # Doji: small body, wicks on both sides
+        if body_pct >= 0.35:
+            return hold_signal(f"Not a doji (body={body_pct:.0%}, need <35%)", htf_trend)
+        if upper_wick < rng * 0.12 or lower_wick < rng * 0.12:
+            return hold_signal("Doji missing wicks on both sides", htf_trend)
+        if vol_now < vol_avg * 0.9:
+            return hold_signal(f"Doji volume too low ({vol_now/vol_avg:.1f}x)", htf_trend)
+
+        # Check doji is at least as large as recent candles
+        prev_ranges = [float(df_1m["high"].iloc[j] - df_1m["low"].iloc[j]) for j in range(-4, -1)]
+        if prev_ranges and rng < np.mean(prev_ranges) * 0.7:
+            return hold_signal("Doji too small vs recent candles", htf_trend)
+
+        # All conditions met — generate signal
+        doji_high = float(df_1m["high"].iloc[-1])
+        doji_low = float(df_1m["low"].iloc[-1])
+        doji_range = doji_high - doji_low
+
+        signal_type = "buy" if direction == "long" else "sell"
+        confidence = 0.72
+
+        reasons = [
+            f"EMA100 {direction} ({current_price:.2f} vs {ema100:.2f})",
+            f"{pullback_count} clean pullbacks",
+            f"HV doji (body={body_pct:.0%}, vol={vol_now/vol_avg:.1f}x)",
+        ]
+
+        return {
+            "signal": signal_type,
+            "confidence": confidence,
+            "reasoning": ", ".join(reasons),
+            "indicators": {
+                "price": current_price,
+                "ema100": ema100,
+                "direction": direction,
+                "pullback_count": pullback_count,
+                "doji_body_pct": body_pct,
+                "doji_vol_ratio": vol_now / vol_avg if vol_avg > 0 else 0,
+                "doji_high": doji_high,
+                "doji_low": doji_low,
+                "doji_range": doji_range,
+            },
+        }
+
+
+# =============================================================================
 # Strategy 2b: Multi-TF RSI Momentum (PROVEN — +$1,302/6mo, 64.3% WR, 7/7 months)
 # =============================================================================
 
@@ -2891,6 +3033,7 @@ class SimplePaperTrader:
                 "1h": df_1h,
                 "15m": market_data.get("15m", pd.DataFrame()),
                 "5m": market_data.get("5m", pd.DataFrame()),
+                "1m": df_1m,
             }
             atr_df = atr_df_map.get(strategy.atr_timeframe, df_1h)
             atr_value = calculate_atr(atr_df) if not atr_df.empty else 0
@@ -2900,6 +3043,10 @@ class SimplePaperTrader:
                 signal_result = strategy.generator.generate_signal(
                     df_1m, htf_trend,
                     derivatives=market_data.get("derivatives"),
+                )
+            elif strategy.strategy_type == "joovier_scalp":
+                signal_result = strategy.generator.generate_signal(
+                    df_1m, htf_trend,
                 )
             elif strategy.strategy_type == "uptrend_pullback":
                 signal_result = strategy.generator.generate_signal(
@@ -2957,7 +3104,7 @@ class SimplePaperTrader:
                                  "reasoning": f"Unknown strategy type: {strategy.strategy_type}"}
 
             # Determine timeframe label for DB
-            tf_map = {"funding": "1h", "uptrend_pullback": "1h", "rsi_momentum": "1h", "bb_squeeze": "4h",
+            tf_map = {"funding": "1h", "joovier_scalp": "1m", "uptrend_pullback": "1h", "rsi_momentum": "1h", "bb_squeeze": "4h",
                       "breakout": "15m", "pullback": "15m", "flow": "15m",
                       "regime_short": "15m", "failed_bkout_short": "15m", "refined_cascade": "15m",
                       "crash_momentum": "1h", "smart_money": "15m"}
@@ -3467,15 +3614,31 @@ class SimplePaperTrader:
             # Fallback: use 1.5% SL if ATR unavailable
             atr_value = price * 0.015
 
-        sl_distance = atr_value * strategy.sl_atr_mult
-        tp_distance = atr_value * strategy.tp_atr_mult
-        trailing_act_distance = atr_value * strategy.trailing_atr_mult
-        trailing_dist_distance = atr_value * strategy.trailing_dist_atr_mult
+        # Joovier scalp uses doji-based SL/TP, not ATR
+        indicators = signal.get("indicators", {})
+        if strategy.strategy_type == "joovier_scalp" and indicators.get("doji_range"):
+            doji_range = indicators["doji_range"]
+            if side == "long":
+                sl_distance = price - indicators.get("doji_low", price - doji_range)
+                tp_distance = doji_range * 1.2
+            else:
+                sl_distance = indicators.get("doji_high", price + doji_range) - price
+                tp_distance = doji_range * 1.2
+            sl_pct = sl_distance / price if price > 0 else 0.01
+            tp_pct = tp_distance / price if price > 0 else 0.012
+            trailing_act_pct = tp_pct
+            trailing_dist_pct = sl_pct * 0.5
+        else:
+            sl_distance = atr_value * strategy.sl_atr_mult
+            tp_distance = atr_value * strategy.tp_atr_mult
+            sl_pct = sl_distance / price
+            tp_pct = tp_distance / price
 
-        sl_pct = sl_distance / price
-        tp_pct = tp_distance / price
-        trailing_act_pct = trailing_act_distance / price
-        trailing_dist_pct = trailing_dist_distance / price
+        if strategy.strategy_type != "joovier_scalp":
+            trailing_act_distance = atr_value * strategy.trailing_atr_mult
+            trailing_dist_distance = atr_value * strategy.trailing_dist_atr_mult
+            trailing_act_pct = trailing_act_distance / price
+            trailing_dist_pct = trailing_dist_distance / price
 
         # Apply SL floor: if ATR-based SL is below minimum, scale all stops proportionally
         if strategy.min_sl_pct > 0 and sl_pct < strategy.min_sl_pct:
@@ -3895,9 +4058,9 @@ async def main():
     )
     parser.add_argument(
         "--strategies", nargs="+",
-        default=["funding_reversion", "uptrend_pullback", "rsi_momentum", "bb_squeeze", "order_flow", "smart_money"],
+        default=["funding_reversion", "uptrend_pullback", "rsi_momentum", "bb_squeeze", "joovier_scalp", "smart_money"],
         choices=["funding_reversion", "uptrend_pullback", "rsi_momentum", "bb_squeeze",
-                 "trend_breakout", "trend_pullback", "order_flow",
+                 "joovier_scalp", "trend_breakout", "trend_pullback", "order_flow",
                  "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum",
                  "smart_money"],
         help="Strategies to run (default: 4 — proven pullback + unproven derivatives)"
@@ -3938,14 +4101,17 @@ async def main():
     # v8.0: Capital based on 6-month backtest results.
     # 3 proven strategies + 3 unproven with live-data edge.
     # Shared pool lets idle capital flow to active strategies.
+    # v8.1: Added Joovier scalp (backtested +$3,725/30d on crypto 1m).
+    # Replaced order_flow (proven loser in live: -$33 on 39 trades).
     capital_allocation = {
         "funding_reversion": base_capital * 0.75,      # $750 — rare event, idle capital shared
-        "uptrend_pullback": base_capital * 1.25,       # $1250 — proven +$439/6mo, 44.7% WR
-        "rsi_momentum": base_capital * 1.5,            # $1500 — proven +$1302/6mo, 64.3% WR
-        "bb_squeeze": base_capital * 1.5,              # $1500 — proven +$1358/6mo, 82.4% WR
+        "uptrend_pullback": base_capital * 1.0,        # $1000 — proven +$439/6mo
+        "rsi_momentum": base_capital * 1.25,           # $1250 — proven +$1302/6mo
+        "bb_squeeze": base_capital * 1.25,             # $1250 — proven +$1358/6mo
+        "joovier_scalp": base_capital * 2.0,           # $2000 — backtested +$3725/30d, gets the most
         "trend_breakout": base_capital * 0.5,          # disabled by default
         "trend_pullback": base_capital * 0.5,          # disabled by default
-        "order_flow": base_capital * 1.0,              # $1000 — promising +$61/30d live
+        "order_flow": base_capital * 0.5,              # disabled — proven loser in live
         "regime_short": base_capital * 0.5,            # disabled
         "failed_breakout_short": base_capital * 0.5,   # disabled
         "refined_liq_cascade": base_capital * 0.5,     # disabled
@@ -4015,6 +4181,22 @@ async def main():
                 risk_per_trade_pct=0.02,
                 capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="1h",    # ATR from 1h for finer granularity
+                trailing_enabled=False,
+                max_concurrent_positions=1,
+            ))
+        elif name == "joovier_scalp":
+            strategy_configs.append(StrategyConfig(
+                name="joovier_scalp",
+                strategy_type="joovier_scalp",
+                generator=JoovierScalpGenerator(),
+                sl_atr_mult=1.0,       # Not used — SL is at doji extreme
+                tp_atr_mult=1.2,       # Not used — TP is 1.2x doji range
+                trailing_atr_mult=1.0,
+                trailing_dist_atr_mult=0.5,
+                max_position_hours=0.5,  # 30 min max hold (scalp)
+                risk_per_trade_pct=0.01, # 1% risk per scalp (tight)
+                capital=capital_allocation.get(name, base_capital),
+                atr_timeframe="1m",    # Uses 1m ATR
                 trailing_enabled=False,
                 max_concurrent_positions=1,
             ))
