@@ -630,13 +630,15 @@ class JoovierScalpGenerator:
         if pullback_count < 2:
             return hold_signal(f"Only {pullback_count} clean pullback candles (need 2+)", htf_trend)
 
-        # === CONDITION 4: Current candle is high-volume doji ===
-        ha_o = float(ha_open.iloc[-1])
-        ha_h = float(ha_high.iloc[-1])
-        ha_l = float(ha_low.iloc[-1])
-        ha_c = float(ha_close.iloc[-1])
-        vol_now = float(df_1m["volume"].iloc[-1])
-        vol_avg = float(df_1m["volume"].iloc[-21:-1].mean())
+        # === CONDITION 4: LAST COMPLETED candle is high-volume doji ===
+        # Check iloc[-2] (last completed), not iloc[-1] (still forming).
+        # Entry happens on the candle AFTER the doji (current candle = entry).
+        ha_o = float(ha_open.iloc[-2])
+        ha_h = float(ha_high.iloc[-2])
+        ha_l = float(ha_low.iloc[-2])
+        ha_c = float(ha_close.iloc[-2])
+        vol_now = float(df_1m["volume"].iloc[-2])
+        vol_avg = float(df_1m["volume"].iloc[-22:-2].mean())
 
         body = abs(ha_c - ha_o)
         rng = ha_h - ha_l
@@ -647,22 +649,22 @@ class JoovierScalpGenerator:
         upper_wick = ha_h - max(ha_o, ha_c)
         lower_wick = min(ha_o, ha_c) - ha_l
 
-        # Doji: small body, wicks on both sides
-        if body_pct >= 0.35:
-            return hold_signal(f"Not a doji (body={body_pct:.0%}, need <35%)", htf_trend)
-        if upper_wick < rng * 0.12 or lower_wick < rng * 0.12:
+        # Doji: small body, wicks on both sides (relaxed slightly for live)
+        if body_pct >= 0.40:
+            return hold_signal(f"Not a doji (body={body_pct:.0%}, need <40%)", htf_trend)
+        if upper_wick < rng * 0.10 or lower_wick < rng * 0.10:
             return hold_signal("Doji missing wicks on both sides", htf_trend)
-        if vol_now < vol_avg * 0.9:
+        if vol_now < vol_avg * 0.8:
             return hold_signal(f"Doji volume too low ({vol_now/vol_avg:.1f}x)", htf_trend)
 
         # Check doji is at least as large as recent candles
-        prev_ranges = [float(df_1m["high"].iloc[j] - df_1m["low"].iloc[j]) for j in range(-4, -1)]
-        if prev_ranges and rng < np.mean(prev_ranges) * 0.7:
+        prev_ranges = [float(df_1m["high"].iloc[j] - df_1m["low"].iloc[j]) for j in range(-5, -2)]
+        if prev_ranges and rng < np.mean(prev_ranges) * 0.6:
             return hold_signal("Doji too small vs recent candles", htf_trend)
 
-        # All conditions met — generate signal
-        doji_high = float(df_1m["high"].iloc[-1])
-        doji_low = float(df_1m["low"].iloc[-1])
+        # All conditions met — generate signal using COMPLETED doji candle
+        doji_high = float(df_1m["high"].iloc[-2])
+        doji_low = float(df_1m["low"].iloc[-2])
         doji_range = doji_high - doji_low
 
         signal_type = "buy" if direction == "long" else "sell"
