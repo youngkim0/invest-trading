@@ -2911,7 +2911,7 @@ class SimplePaperTrader:
                         # Quick fetch: only 1m data for scalper, reuse cached rest
                         market_data = self._cached_market_data[symbol].copy()
                         try:
-                            fresh_1m = await collector.get_binance_klines(symbol, "1m", 100)
+                            fresh_1m = await collector.get_binance_klines(symbol, "1m", 150)
                             if fresh_1m is not None and not fresh_1m.empty:
                                 market_data["1m"] = fresh_1m
                                 market_data["current_price"] = float(fresh_1m["close"].iloc[-1])
@@ -2978,7 +2978,7 @@ class SimplePaperTrader:
             needs_4h = any(s.strategy_type in ("regime_short", "failed_bkout_short", "refined_cascade", "crash_momentum", "rsi_momentum", "bb_squeeze") for s in self.strategies)
 
             tasks = [
-                collector.get_binance_klines(symbol, "1m", 100),
+                collector.get_binance_klines(symbol, "1m", 150),
                 collector.get_binance_klines(symbol, "5m", 100),
                 collector.get_binance_klines(symbol, "15m", 100),
                 collector.get_binance_klines(symbol, "1h", 100),
