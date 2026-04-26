@@ -139,6 +139,72 @@ def determine_htf_trend(df_1h: pd.DataFrame) -> dict:
     return {"direction": direction, "strength": round(strength, 3), "slope": round(slope, 5)}
 
 
+def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
+    """Calculate Average Directional Index (ADX) — measures trend strength, not direction.
+    ADX > 25 = trending, ADX < 20 = range-bound."""
+    if df is None or len(df) < period * 2:
+        return 0.0
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+
+    # True Range
+    tr = pd.concat([
+        high - low,
+        (high - close.shift(1)).abs(),
+        (low - close.shift(1)).abs()
+    ], axis=1).max(axis=1)
+
+    # Directional movement
+    up_move = high - high.shift(1)
+    down_move = low.shift(1) - low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    # Smoothed averages
+    atr = tr.ewm(span=period, min_periods=period).mean()
+    plus_di = 100 * pd.Series(plus_dm, index=df.index).ewm(span=period, min_periods=period).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm, index=df.index).ewm(span=period, min_periods=period).mean() / atr
+
+    # ADX
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1)
+    adx = dx.ewm(span=period, min_periods=period).mean()
+    val = float(adx.iloc[-1])
+    return val if not pd.isna(val) else 0.0
+
+
+def detect_market_regime(df_4h: pd.DataFrame) -> dict:
+    """Classify market into bull/bear/sideways regime using ADX + EMA stacking.
+
+    v8.3: Observe-only — logged but doesn't gate strategies yet.
+    Bull: price > EMA21 > EMA55 > EMA200, ADX > 25
+    Bear: price < EMA21 < EMA55 < EMA200, ADX > 25
+    Sideways: ADX < 20
+    """
+    if df_4h is None or len(df_4h) < 200:
+        return {"regime": "unknown", "adx": 0.0, "confidence": 0.0}
+
+    prices = df_4h["close"]
+    ema21 = float(prices.ewm(span=21).mean().iloc[-1])
+    ema55 = float(prices.ewm(span=55).mean().iloc[-1])
+    ema200 = float(prices.ewm(span=200).mean().iloc[-1])
+    price = float(prices.iloc[-1])
+
+    adx = calculate_adx(df_4h, period=14)
+
+    bull_stack = price > ema21 > ema55 > ema200
+    bear_stack = price < ema21 < ema55 < ema200
+
+    if adx > 25 and bull_stack:
+        return {"regime": "bull_trend", "adx": round(adx, 1), "confidence": 0.8}
+    elif adx > 25 and bear_stack:
+        return {"regime": "bear_trend", "adx": round(adx, 1), "confidence": 0.8}
+    elif adx < 20:
+        return {"regime": "sideways", "adx": round(adx, 1), "confidence": 0.7}
+    else:
+        return {"regime": "transitional", "adx": round(adx, 1), "confidence": 0.5}
+
+
 def apply_fast_reversal_override(htf_trend: dict, df_15m: pd.DataFrame) -> dict:
     """Suppress HTF trend when 15m data conflicts (don't flip direction).
 
@@ -1943,7 +2009,7 @@ class SimplePaperTrader:
         # === v7.0 Portfolio-level risk controls ===
         # Daily loss limit: stop opening new trades after 5% daily drawdown
         self.daily_pnl = 0.0
-        self.daily_loss_limit_pct = 0.03  # 3% of initial capital (v7.0.3: was 5%, tightened after -$146 day)
+        self.daily_loss_limit_pct = 0.04  # v8.3: was 3%, raised to 4% (circuit breaker per-strategy handles runaway risk)
         self.daily_loss_halt = False
         self.daily_pnl_reset_date = ""
 
@@ -2806,7 +2872,7 @@ class SimplePaperTrader:
         try:
             # Parallel fetch: 1m, 5m, 15m, 1h candles + ticker + derivatives
             needs_derivatives = any(s.strategy_type in ("funding", "oi", "flow", "regime_short", "failed_bkout_short", "refined_cascade", "smart_money") for s in self.strategies)
-            needs_4h = any(s.strategy_type in ("regime_short", "failed_bkout_short", "refined_cascade", "crash_momentum", "rsi_momentum", "bb_squeeze") for s in self.strategies)
+            needs_4h = True  # v8.3: always fetch 4h for regime detection
 
             tasks = [
                 collector.get_binance_klines(symbol, "1m", 150),
@@ -2866,6 +2932,19 @@ class SimplePaperTrader:
             htf_trend = {"direction": "neutral", "strength": 0.0, "slope": 0.0}
             if not df_1h.empty:
                 htf_trend = determine_htf_trend(df_1h)
+
+            # v8.3: Regime detection (observe-only — logged, not gating yet)
+            df_4h = market_data.get("4h", pd.DataFrame())
+            if not df_4h.empty:
+                regime = detect_market_regime(df_4h)
+                regime_str = regime.get("regime", "unknown")
+                adx_val = regime.get("adx", 0)
+                # Log once per symbol per full cycle (avoid spam)
+                if not hasattr(self, '_last_regime_log') or self._last_regime_log.get(symbol) != regime_str:
+                    if not hasattr(self, '_last_regime_log'):
+                        self._last_regime_log = {}
+                    self._last_regime_log[symbol] = regime_str
+                    logger.info(f"   [{symbol}] Regime: {regime_str} (ADX={adx_val:.1f})")
 
             # Fast reversal override: use 15m data to catch reversals early
             df_15m = market_data.get("15m", pd.DataFrame())
@@ -3330,12 +3409,16 @@ class SimplePaperTrader:
 
     def _is_stale_position(self, position: dict, pnl_pct: float, strategy: StrategyConfig) -> bool:
         """Check if position is stale (old with minimal profit).
-        Uses 25% of designed TP as minimum profit threshold (strategy-aware)."""
+        Uses 25% of designed TP as minimum profit threshold (strategy-aware).
+        v8.3: Added half-time check — exit dead trades that haven't moved."""
         hours_open = (datetime.now(timezone.utc) - position["entry_time"]).total_seconds() / 3600
         if hours_open >= strategy.max_position_hours:
             min_profit = position.get("tp_pct", 0.04) * 0.25
             if pnl_pct < min_profit:
                 return True
+        # v8.3: Half-time stale check — if past 50% of max hold and near-zero profit, exit
+        if hours_open >= strategy.max_position_hours * 0.5 and pnl_pct < 0.003:
+            return True
         return False
 
     def _should_exit_on_rsi(self, position: dict, signal: dict, pnl_pct: float,
@@ -3963,30 +4046,30 @@ async def main():
                 name="funding_reversion",
                 strategy_type="funding",
                 generator=FundingMeanReversionGenerator(),
-                sl_atr_mult=2.0,
-                tp_atr_mult=4.0,
-                trailing_atr_mult=3.0,
-                trailing_dist_atr_mult=1.5,
+                sl_atr_mult=1.5,       # v8.3: was 2.0 (tighter SL)
+                tp_atr_mult=2.5,       # v8.3: was 4.0 (achievable TP)
+                trailing_atr_mult=1.0,  # v8.3: was 3.0 (activate at ~1.5% not 4.5%)
+                trailing_dist_atr_mult=0.5,  # v8.3: was 1.5 (tight trail)
                 max_position_hours=12.0,
                 risk_per_trade_pct=0.02,
                 capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="1h",
-                trailing_enabled=False,
+                trailing_enabled=True,  # v8.3: was False
             ))
         elif name == "uptrend_pullback":
             strategy_configs.append(StrategyConfig(
                 name="uptrend_pullback",
                 strategy_type="uptrend_pullback",
                 generator=UptrendPullbackGenerator(),
-                sl_atr_mult=1.5,       # Tight SL below SMA20
-                tp_atr_mult=2.5,       # 1.67:1 R:R (backtest-optimized)
-                trailing_atr_mult=2.0,
-                trailing_dist_atr_mult=1.0,
+                sl_atr_mult=1.0,       # v8.3: was 1.5 (BE WR 40% vs actual 50%)
+                tp_atr_mult=1.5,       # v8.3: was 2.5 (achievable target)
+                trailing_atr_mult=0.75, # v8.3: was 2.0 (activate at ~1% profit)
+                trailing_dist_atr_mult=0.5,  # v8.3: was 1.0 (tight trail)
                 max_position_hours=8.0,
                 risk_per_trade_pct=0.02,
                 capital=capital_allocation.get(name, base_capital),
-                atr_timeframe="1h",    # Uses 1h candles (not 15m)
-                trailing_enabled=False,
+                atr_timeframe="1h",
+                trailing_enabled=True,  # v8.3: was False
                 max_concurrent_positions=1,
             ))
         elif name == "rsi_momentum":
@@ -3994,15 +4077,15 @@ async def main():
                 name="rsi_momentum",
                 strategy_type="rsi_momentum",
                 generator=RSIMomentumGenerator(),
-                sl_atr_mult=2.0,       # Wider SL — RSI dips can be volatile
-                tp_atr_mult=2.5,       # 1.25:1 R:R (compensated by 64% WR)
-                trailing_atr_mult=2.0,
-                trailing_dist_atr_mult=1.0,
+                sl_atr_mult=1.5,       # v8.3: was 2.0 (tighter, 64% WR supports it)
+                tp_atr_mult=2.0,       # v8.3: was 2.5 (1.33:1 R:R, BE WR 43%)
+                trailing_atr_mult=0.75, # v8.3: was 2.0 (activate at ~1% profit)
+                trailing_dist_atr_mult=0.5,  # v8.3: was 1.0 (tight trail)
                 max_position_hours=8.0,
                 risk_per_trade_pct=0.02,
                 capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="1h",
-                trailing_enabled=False,
+                trailing_enabled=True,  # v8.3: was False
                 max_concurrent_positions=1,
             ))
         elif name == "bb_squeeze":
@@ -4010,15 +4093,15 @@ async def main():
                 name="bb_squeeze",
                 strategy_type="bb_squeeze",
                 generator=BollingerSqueezeGenerator(),
-                sl_atr_mult=2.0,       # Wide SL — squeeze breakouts need room
-                tp_atr_mult=3.0,       # 1.5:1 R:R (82% WR = can afford wider TP)
-                trailing_atr_mult=2.5,
-                trailing_dist_atr_mult=1.0,
-                max_position_hours=12.0,  # Longer hold — 4H timeframe
+                sl_atr_mult=2.0,       # Keep — 82% WR supports wider SL
+                tp_atr_mult=3.0,       # Keep — 82% WR supports 1.5:1 R:R
+                trailing_atr_mult=1.0,  # v8.3: was 2.5 (activate sooner)
+                trailing_dist_atr_mult=0.5,  # v8.3: was 1.0 (tight trail)
+                max_position_hours=12.0,
                 risk_per_trade_pct=0.02,
                 capital=capital_allocation.get(name, base_capital),
-                atr_timeframe="1h",    # ATR from 1h for finer granularity
-                trailing_enabled=False,
+                atr_timeframe="1h",
+                trailing_enabled=True,  # v8.3: was False
                 max_concurrent_positions=1,
             ))
         elif name == "trend_breakout":
@@ -4137,10 +4220,10 @@ async def main():
                 name="smart_money",
                 strategy_type="smart_money",
                 generator=SmartMoneyFlowGenerator(),
-                sl_atr_mult=2.0,       # Wider SL — composite signals need room
-                tp_atr_mult=3.0,       # 1.5:1 R:R
-                trailing_atr_mult=2.5,
-                trailing_dist_atr_mult=1.0,
+                sl_atr_mult=1.5,       # v8.3: was 2.0 (tighter SL)
+                tp_atr_mult=2.0,       # v8.3: was 3.0 (achievable TP)
+                trailing_atr_mult=1.0,  # v8.3: was 2.5 (activate sooner)
+                trailing_dist_atr_mult=0.5,  # v8.3: was 1.0 (tight trail)
                 max_position_hours=8.0,  # Time stop: 8h
                 risk_per_trade_pct=0.02,
                 capital=capital_allocation.get(name, base_capital),

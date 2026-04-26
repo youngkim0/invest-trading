@@ -1,5 +1,39 @@
 # Paper Trader Changelog
 
+## v8.3 — Profitability Overhaul: Execution Parameters Fix (2026-04-26)
+
+**Root cause analysis**: Signals are profitable but execution parameters destroyed the edge.
+883 trades, -$291 total. Active strategies alone: +$100 on 137 trades. The SL/TP ratio
+demanded 60-73% win rates but strategies only deliver 35-50%. Trailing stops were disabled
+on all long strategies, so winners reversed to losers.
+
+Research: Freqtrade/Jesse communities, AdaptiveTrend paper (Sharpe 2.41), Phemex Q1 2026
+bot results, overfitting studies. 73% of automated crypto traders lose money in 6 months.
+Realistic target on $6,250: $50-150/month (10-30% annually).
+
+### Changes
+
+| Change | Before | After | Why |
+|--------|--------|-------|-----|
+| uptrend_pullback SL/TP | 1.5x / 2.5x ATR | 1.0x / 1.5x | BE WR 60%->40% (actual: 50%) |
+| rsi_momentum SL/TP | 2.0x / 2.5x ATR | 1.5x / 2.0x | BE WR 44%->43% (actual: 64%) |
+| smart_money SL/TP | 2.0x / 3.0x ATR | 1.5x / 2.0x | Tighter R:R for 40% WR |
+| funding SL/TP | 2.0x / 4.0x ATR | 1.5x / 2.5x | Was unreachable |
+| bb_squeeze SL/TP | 2.0x / 3.0x ATR | kept | 82% WR supports it |
+| Trailing stops | DISABLED on all longs | ENABLED, 0.75x ATR activation | Winners no longer reverse to SL |
+| Trailing distance | 1.0-1.5x ATR | 0.5x ATR | Tight trail locks in more profit |
+| Daily loss limit | 3% | 4% | Was too tight, missed recoveries |
+| Stale exit | Only at max hold time | Also at 50% hold if <0.3% profit | Frees capital from dead trades |
+| Regime detection | None | ADX + EMA stacking (observe-only) | Logs bull/bear/sideways per symbol |
+| 4h data fetch | Conditional | Always | Required for regime detection |
+
+### v8.2 — Remove Joovier Scalp (2026-04-26)
+- Removed Joovier Superscalp: -$192 on 137 trades in 6 days (overfitted backtest)
+- Reverted 15s loop back to 60s, removed smart data fetching machinery
+- Reallocated $2K capital to proven strategies
+
+---
+
 ## v8.0 — Evidence-Based Rebuild: Backtest-Proven Strategies Only (2026-04-09)
 
 **6-month backtest (Oct 2025 - Apr 2026, 1,199 trades) revealed the truth:**
