@@ -26,7 +26,7 @@ try:
     UTC = ZoneInfo("UTC")
 except Exception:
     pass  # Keep the fallback values defined above
-NEW_SYSTEM_DATE = "2026-04-16T18:10:00Z"  # v8.1: Joovier scalp + 5 proven strategies, 15s loop
+NEW_SYSTEM_DATE = "2026-04-26T00:00:00Z"  # v8.2: Removed Joovier scalp, 4 proven strategies + smart money
 
 
 def to_kst(timestamp_str: str) -> str:
@@ -157,7 +157,6 @@ STRATEGY_SOURCE_MAP = {
     "uptrend_pullback": "uptrend_pullback",
     "rsi_momentum": "rsi_momentum",
     "bb_squeeze": "bb_squeeze",
-    "joovier_scalp": "joovier_scalp",
     "smart_money": "smart_money",
     "trend_breakout": "breakout",
     "trend_pullback": "pullback",
@@ -510,7 +509,7 @@ Keep response under 500 words."""
 def main():
     st.title("📈 AI Trading Dashboard")
     kst_now = datetime.now(timezone.utc) + timedelta(hours=9)
-    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v8.1 started: Apr 17, 2026 | v8.1 (Joovier scalp + 4 proven strategies, 15s loop, 6 coins)")
+    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v8.2 started: Apr 26, 2026 | v8.2 (4 proven strategies + smart money, 60s loop, 6 coins)")
 
     # Auto refresh + strategy selector
     col1, col2, col3 = st.columns([2.5, 1.5, 1])
@@ -520,7 +519,6 @@ def main():
             "📊 Uptrend Pullback": "uptrend_pullback",
             "📈 RSI Momentum": "rsi_momentum",
             "💎 BB Squeeze": "bb_squeeze",
-            "⚡ Joovier Scalp": "joovier_scalp",
             "🐋 Smart Money": "smart_money",
             "🔄 Funding Reversion": "funding_reversion",
         }
@@ -547,9 +545,9 @@ def main():
         st.header("⚖️ Strategy Comparison")
 
         strat_names = ["uptrend_pullback", "rsi_momentum", "bb_squeeze",
-                       "joovier_scalp", "smart_money", "funding_reversion"]
+                       "smart_money", "funding_reversion"]
         strat_labels = ["Pullback", "RSI Mom.", "BB Squeeze",
-                        "Joovier", "Smart Money", "Funding Rev."]
+                        "Smart Money", "Funding Rev."]
         comp_cols = st.columns(len(strat_names))
 
         for col, sname, slabel in zip(comp_cols, strat_names, strat_labels):
@@ -590,18 +588,17 @@ def main():
     # ============================================
     # Only count active strategies for portfolio calculation
     ACTIVE_STRATEGIES = {"funding_reversion", "uptrend_pullback", "rsi_momentum", "bb_squeeze",
-                          "joovier_scalp", "smart_money"}
+                          "smart_money"}
     STRATEGY_CAPITAL = {
         "funding_reversion": 750.0,
-        "uptrend_pullback": 1250.0,
+        "uptrend_pullback": 1500.0,
         "rsi_momentum": 1500.0,
         "bb_squeeze": 1500.0,
-        "joovier_scalp": 2000.0,
         "smart_money": 1000.0,
     }
 
     if strategy_filter is None:
-        STARTING_CAPITAL = 4650.0
+        STARTING_CAPITAL = 6250.0
         # Filter trades to active strategies only
         active_trades = [t for t in trades if t.get('strategy_name') in ACTIVE_STRATEGIES]
     else:
@@ -699,9 +696,9 @@ def main():
             "rsi_momentum": "📈 RSI Mom.",
             "bb_squeeze": "💎 BB Squeeze",
             "funding_reversion": "🔄 Funding",
-            "joovier_scalp": "⚡ Joovier",
             "smart_money": "🐋 Smart Money",
             # Legacy
+            "joovier_scalp": "⚡ Joovier(old)",
             "trend_breakout": "📈 Breakout(old)",
             "trend_pullback": "📉 Pullback(old)",
             "regime_short": "🔻 Regime Short(old)",
@@ -895,8 +892,8 @@ def main():
                 'funding': '💰 Funding',
                 'breakout': '📈 Breakout',
                 'pullback': '📉 Pullback',
-                'joovier_scalp': '⚡ Joovier',
                 'smart_money': '🐋 Smart Money',
+                'joovier_scalp': '⚡ Joovier(old)',
                 'regime_short': '🔻 Regime Short',
                 'failed_bkout_short': '🪤 Failed Bkout',
                 'refined_cascade': '💥 Liq Cascade',
@@ -1006,8 +1003,8 @@ def main():
             "rsi_momentum": "📈 RSI Mom.",
             "bb_squeeze": "💎 BB Squeeze",
             "funding_reversion": "🔄 Funding",
-            "joovier_scalp": "⚡ Joovier",
             "smart_money": "🐋 Smart Money",
+            "joovier_scalp": "⚡ Joovier(old)",
             "trend_breakout": "📈 Breakout(old)",
             "trend_pullback": "📉 Pullback(old)",
             "regime_short": "🔻 Regime(old)",
