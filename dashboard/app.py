@@ -124,7 +124,6 @@ def get_active_symbols() -> list[str]:
 
 
 @st.cache_data(ttl=30)
-@st.cache_data(ttl=30)
 def fetch_signals(limit: int = 100):
     """Fetch recent signals."""
     try:
