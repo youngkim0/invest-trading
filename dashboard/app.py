@@ -124,13 +124,16 @@ def get_active_symbols() -> list[str]:
 
 
 @st.cache_data(ttl=30)
+@st.cache_data(ttl=30)
 def fetch_signals(limit: int = 100):
     """Fetch recent signals."""
     try:
         client = get_supabase()
         if not client:
             return []
-        result = client.table('signals').select('*').gte('timestamp', NEW_SYSTEM_DATE).order('timestamp', desc=True).limit(limit).execute()
+        result = client.table('signals').select(
+            'id,timestamp,symbol,source,signal_type,confidence,reasoning'
+        ).gte('timestamp', NEW_SYSTEM_DATE).order('timestamp', desc=True).limit(limit).execute()
         return result.data or []
     except Exception as e:
         st.error(f"Error fetching signals: {e}")
@@ -530,7 +533,7 @@ def main():
             st.rerun()
 
     # Fetch all data, then filter by strategy
-    all_signals = fetch_signals(500)
+    all_signals = fetch_signals(200)
     all_trades = fetch_trades(200)
     prices = fetch_current_prices()
 
