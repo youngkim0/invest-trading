@@ -2824,9 +2824,8 @@ class SimplePaperTrader:
                     for strategy in self.strategies:
                         await self._process_strategy_symbol(strategy, symbol, market_data)
 
-                # Save performance snapshots (only on full cycles)
-                if is_full_cycle:
-                    await self._save_performance_snapshots()
+                # Save performance snapshots
+                await self._save_performance_snapshots()
 
                 # === v7.1: Simplified AI — observe and collect only ===
                 now_utc = datetime.now(timezone.utc)
