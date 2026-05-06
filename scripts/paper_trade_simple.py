@@ -1746,6 +1746,8 @@ class StrategyConfig:
     adaptive_sizing: bool = False    # Master toggle
     min_risk_pct: float = 0.005     # Floor: 0.5% risk minimum
     max_risk_pct: float = 0.025     # Ceiling: 2.5% risk maximum (v7.0: reduced from 3%)
+    # Symbol allowlist: empty tuple = trade all symbols, otherwise restrict to listed
+    allowed_symbols: tuple = ()
 
     @property
     def rr_ratio(self) -> float:
@@ -2923,6 +2925,9 @@ class SimplePaperTrader:
     async def _process_strategy_symbol(self, strategy: StrategyConfig, symbol: str, market_data: dict):
         """Process a single strategy+symbol combination."""
         try:
+            if strategy.allowed_symbols and symbol not in strategy.allowed_symbols:
+                return
+
             df_1m = market_data["1m"]
             df_1h = market_data["1h"]
             current_price = market_data["current_price"]
@@ -4086,6 +4091,7 @@ async def main():
                 atr_timeframe="1h",
                 trailing_enabled=True,  # v8.3: was False
                 max_concurrent_positions=1,
+                allowed_symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT"),  # v8.4: DOGE/AVAX/XRP lost $123 of -$118 post-v8.3
             ))
         elif name == "bb_squeeze":
             strategy_configs.append(StrategyConfig(

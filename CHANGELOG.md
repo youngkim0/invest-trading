@@ -1,5 +1,33 @@
 # Paper Trader Changelog
 
+## v8.4 — rsi_momentum symbol gating + dashboard signals fix (2026-05-06)
+
+**Problem 1**: rsi_momentum is the only losing active strategy post-v8.3. 7 trades, 28.6% WR,
+**−$118.21**. Avg loss is **5.1× avg win** ($25.66 vs $5.05) — wins get clipped by tight trail
+while losses go full SL distance. Identical trail config to uptrend_pullback (which works fine
+at +$210 / 56% WR), so the trail params aren't the root cause. Symbol concentration tells the
+story: 6 of 7 trades on DOGE/AVAX, both losing (−$65, −$58). Only XRP trade was a tiny win.
+
+**Problem 2**: Dashboard signals fetch intermittently timed out
+("canceling statement due to statement timeout"). The `signals` table has 527K rows; the
+`gte('timestamp', cutoff).order(desc).limit(200)` combination took 2.5s — over Supabase's
+statement timeout. The `gte` filter is redundant when already taking the 200 most recent rows.
+
+### Changes
+- `StrategyConfig.allowed_symbols` (default empty tuple = all) — symbol allowlist field.
+- `_process_strategy_symbol` returns early when symbol not in allowlist.
+- `rsi_momentum` allowlist set to `(BTCUSDT, ETHUSDT, SOLUSDT)` — large-caps where momentum
+  follow-through is more reliable. Reversible by removing the field.
+- `dashboard/app.py:fetch_signals` drops the redundant `gte` filter. Query: 2.5s → 0.4s.
+
+### Not changed
+- order_flow shows −$105 in 30d window but is **already disabled** (not in default-enabled list,
+  paper_trade_simple.py:3981). The 30d losses are residual closeouts from pre-v8.0.
+- All post-v8.3 trades have `exit_reason='unknown'` — separate data quality issue worth a
+  follow-up; can't currently distinguish trail vs SL vs TP exits.
+
+---
+
 ## v8.3 — Profitability Overhaul: Execution Parameters Fix (2026-04-26)
 
 **Root cause analysis**: Signals are profitable but execution parameters destroyed the edge.
