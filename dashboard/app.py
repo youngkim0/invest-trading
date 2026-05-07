@@ -132,7 +132,7 @@ def fetch_signals(limit: int = 100):
             return []
         result = client.table('signals').select(
             'id,timestamp,symbol,source,signal_type,confidence,reasoning'
-        ).order('timestamp', desc=True).limit(limit).execute()
+        ).gte('timestamp', NEW_SYSTEM_DATE).order('timestamp', desc=True).limit(limit).execute()
         return result.data or []
     except Exception as e:
         st.error(f"Error fetching signals: {e}")

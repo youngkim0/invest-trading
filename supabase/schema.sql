@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS signals (
 CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_signals_source ON signals(source, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status);
+CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp DESC);
 
 -- ============================================
 -- Model Checkpoints
