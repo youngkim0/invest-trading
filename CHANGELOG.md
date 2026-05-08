@@ -1,5 +1,26 @@
 # Paper Trader Changelog
 
+## v8.4.1 — Dashboard signals query: drop unused `reasoning` column (2026-05-08)
+
+**Problem**: Dashboard kept hitting `canceling statement due to statement timeout` on
+`fetch_signals` despite v8.4's gte filter and 226246e's `idx_signals_timestamp` index.
+
+**Diagnosis** (`scripts/diag_signals_timeout.py`): index works fine. The bad plan only
+appears when `gte('timestamp') + ORDER BY timestamp DESC + LIMIT 200 + reasoning` are
+combined. `reasoning` is TOAST'd TEXT and dominates the cost.
+
+| Variant | Time |
+|---|---|
+| Original (gte + reasoning + limit 200) | timeout >3s |
+| Drop `reasoning` | **122 ms** |
+| Drop gte filter | 1.1s |
+| Limit 50 | 188 ms |
+
+**Fix**: Drop `reasoning` from the dashboard SELECT. It was fetched but never consumed
+anywhere in `dashboard/app.py` — pure dead weight. Query: timeout → 122ms.
+
+---
+
 ## v8.4 — rsi_momentum symbol gating + dashboard signals fix (2026-05-06)
 
 **Problem 1**: rsi_momentum is the only losing active strategy post-v8.3. 7 trades, 28.6% WR,
