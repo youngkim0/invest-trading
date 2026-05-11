@@ -130,9 +130,12 @@ def fetch_signals(limit: int = 100):
         client = get_supabase()
         if not client:
             return []
+        # No gte filter: table is bounded by 7-day retention (v8.4.2) + LIMIT
+        # walks idx_signals_timestamp DESC cleanly. Filter caused intermittent
+        # statement-timeouts after the big DELETE made planner stats stale.
         result = client.table('signals').select(
             'id,timestamp,symbol,source,signal_type,confidence'
-        ).gte('timestamp', NEW_SYSTEM_DATE).order('timestamp', desc=True).limit(limit).execute()
+        ).order('timestamp', desc=True).limit(limit).execute()
         return result.data or []
     except Exception as e:
         st.error(f"Error fetching signals: {e}")
