@@ -2794,6 +2794,7 @@ class SimplePaperTrader:
         self._last_ai_log_flush = datetime.min.replace(tzinfo=timezone.utc)
         self._last_market_snapshot = datetime.min.replace(tzinfo=timezone.utc)  # v7.0.3: market data storage
         self._market_data_cache = {}  # Store last fetched market data for snapshot
+        self._last_signal_cleanup = datetime.min.replace(tzinfo=timezone.utc)  # v8.4.2: signals retention
 
         try:
             while self.running:
@@ -2844,6 +2845,11 @@ class SimplePaperTrader:
                 if (now_utc - self._last_market_snapshot).total_seconds() >= 300:
                     await self._save_market_snapshot(collector)
                     self._last_market_snapshot = now_utc
+
+                # Every hour: prune old `hold` signals (keep 7d) to stay under free-tier quota
+                if (now_utc - self._last_signal_cleanup).total_seconds() >= 3600:
+                    await self._cleanup_old_signals(retention_days=7)
+                    self._last_signal_cleanup = now_utc
 
                 # REMOVED: AI capital rebalance (was starving winners, feeding churners)
                 # REMOVED: AI symbol selection (was blocking BTC/ETH longs during rallies)
@@ -3834,6 +3840,27 @@ class SimplePaperTrader:
             })
         except Exception as e:
             logger.debug(f"Failed to save signal: {e}")
+
+    async def _cleanup_old_signals(self, retention_days: int = 7) -> None:
+        """Delete `hold` signals older than `retention_days`. Run hourly to keep
+        the signals table under the Supabase free-tier size cap. Actionable
+        signals (buy/sell/strong_*) are never touched."""
+        try:
+            # 6-hour windowed delete dodges Supabase's 3s statement timeout.
+            # The hourly schedule means we only need to clear ~1 fresh window
+            # per run; the extra windows cover any catch-up after downtime.
+            end_dt = datetime.now(timezone.utc) - timedelta(days=retention_days)
+            for _ in range(6):  # up to 36h coverage per run
+                start_dt = end_dt - timedelta(hours=6)
+                self.signal_repo.table.delete(returning="minimal") \
+                    .eq("signal_type", "hold") \
+                    .gte("timestamp", start_dt.isoformat()) \
+                    .lt("timestamp", end_dt.isoformat()) \
+                    .execute()
+                end_dt = start_dt
+            logger.debug(f"signal cleanup: pruned hold signals older than {retention_days}d")
+        except Exception as e:
+            logger.debug(f"signal cleanup failed: {e}")
 
     async def _maybe_save_hold(self, symbol: str, signal: dict, price: float,
                                strategy: StrategyConfig, timeframe: str):

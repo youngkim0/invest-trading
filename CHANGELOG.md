@@ -1,5 +1,37 @@
 # Paper Trader Changelog
 
+## v8.4.2 — Signals retention: stay on Supabase free tier (2026-05-11)
+
+**Problem**: Supabase free tier (500MB DB) hit its limit. Signals table had
+**568,775 rows**, growing ~10K/day — 99% are non-actionable `hold` rows (scan
+results, throttled at 1 per 15min per strategy:symbol).
+
+**Diagnosis** (`scripts/diag_signals_size.py`): no FK references to signals,
+only the `latest_signals` view uses a 24h window, dashboard already limits
+to 200 rows. Safe to delete old holds. Actionable buy/sell/strong_* signals
+(~45K rows) preserved unconditionally.
+
+**One-shot prune** (`scripts/prune_signals.py`): batched 6-hour-window
+DELETE, 440,352 rows removed in 43s. Table: 568,775 → 128,662 rows
+(**77% reduction**).
+
+**Ongoing retention**: `_cleanup_old_signals` runs hourly from the bot loop,
+deletes any hold row older than 7 days. Self-maintaining; table will plateau
+at ~70K rows (7 days × ~10K/day).
+
+### Changes
+- `scripts/paper_trade_simple.py`: new `_cleanup_old_signals(retention_days=7)`
+  method, called every 3600s from the main loop. 6-hour window DELETE dodges
+  the 3s statement timeout.
+- `scripts/prune_signals.py`: one-shot prune tool (kept for future use).
+- `scripts/diag_signals_size.py`: row-count + composition diagnostic.
+
+### Not changed
+- Hold throttle still 15min in `_maybe_save_hold` — sufficient now that old
+  rows expire automatically. Bump to 60min only if growth accelerates.
+
+---
+
 ## v8.4.1 — Dashboard signals query: drop unused `reasoning` column (2026-05-08)
 
 **Problem**: Dashboard kept hitting `canceling statement due to statement timeout` on
