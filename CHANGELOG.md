@@ -1,5 +1,42 @@
 # Paper Trader Changelog
 
+## v8.4.3 — Symbol gating: stop the bleeders (2026-05-13)
+
+**7-day post-v8.4 review** (`scripts/perf_review.py`, `scripts/perf_deep.py`):
+138 closed trades, **−$75.73 net**. Concentrated in two losing pairs:
+
+| Strategy × Symbol | n | WR | PnL |
+|---|---|---|---|
+| smart_money × DOGE | 40 | 20% | **−$95** |
+| uptrend_pullback × XRP | 8 | 12.5% | **−$94** |
+
+Same v8.4 mechanism (`allowed_symbols` allowlist on `StrategyConfig`):
+- smart_money: exclude DOGE → trades BTC/ETH/XRP/SOL/AVAX
+- uptrend_pullback: exclude XRP → trades BTC/ETH/SOL/DOGE/AVAX
+
+**Investigated, no change:** `reversal_override` exits show 37 trades, 0
+winners, avg −$3.01. Initially looked broken, but it's working as
+designed — it's a *loss-cutter* gated on `pnl_pct < 0` (line 3100), so it
+can never produce a winner. Avg −$3 loss vs stop_loss avg −$19.58 means
+it's plausibly saving ~$600 of deeper losses, not adding $111 of new ones.
+
+**Investigated, separate issue:** May 12 lost −$103 in 11 trades, 9 of
+them on SOLUSDT alone (3 strategies stacked into one symbol). Symbol
+gating doesn't fix this concentration risk — v7.0's correlation-group
+limits were removed in v8.0+. Worth a follow-up if it recurs.
+
+### Wins preserved (don't touch)
+- uptrend_pullback × AVAX: +$112 / 4 trades / 75% WR
+- smart_money × SOL: +$62 / 59 trades / 59% WR
+- TP + trailing exits: 60 trades, 100% WR, +$704
+
+### Changes
+- `paper_trade_simple.py`: `allowed_symbols` added to smart_money and
+  uptrend_pullback configs.
+- `scripts/perf_review.py`, `scripts/perf_deep.py`: performance review tools.
+
+---
+
 ## v8.4.2 — Signals retention: stay on Supabase free tier (2026-05-11)
 
 **Problem**: Supabase free tier (500MB DB) hit its limit. Signals table had

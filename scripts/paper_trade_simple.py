@@ -4102,6 +4102,7 @@ async def main():
                 atr_timeframe="1h",
                 trailing_enabled=True,  # v8.3: was False
                 max_concurrent_positions=1,
+                allowed_symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "AVAXUSDT"),  # v8.4.3: exclude XRP (12.5% WR, -$94 in 7d)
             ))
         elif name == "rsi_momentum":
             strategy_configs.append(StrategyConfig(
@@ -4262,6 +4263,7 @@ async def main():
                 atr_timeframe="15m",
                 trailing_enabled=True,
                 max_concurrent_positions=1,  # v7.0.3: 1 at a time
+                allowed_symbols=("BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "AVAXUSDT"),  # v8.4.3: exclude DOGE (20% WR, -$95 in 7d)
             ))
 
     # Apply adaptive sizing if enabled
