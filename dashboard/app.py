@@ -123,7 +123,22 @@ def get_active_symbols() -> list[str]:
         return DEFAULT_SYMBOLS
 
 
-@st.cache_data(ttl=30)
+def _query_with_retry(query, retries: int = 2):
+    """Run a Supabase query with one retry on statement timeout.
+    Cold connection to Supabase can hit the 3s statement timeout; a second
+    attempt usually succeeds because the query plan is now cached server-side."""
+    last_err = None
+    for _ in range(retries):
+        try:
+            return query.execute()
+        except Exception as e:
+            last_err = e
+            if "57014" not in str(e) and "timeout" not in str(e).lower():
+                raise
+    raise last_err
+
+
+@st.cache_data(ttl=300)  # 5 min — Supabase cold queries are ~1-3s, so reduce miss frequency
 def fetch_signals(limit: int = 100):
     """Fetch recent signals."""
     try:
@@ -133,23 +148,25 @@ def fetch_signals(limit: int = 100):
         # No gte filter: table is bounded by 7-day retention + LIMIT walks
         # idx_signals_timestamp DESC cleanly. The filter caused intermittent
         # statement timeouts after a large DELETE made planner stats stale.
-        result = client.table('signals').select(
+        q = client.table('signals').select(
             'id,timestamp,symbol,source,signal_type,confidence'
-        ).order('timestamp', desc=True).limit(limit).execute()
+        ).order('timestamp', desc=True).limit(limit)
+        result = _query_with_retry(q)
         return result.data or []
     except Exception as e:
         st.error(f"Error fetching signals: {e}")
         return []
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=60)
 def fetch_trades(limit: int = 100):
     """Fetch trades."""
     try:
         client = get_supabase()
         if not client:
             return []
-        result = client.table('trade_logs').select('*').gte('entry_time', NEW_SYSTEM_DATE).order('entry_time', desc=True).limit(limit).execute()
+        q = client.table('trade_logs').select('*').gte('entry_time', NEW_SYSTEM_DATE).order('entry_time', desc=True).limit(limit)
+        result = _query_with_retry(q)
         return result.data or []
     except Exception as e:
         st.error(f"Error fetching trades: {e}")
