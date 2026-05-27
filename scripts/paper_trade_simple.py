@@ -4109,15 +4109,15 @@ async def main():
                 name="rsi_momentum",
                 strategy_type="rsi_momentum",
                 generator=RSIMomentumGenerator(),
-                sl_atr_mult=1.5,       # v8.3: was 2.0 (tighter, 64% WR supports it)
-                tp_atr_mult=2.0,       # v8.3: was 2.5 (1.33:1 R:R, BE WR 43%)
-                trailing_atr_mult=0.75, # v8.3: was 2.0 (activate at ~1% profit)
-                trailing_dist_atr_mult=0.5,  # v8.3: was 1.0 (tight trail)
+                sl_atr_mult=2.0,       # v8.5: was 1.5 — 1.5x ATR(1h) gave sub-1% stops that noise hit routinely (13 SL = -$527 live)
+                tp_atr_mult=2.0,       # keep 2.0 (1:1 R:R; wider TP just converts to time-exits per backtest)
+                trailing_atr_mult=0.75, # unused (trailing disabled v8.5)
+                trailing_dist_atr_mult=0.5,  # unused (trailing disabled v8.5)
                 max_position_hours=8.0,
                 risk_per_trade_pct=0.02,
                 capital=capital_allocation.get(name, base_capital),
                 atr_timeframe="1h",
-                trailing_enabled=True,  # v8.3: was False
+                trailing_enabled=False,  # v8.5: was True — 0.75x/0.5x ATR trail banked winners at +0.34% vs -1.04% stops (inverted R:R). Backtest: trail-off +$1480/180d vs live -$292
                 max_concurrent_positions=1,
                 allowed_symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT"),  # v8.4: DOGE/AVAX/XRP lost $123 of -$118 post-v8.3
             ))

@@ -1,5 +1,56 @@
 # Paper Trader Changelog
 
+## v8.5 — RSI momentum: fix the inverted exit R:R (2026-05-27)
+
+**Honest review of rsi_momentum** (`scripts/check_performance.py` + ad-hoc
+A/B backtests). Post-v8.0 live: **43 trades, 39.5% WR, −$292**, despite the
+generator backtesting at +$995/58% (180d) / +$343/60% (recent 50d). The
+entry signal is sound — the **v8.3 exit stack inverts the risk/reward**:
+
+| live exit | n | avg return | avg $ |
+|---|---|---|---|
+| stop loss | 13 | −1.04% | **−$40.56** |
+| trailing | 9 | +0.34% | +$13.21 |
+| take profit | 3 | +1.59% | +$61.96 |
+
+The 0.75x-ATR trailing activation + 0.5x-ATR trail distance **banked winners
+at +0.34%** while stops ran the full 1.5x ATR to **−1.04%** — risking ~3x what
+a typical win returned. The 1.5x ATR(1h) stop produced sub-1% stops (several
+BTC stops 0.5–0.8%) that routine noise triggered. Late fills were *not* the
+cause (avg overshoot only +0.08pp).
+
+**A/B sweep — identical entry set, only exits vary** (BTC/ETH/SOL):
+
+| variant | 180d PnL | WR | SL count | avg loss |
+|---|---|---|---|---|
+| current (trail on)* | +$879 | 70% | 30 | −$39 |
+| trail-off (SL1.5/TP2.0) | +$1,480 | 58% | 40 | −$37 |
+| **widerSL (SL2.0/TP2.0)** | **+$1,371** | **63%** | **26** | **−$31** |
+| wider+TP (SL2.0/TP3.0) | +$1,410 | 59% | 28 | −$30 |
+| loose-trail | +$708 | 66% | 24 | −$31 |
+
+`*` trailing rows are optimistic (1h OHLC can't resolve a sub-1% trail) — the
+real live "current" result is −$292. Loosening the trail (not removing it) was
+the worst trail variant, so the mechanism itself hurts on this timeframe.
+
+### Changes
+- `paper_trade_simple.py` rsi_momentum: `trailing_enabled=True→False`,
+  `sl_atr_mult=1.5→2.0` (keep `tp_atr_mult=2.0`). widerSL variant: fewest
+  stop-outs (−⅓), highest WR of clean variants, avg loss halved.
+
+### Caveats / not changed
+- Backtest exits at exact SL/TP and omits reversal/stale exits (added ~−$116
+  live), so real PnL will trail these figures — but those exits exist in both
+  configs, so the relative improvement holds.
+- **Known follow-up:** vol-adjusted sizing reads 1h ATR, which is ~always
+  <1%, pinning the scale at its 1.5x cap → "2% risk" runs at a flat **3%** on
+  every 1h-ATR strategy. Left as a separate, independently-measurable change.
+- bb_squeeze untouched: its closed-candle entry backtests −$747/180d and only
+  works because the live forming-candle entry gets a better fill — do NOT
+  "fix" it to closed candles.
+
+---
+
 ## v8.4.3 — Symbol gating: stop the bleeders (2026-05-13)
 
 **7-day post-v8.4 review** (`scripts/perf_review.py`, `scripts/perf_deep.py`):
