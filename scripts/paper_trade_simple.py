@@ -4010,7 +4010,12 @@ async def main():
     )
     parser.add_argument(
         "--strategies", nargs="+",
-        default=["funding_reversion", "uptrend_pullback", "rsi_momentum", "bb_squeeze", "smart_money"],
+        # v9.0: Concentrated on the one strategy with a demonstrated LIVE edge.
+        # Post-v8.0 (54d): uptrend_pullback +$340/54% WR (live > backtest). The other
+        # 4 active strategies bled -$528 combined (rsi -$388, bb -$92, smart_money -$47,
+        # funding never fires). All three were added on backtests that failed live.
+        # funding_reversion kept as idle optionality (0 trades, costs nothing).
+        default=["funding_reversion", "uptrend_pullback"],
         choices=["funding_reversion", "uptrend_pullback", "rsi_momentum", "bb_squeeze",
                  "trend_breakout", "trend_pullback", "order_flow",
                  "regime_short", "failed_breakout_short", "refined_liq_cascade", "crash_momentum",
@@ -4057,9 +4062,9 @@ async def main():
     # Reallocated $2000 back to proven strategies.
     capital_allocation = {
         "funding_reversion": base_capital * 0.75,      # $750 — rare event, idle capital shared
-        "uptrend_pullback": base_capital * 1.5,        # $1500 — proven +$439/6mo (was $1000)
-        "rsi_momentum": base_capital * 1.5,            # $1500 — proven +$1302/6mo (was $1250)
-        "bb_squeeze": base_capital * 1.5,              # $1500 — proven +$1358/6mo (was $1250)
+        "uptrend_pullback": base_capital * 3.0,        # v9.0: $3000 (2x) — concentrate on the one live winner (+$340/54d). 180d backtest +$902/60.9% WR, maxDD $251
+        "rsi_momentum": base_capital * 1.5,            # disabled v9.0 (live -$388/35% post-v8.0 — backtest +$1302 didn't hold)
+        "bb_squeeze": base_capital * 1.5,              # disabled v9.0 (live -$92/29% — backtest +$1358 didn't hold)
         "trend_breakout": base_capital * 0.5,          # disabled by default
         "trend_pullback": base_capital * 0.5,          # disabled by default
         "order_flow": base_capital * 0.5,              # disabled — proven loser in live
@@ -4067,7 +4072,7 @@ async def main():
         "failed_breakout_short": base_capital * 0.5,   # disabled
         "refined_liq_cascade": base_capital * 0.5,     # disabled
         "crash_momentum": base_capital * 0.5,          # disabled
-        "smart_money": base_capital * 1.0,             # $1000 — whale/sentiment
+        "smart_money": base_capital * 1.0,             # disabled v9.0 (live -$47/39% over 241 trades — no edge)
     }
 
     strategy_configs = []

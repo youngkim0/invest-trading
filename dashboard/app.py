@@ -530,7 +530,7 @@ Keep response under 500 words."""
 def main():
     st.title("📈 AI Trading Dashboard")
     kst_now = datetime.now(timezone.utc) + timedelta(hours=9)
-    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v8.3 started: Apr 26, 2026 | v8.5 (rsi_momentum: trailing off + 2.0x ATR stop)")
+    st.caption(f"Last updated: {kst_now.strftime('%Y-%m-%d %H:%M:%S KST')} | v8.3 started: Apr 26, 2026 | v9.0 (concentrated: uptrend_pullback 2x; rsi/bb/smart_money disabled)")
 
     # Auto refresh + strategy selector
     col1, col2, col3 = st.columns([2.5, 1.5, 1])
@@ -607,15 +607,17 @@ def main():
     # ============================================
     # PORTFOLIO VALUE BANNER (at the top)
     # ============================================
-    # Only count active strategies for portfolio calculation
+    # Portfolio accounting: keep disabled strategies in the set so their REALIZED
+    # history still counts (excluding them would falsely inflate the equity curve).
+    # v9.0 disabled rsi_momentum/bb_squeeze/smart_money — they generate no new trades.
     ACTIVE_STRATEGIES = {"funding_reversion", "uptrend_pullback", "rsi_momentum", "bb_squeeze",
                           "smart_money"}
     STRATEGY_CAPITAL = {
         "funding_reversion": 750.0,
-        "uptrend_pullback": 1500.0,
-        "rsi_momentum": 1500.0,
-        "bb_squeeze": 1500.0,
-        "smart_money": 1000.0,
+        "uptrend_pullback": 3000.0,   # v9.0: 2x (was 1500)
+        "rsi_momentum": 1500.0,       # disabled v9.0 (historical only)
+        "bb_squeeze": 1500.0,         # disabled v9.0 (historical only)
+        "smart_money": 1000.0,        # disabled v9.0 (historical only)
     }
 
     if strategy_filter is None:

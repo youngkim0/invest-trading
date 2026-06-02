@@ -1,5 +1,55 @@
 # Paper Trader Changelog
 
+## v9.0 — Concentrate on the one strategy with a live edge (2026-06-03)
+
+**Strategic review, not a tweak.** Post-v8.0 (54 days) the "evidence-based
+5-strategy" book did **693 trades for −$400 (−6.4% on capital) while BTC
+buy-and-hold was −1.9%** — i.e. it traded 12.8x/day to underperform doing
+nothing. Per-strategy, only ONE has a live edge:
+
+| strategy | n | WR | PnL | $/trade |
+|---|---|---|---|---|
+| **uptrend_pullback** | 102 | **54%** | **+$340** | **+$3.33** |
+| smart_money | 241 | 39% | −$47 | −$0.20 |
+| bb_squeeze | 102 | 29% | −$92 | −$0.91 |
+| rsi_momentum | 54 | 35% | −$388 | −$7.19 |
+| funding_reversion | 0 | — | $0 | never fires |
+
+The four losers were each added on a **backtest that failed live**
+(rsi backtested +$1,302/64%, bb +$1,358/82%) — the v6.9.3 over-optimization
+lesson repeating at the portfolio level. uptrend_pullback is the only one
+where **live (+$340/54%) beat its backtest (+$439/44.7%)** — and it has a
+built-in regime filter (SMA20>SMA50 & price>SMA50), so it simply won't fire
+in downtrends.
+
+### Changes
+- **Disabled** rsi_momentum, bb_squeeze, smart_money (default `--strategies`
+  now `funding_reversion, uptrend_pullback`). Stops ~−$528/54d of bleed.
+- **uptrend_pullback capital $1,500 → $3,000** (2x). Pool sizing scales
+  per-trade size with allocation, so ~2x PnL and ~2x drawdown. User chose
+  the moderate 2x tier (proj ~+$680/54d, est. maxDD ~$750 / 12% of book).
+- funding_reversion kept at $750 as idle optionality (0 trades, costs
+  nothing; pads the shared pool).
+
+### Validation (backtest before deploy)
+- uptrend_pullback 180d on BTC/ETH/SOL/DOGE/AVAX: 235 trades, **60.9% WR,
+  +$902 (trail) / +$49 (plain floor), maxDD $251**, positive 5 of 6 months.
+- **Did NOT add per-symbol gating** to uptrend_pullback: live and backtest
+  CONTRADICT each other on which symbols are best (backtest DOGE −$347 / BTC
+  +$276; live DOGE +$176 / BTC −$29). Samples too small (13–30 trades/symbol)
+  to gate reliably — only XRP is consistently bad and was already excluded
+  (v8.4.3). The robust signal is the strategy-level edge, not per-symbol.
+
+### Not changed / watch
+- Dashboard keeps disabled strategies in portfolio accounting so their
+  realized losses stay in the equity curve (excluding would inflate it).
+- Re-evaluate the 2x sizing after ~2–3 weeks of live data; dial up/down by
+  changing the `uptrend_pullback` capital multiple.
+- Deferred follow-up still open: vol-adjust sizing pins 2%→3% on 1h ATR
+  (now matters more at 2x size). See v8.5 entry.
+
+---
+
 ## v8.5 — RSI momentum: fix the inverted exit R:R (2026-05-27)
 
 **Honest review of rsi_momentum** (`scripts/check_performance.py` + ad-hoc
