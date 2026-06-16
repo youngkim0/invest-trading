@@ -1,5 +1,31 @@
 # Paper Trader Changelog
 
+## ARCHIVED — Project shut down (2026-06-16)
+
+**Final entry.** The bot is retired. See `RETROSPECTIVE.md` for the full
+postmortem.
+
+**Why:** After ~9 major iterations the system never showed a durable edge.
+The decisive evidence: post-v8.0 over 54 days the book traded 693 times for
+**−6.4% (−$400)** while BTC buy-and-hold was **−1.9%** — heavy trading to
+underperform doing nothing. Only uptrend_pullback had any live edge (+$340/54d,
+54% WR), and that sample is too small to bet real money on. The recurring root
+cause was **backtest→live divergence**: every strategy was added on a strong
+backtest and removed after live losses (rsi +$1,302 bt → −$388 live; bb +$1,358
+bt → −$92 live). When the backtest can't predict live, further tuning is a coin
+flip.
+
+**Verdict:** Succeeded as a learning/engineering project (full live-data →
+strategy → execution → storage → dashboard → review pipeline + the hard lesson
+that naive backtested edges don't survive contact with the market). Did not
+succeed as a profit engine. Stopped rather than iterating further.
+
+**Shutdown actions:** GCP `paper-trader` systemd service stopped + disabled
+(no reboot restart) → halts Supabase writes / DB overflow at the source. Code
+left intact and runnable; nothing deleted.
+
+---
+
 ## v9.0 — Concentrate on the one strategy with a live edge (2026-06-03)
 
 **Strategic review, not a tweak.** Post-v8.0 (54 days) the "evidence-based
